@@ -1,0 +1,39 @@
+{
+  "workspaces": {
+    "agent-tracker": {
+      "base_path": "/Users/heygo/.config/agent-tracker",
+      "main_branch": "master",
+      "worktree_dir": ".worktrees"
+    }
+  },
+  "agents": {
+    "claude": {
+      "command": "claude",
+      "color": "#f5a623",
+      "icon": "🤖"
+    },
+    "opencode": {
+      "command": "opencode",
+      "color": "#7ed321",
+      "icon": "💻"
+    }
+  },
+  "layouts": {
+    "default": {
+      "panes": [
+        { "cmd": "yazi", "size": "30%" },
+        { "cmd": "lazygit", "size": "30%" },
+        { "cmd": "{agent}", "size": "40%" }
+      ]
+    },
+    "focus": {
+      "panes": [
+        { "cmd": "{agent}", "size": "100%" }
+      ]
+    }
+  },
+  "defaults": {
+    "layout": "default",
+    "agent": "claude"
+  }
+}

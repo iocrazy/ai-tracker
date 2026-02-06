@@ -1,0 +1,25 @@
+# Rust
+src/rust/target/
+**/*.rs.bk
+
+# Node
+web/node_modules/
+web/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# 运行时数据（不应该在源码仓库）
+*.db
+*.log
+*.pid
+
+# 本地配置
+agent-config.json

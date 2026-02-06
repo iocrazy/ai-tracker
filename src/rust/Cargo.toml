@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tracker-core",
+    "crates/tracker-server",
+    "crates/tracker-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["heygo"]
+license = "MIT"
+repository = "https://github.com/heygo/agent-tracker"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TUI
+ratatui = "0.28"
+crossterm = "0.28"
+
+# Web
+axum = { version = "0.7", features = ["ws"] }
+futures-util = "0.3"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+tokio-tungstenite = "0.24"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Utils
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "6"
+regex = "1"

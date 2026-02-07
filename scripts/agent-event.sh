@@ -5,7 +5,7 @@
 # Actions: start, finish, pause
 # Agents: claude, opencode, codex, cursor, ...
 
-TRACKER_BIN="$HOME/.config/agent-tracker/bin/tracker-client"
+TRACKER_URL="http://127.0.0.1:3099"
 NOTIFY_SCRIPT="$HOME/.config/agent-tracker/scripts/notify.py"
 LOG_FILE="$HOME/.config/agent-tracker/logs/agent-event.log"
 
@@ -60,42 +60,36 @@ if [[ -z "$SESSION_ID" || -z "$WINDOW_ID" || -z "$PANE" ]]; then
     fi
 fi
 
-# Check tracker-client
-if [[ ! -x "$TRACKER_BIN" ]]; then
-    log "ERROR: tracker-client not found"
-    exit 1
-fi
-
-log "ACTION=$ACTION AGENT=$AGENT SUMMARY=${SUMMARY:0:50}..."
-
-# Build args
-ARGS=("command")
-[[ -n "$SESSION_ID" ]] && ARGS+=("--session-id" "$SESSION_ID")
-[[ -n "$SESSION_NAME" ]] && ARGS+=("--session" "$SESSION_NAME")
-[[ -n "$WINDOW_ID" ]] && ARGS+=("--window-id" "$WINDOW_ID")
-[[ -n "$WINDOW_NAME" ]] && ARGS+=("--window" "$WINDOW_NAME")
-[[ -n "$PANE" ]] && ARGS+=("--pane" "$PANE")
-[[ -n "$SUMMARY" ]] && ARGS+=("--summary" "$SUMMARY")
-[[ -n "$TRANSCRIPT" ]] && ARGS+=("--transcript" "$TRANSCRIPT")
-
+# Map action to command
 case "$ACTION" in
-    start)
-        ARGS+=("start_task")
-        ;;
-    finish)
-        ARGS+=("finish_task")
-        ;;
-    pause)
-        ARGS+=("pause_task")
-        ;;
+    start)   COMMAND="start_task" ;;
+    finish)  COMMAND="finish_task" ;;
+    pause)   COMMAND="pause_task" ;;
     *)
         log "ERROR: Unknown action: $ACTION"
         exit 1
         ;;
 esac
 
-log "Running: $TRACKER_BIN ${ARGS[*]}"
-"$TRACKER_BIN" "${ARGS[@]}" >> "$LOG_FILE" 2>&1 || true
+log "ACTION=$ACTION AGENT=$AGENT SUMMARY=${SUMMARY:0:50}..."
+
+# Build JSON payload and send via HTTP
+PAYLOAD=$(jq -n \
+    --arg command "$COMMAND" \
+    --arg session_id "$SESSION_ID" \
+    --arg session "$SESSION_NAME" \
+    --arg window_id "$WINDOW_ID" \
+    --arg window "$WINDOW_NAME" \
+    --arg pane "$PANE" \
+    --arg summary "$SUMMARY" \
+    --arg transcript_path "$TRANSCRIPT" \
+    '{command: $command, session_id: $session_id, session: $session, window_id: $window_id, window: $window, pane: $pane, summary: $summary, transcript_path: $transcript_path}')
+
+log "POST $TRACKER_URL/api/command: $PAYLOAD"
+RESPONSE=$(curl -s -m 5 -X POST "$TRACKER_URL/api/command" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" 2>&1)
+log "Response: $RESPONSE"
 
 # Send notification for finish action
 if [[ "$ACTION" == "finish" && -f "$NOTIFY_SCRIPT" ]]; then

@@ -238,17 +238,6 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
                                     </button>
                                 </div>
 
-                                {/* Close Window Button - Hidden on mobile, shown on desktop hover */}
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        onRequestDeleteWindow(session.id, window.id, window.name);
-                                    }}
-                                    className="absolute -top-3 -left-3 z-30 bg-black border border-red-900 text-red-800 p-1.5 rounded-full hover:bg-red-900 hover:text-white hover:border-red-500 hidden sm:flex sm:opacity-0 group-hover:opacity-100 transition-all shadow-lg items-center justify-center"
-                                    title="Close Window"
-                                >
-                                    <Trash2 className="w-4 h-4" />
-                                </button>
 
                                 {/* Window Card */}
                                 <div className={`

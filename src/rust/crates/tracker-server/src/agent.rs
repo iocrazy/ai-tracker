@@ -481,6 +481,26 @@ impl TmuxAgent {
         Ok(())
     }
 
+    /// Create a simple new window in a session with a specific working directory
+    pub async fn simple_new_window_with_dir(session: &str, name: &str, working_dir: &str) -> Result<()> {
+        let actual_session = Self::find_session(session)
+            .await
+            .unwrap_or_else(|| session.to_string());
+
+        let output = Command::new(TMUX_BIN)
+            .args(["new-window", "-t", &actual_session, "-n", name, "-c", working_dir])
+            .output()
+            .await
+            .context("Failed to create tmux window")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux new-window failed: {}", stderr);
+        }
+
+        Ok(())
+    }
+
     /// Kill a window (or session if last window)
     pub async fn kill_window(workspace: &str, branch: &str) -> Result<()> {
         // Find the actual session name

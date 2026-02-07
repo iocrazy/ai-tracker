@@ -46,5 +46,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Utils
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
 dirs = "6"
 regex = "1"

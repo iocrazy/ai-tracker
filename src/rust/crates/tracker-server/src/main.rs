@@ -3747,8 +3747,8 @@ async fn resume_closed_window(
 ) -> Json<CommandResponse> {
     use std::path::Path;
 
-    // Create new window
-    if let Err(e) = agent::TmuxAgent::simple_new_window(&req.session, &req.window_name).await {
+    // Create new window with correct working directory
+    if let Err(e) = agent::TmuxAgent::simple_new_window_with_dir(&req.session, &req.window_name, &req.working_dir).await {
         return Json(CommandResponse {
             success: false,
             message: format!("Failed to create window: {}", e),
@@ -3797,6 +3797,124 @@ async fn resume_closed_window(
         success: true,
         message: format!("Window '{}' resumed with {} layout", req.window_name, layout_type),
     })
+}
+
+/// Send image request
+#[derive(Deserialize)]
+struct SendImageRequest {
+    session: String,
+    window_id: String,
+    pane: String,
+    image_base64: String,  // data:image/png;base64,xxx
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SendImageResponse {
+    success: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_path: Option<String>,
+}
+
+/// Save base64 image to temp file and send path via tmux send-keys
+async fn tmux_send_image(Json(req): Json<SendImageRequest>) -> Json<SendImageResponse> {
+    use base64::Engine;
+    use std::io::Write;
+
+    // Parse data URL: data:image/png;base64,xxxxx
+    let data_part = if let Some(comma_pos) = req.image_base64.find(',') {
+        &req.image_base64[comma_pos + 1..]
+    } else {
+        &req.image_base64
+    };
+
+    // Detect extension from MIME type
+    let ext = if req.image_base64.starts_with("data:image/png") {
+        "png"
+    } else if req.image_base64.starts_with("data:image/jpeg") || req.image_base64.starts_with("data:image/jpg") {
+        "jpg"
+    } else if req.image_base64.starts_with("data:image/gif") {
+        "gif"
+    } else if req.image_base64.starts_with("data:image/webp") {
+        "webp"
+    } else {
+        "png" // default
+    };
+
+    // Decode base64
+    let image_data = match base64::engine::general_purpose::STANDARD.decode(data_part) {
+        Ok(data) => data,
+        Err(e) => {
+            return Json(SendImageResponse {
+                success: false,
+                message: format!("Failed to decode base64: {}", e),
+                image_path: None,
+            });
+        }
+    };
+
+    // Write to temp file
+    let filename = format!("agent-tracker-img-{}.{}", Uuid::new_v4(), ext);
+    let tmp_path = std::path::PathBuf::from("/tmp").join(&filename);
+
+    if let Err(e) = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(&image_data)?;
+        Ok(())
+    })() {
+        return Json(SendImageResponse {
+            success: false,
+            message: format!("Failed to write image file: {}", e),
+            image_path: None,
+        });
+    }
+
+    let image_path = tmp_path.to_string_lossy().to_string();
+
+    // Step 1: Send image path + Enter (Claude Code will detect and attach as [Image #N])
+    if let Err(e) = agent::TmuxAgent::send_keys_with_suffix(
+        &req.session,
+        &req.window_id,
+        &req.pane,
+        &image_path,
+        Some("Enter"),
+    )
+    .await
+    {
+        return Json(SendImageResponse {
+            success: false,
+            message: format!("Failed to send image path: {}", e),
+            image_path: Some(image_path),
+        });
+    }
+
+    // Step 2: Wait for Claude Code to process the image attachment
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Step 3: Send message text + Enter to submit (or just Enter if no message)
+    let msg_text = req.message.as_deref().unwrap_or("").trim().to_string();
+    match agent::TmuxAgent::send_keys_with_suffix(
+        &req.session,
+        &req.window_id,
+        &req.pane,
+        &msg_text,
+        Some("Enter"),
+    )
+    .await
+    {
+        Ok(()) => Json(SendImageResponse {
+            success: true,
+            message: "Image sent successfully".to_string(),
+            image_path: Some(image_path),
+        }),
+        Err(e) => Json(SendImageResponse {
+            success: false,
+            message: format!("Failed to send message: {}", e),
+            image_path: Some(image_path),
+        }),
+    }
 }
 
 /// Select window request
@@ -4065,6 +4183,7 @@ async fn main() -> Result<()> {
         .route("/api/tmux/closed-windows/:session", get(get_closed_windows))
         .route("/api/tmux/closed-windows", delete(delete_closed_window))
         .route("/api/tmux/resume-window", post(resume_closed_window))
+        .route("/api/tmux/send-image", post(tmux_send_image))
         .route("/api/tmux/new-window", post(tmux_new_window))
         .route("/api/tmux/select-window", post(tmux_select_window))
         // Stream (real-time pane output)

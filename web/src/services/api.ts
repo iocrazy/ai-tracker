@@ -235,6 +235,28 @@ export async function tmuxSendKeys(
   return response.json();
 }
 
+// Send image to a tmux pane (saves to temp file, sends path via send-keys)
+export async function sendImage(
+  session: string,
+  windowId: string,
+  pane: string,
+  imageBase64: string,
+  message?: string
+): Promise<{ success: boolean; message: string; image_path?: string }> {
+  const response = await fetch(`${API_BASE}/tmux/send-image`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session,
+      window_id: windowId,
+      pane,
+      image_base64: imageBase64,
+      message,
+    }),
+  });
+  return response.json();
+}
+
 // Execute arbitrary tmux command (parse and route to appropriate API)
 export async function executeTmuxCommand(command: string): Promise<{ success: boolean; message: string }> {
   // Parse tmux send-keys command with quoted keys

@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { X, MessageSquare, Send } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { X, MessageSquare, Send, Paperclip, XCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { tmuxSendKeys } from '../services/api';
+import { tmuxSendKeys, sendImage } from '../services/api';
 import { ClaudeStatus } from '../types';
 
 export interface ChatMessage {
@@ -35,6 +35,9 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const [isSending, setIsSending] = useState(false);
   const [sendStatus, setSendStatus] = useState<SendStatus>('idle');
   const [isAtBottom, setIsAtBottom] = useState(true);  // Track if user is at bottom
+  const [pendingImage, setPendingImage] = useState<{ file: File; preview: string } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Reset send status after a delay
   useEffect(() => {
@@ -44,8 +47,78 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     }
   }, [sendStatus]);
 
+  const fileToBase64 = useCallback((file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }, []);
+
+  const handleImageFile = useCallback((file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    const preview = URL.createObjectURL(file);
+    setPendingImage({ file, preview });
+  }, []);
+
+  const clearPendingImage = useCallback(() => {
+    if (pendingImage) {
+      URL.revokeObjectURL(pendingImage.preview);
+      setPendingImage(null);
+    }
+  }, [pendingImage]);
+
+  const handlePaste = useCallback((e: ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) handleImageFile(file);
+        return;
+      }
+    }
+  }, [handleImageFile]);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith('image/')) {
+      handleImageFile(file);
+    }
+  }, [handleImageFile]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  }, []);
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleImageFile(file);
+    // Reset so same file can be selected again
+    e.target.value = '';
+  }, [handleImageFile]);
+
+  // Listen for paste events when modal is open
+  useEffect(() => {
+    if (!isOpen) return;
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [isOpen, handlePaste]);
+
   const handleSend = async () => {
-    if (!inputValue.trim() || !sessionName || !windowId || isSending) return;
+    const hasText = inputValue.trim().length > 0;
+    const hasImage = pendingImage !== null;
+    if ((!hasText && !hasImage) || !sessionName || !windowId || isSending) return;
 
     const msgText = inputValue.trim();
     setInputValue('');
@@ -53,10 +126,25 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     setSendStatus('sending');
 
     try {
-      // Send to tmux window at configured pane (where Claude runs)
       const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
-      const result = await tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter');
-      setSendStatus(result.success ? 'success' : 'failed');
+
+      if (pendingImage) {
+        // Send image (with optional text message)
+        const base64 = await fileToBase64(pendingImage.file);
+        const result = await sendImage(
+          sessionName,
+          windowId,
+          targetPane,
+          base64,
+          msgText || undefined
+        );
+        clearPendingImage();
+        setSendStatus(result.success ? 'success' : 'failed');
+      } else {
+        // Text-only message
+        const result = await tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter');
+        setSendStatus(result.success ? 'success' : 'failed');
+      }
     } catch (error) {
       console.error('Failed to send message:', error);
       setSendStatus('failed');
@@ -173,7 +261,20 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
         </div>
 
         {/* Content */}
-        <div ref={scrollRef} onScroll={checkIsAtBottom} className="flex-grow overflow-y-auto overflow-x-hidden p-3 sm:p-4 space-y-2 sm:space-y-3 custom-scrollbar font-mono scroll-smooth">
+        <div
+          ref={scrollRef}
+          onScroll={checkIsAtBottom}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          className={`flex-grow overflow-y-auto overflow-x-hidden p-3 sm:p-4 space-y-2 sm:space-y-3 custom-scrollbar font-mono scroll-smooth relative ${isDragging ? 'ring-2 ring-green-400 ring-inset' : ''}`}
+        >
+            {/* Drag overlay */}
+            {isDragging && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 border-2 border-dashed border-green-400 pointer-events-none">
+                <span className="text-green-400 text-lg font-mono tracking-wider">DROP IMAGE HERE</span>
+              </div>
+            )}
             {messages.length === 0 ? (
                 <div className="text-center text-green-900 py-8 italic text-base sm:text-lg">NO_DATA_FOUND_IN_ARCHIVE</div>
             ) : (
@@ -210,7 +311,40 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
         {/* Input Area */}
         {sessionName && windowId && (
           <div className="p-2 sm:p-3 border-t border-green-800 bg-green-900/10 flex-shrink-0">
+            {/* Image preview */}
+            {pendingImage && (
+              <div className="mb-2 flex items-start gap-2 p-2 border border-green-800 bg-green-900/20">
+                <img
+                  src={pendingImage.preview}
+                  alt="Preview"
+                  className="max-h-24 max-w-[200px] object-contain border border-green-800"
+                />
+                <button
+                  onClick={clearPendingImage}
+                  className="text-green-700 hover:text-red-400 transition-colors flex-shrink-0"
+                  title="Remove image"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+            )}
             <div className="flex gap-2">
+              {/* Paperclip button */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isSending}
+                className="px-2 py-2 text-green-700 hover:text-green-400 disabled:opacity-30 transition-colors flex-shrink-0"
+                title="Attach image"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleFileSelect}
+                className="hidden"
+              />
               <input
                 ref={inputRef}
                 type="text"
@@ -223,7 +357,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
               />
               <button
                 onClick={handleSend}
-                disabled={!inputValue.trim() || isSending}
+                disabled={(!inputValue.trim() && !pendingImage) || isSending}
                 className="px-4 py-2 bg-green-900/50 border border-green-700 text-green-400 hover:bg-green-800 hover:text-green-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               >
                 <Send className="w-4 h-4" />
@@ -258,7 +392,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
             </div>
             {/* Help line */}
             <div className="flex justify-between items-center">
-                <span className="text-[10px] sm:text-xs text-green-800 uppercase tracking-widest">SCROLL: [J/K] • CLOSE: [ESC]</span>
+                <span className="text-[10px] sm:text-xs text-green-800 uppercase tracking-widest">SCROLL: [J/K] • IMG: [⌘V/📎] • CLOSE: [ESC]</span>
                 <span className="text-[10px] sm:text-xs text-green-800 uppercase tracking-wider">LIVE_CHAT</span>
             </div>
         </div>

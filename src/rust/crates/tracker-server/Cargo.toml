@@ -41,5 +41,6 @@ rusqlite = { workspace = true }
 # Utils
 chrono = { workspace = true }
 uuid = { workspace = true }
+base64 = { workspace = true }
 dirs = { workspace = true }
 regex = { workspace = true }

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { TimelineEvent } from '../types';
-import { Search, X, RefreshCw, Download, ChevronDown, ChevronLeft, ChevronRight, MessageSquare, Wrench } from 'lucide-react';
+import { Search, X, RefreshCw, Download, ChevronDown, ChevronLeft, ChevronRight, MessageSquare, Wrench, FileSearch } from 'lucide-react';
 import { fetchHistory, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory } from '../services/api';
+import { SearchHighlight } from './SearchHighlight';
 
 interface TimelineViewProps {
   events: TimelineEvent[];
@@ -32,10 +33,16 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
   const [perPage] = useState(50);
   const [total, setTotal] = useState(0);
 
+  // Deep search (server-side full-text)
+  const [deepQuery, setDeepQuery] = useState('');
+  const [deepSearchInput, setDeepSearchInput] = useState('');
+  const [isDeepSearchOpen, setIsDeepSearchOpen] = useState(false);
+
   // Fetched history data
   const [historyData, setHistoryData] = useState<HistoryResponse | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const deepSearchInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -60,6 +67,18 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
     };
   }, []);
 
+  // Deep search handlers
+  const handleDeepSearch = useCallback(() => {
+    setDeepQuery(deepSearchInput);
+    setPage(1);
+  }, [deepSearchInput]);
+
+  const closeDeepSearch = useCallback(() => {
+    setIsDeepSearchOpen(false);
+    setDeepSearchInput('');
+    setDeepQuery('');
+  }, []);
+
   // Fetch history data
   const loadHistory = useCallback(async () => {
     setIsLoading(true);
@@ -69,8 +88,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
         page,
         per_page: perPage,
       };
-      if (search) {
-        params.search = search;
+      if (deepQuery) {
+        params.search = deepQuery;
       }
       const data = await fetchHistory(params);
       setHistoryData(data);
@@ -80,7 +99,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
     } finally {
       setIsLoading(false);
     }
-  }, [timeRange, page, perPage, search]);
+  }, [timeRange, page, perPage, deepQuery]);
 
   // Initial load and refresh on filter change
   useEffect(() => {
@@ -128,7 +147,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
   const handleExport = useCallback(async () => {
     try {
       const params: HistoryQueryParams = { range: timeRange };
-      if (search) params.search = search;
+      if (deepQuery) params.search = deepQuery;
       const blob = await exportHistory(params, 'json');
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -139,15 +158,25 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
     } catch (error) {
       console.error('Export failed:', error);
     }
-  }, [timeRange, search]);
+  }, [timeRange, deepQuery]);
 
   // Handle Keyboard Shortcuts
   useEffect(() => {
     if (!isActive) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore navigation keys if typing in search
-      if (document.activeElement === searchInputRef.current && e.key !== 'Escape' && e.key !== 'Enter') {
+      // Ignore navigation keys if typing in search inputs
+      const isInFilter = document.activeElement === searchInputRef.current;
+      const isInDeepSearch = document.activeElement === deepSearchInputRef.current;
+      if ((isInFilter || isInDeepSearch) && e.key !== 'Escape' && e.key !== 'Enter') {
+        return;
+      }
+
+      // Enter in deep search submits
+      if (isInDeepSearch && e.key === 'Enter') {
+        e.preventDefault();
+        handleDeepSearch();
+        deepSearchInputRef.current?.blur();
         return;
       }
 
@@ -173,6 +202,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
           e.preventDefault();
           searchInputRef.current?.focus();
           break;
+        case 's':
+          e.preventDefault();
+          setIsDeepSearchOpen(true);
+          setTimeout(() => deepSearchInputRef.current?.focus(), 0);
+          break;
         case 'l':
         case 'Enter':
           e.preventDefault();
@@ -192,9 +226,18 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
         case 'Escape':
           if (showHelp) {
             setShowHelp(false);
+          } else if (isInDeepSearch) {
+            deepSearchInputRef.current?.blur();
+            if (!deepQuery) {
+              setIsDeepSearchOpen(false);
+            }
+          } else if (isDeepSearchOpen && deepQuery) {
+            closeDeepSearch();
+          } else if (isDeepSearchOpen) {
+            setIsDeepSearchOpen(false);
           } else if (showTimeRangeDropdown) {
             setShowTimeRangeDropdown(false);
-          } else if (document.activeElement === searchInputRef.current) {
+          } else if (isInFilter) {
             searchInputRef.current?.blur();
           }
           break;
@@ -214,7 +257,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isActive, filteredEvents, selectedIndex, onViewDetails, showHelp, showTimeRangeDropdown, loadHistory, handleExport, page, total, perPage]);
+  }, [isActive, filteredEvents, selectedIndex, onViewDetails, showHelp, showTimeRangeDropdown, isDeepSearchOpen, deepQuery, loadHistory, handleDeepSearch, closeDeepSearch, handleExport, page, total, perPage]);
 
   // Auto-scroll to selected item
   useEffect(() => {
@@ -299,8 +342,57 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
               >
                 <Download className="w-4 h-4" />
               </button>
+              <button
+                onClick={() => {
+                  setIsDeepSearchOpen(o => !o);
+                  if (!isDeepSearchOpen) {
+                    setTimeout(() => deepSearchInputRef.current?.focus(), 0);
+                  }
+                }}
+                className={`p-2 rounded transition-colors ${
+                  deepQuery
+                    ? 'text-yellow-400 bg-yellow-900/20 hover:text-yellow-300'
+                    : 'text-green-600 hover:text-green-400 hover:bg-green-900/20'
+                }`}
+                title="全文搜索 [S]"
+              >
+                <FileSearch className="w-4 h-4" />
+              </button>
             </div>
         </div>
+
+        {/* Deep Search Bar */}
+        {isDeepSearchOpen && (
+          <div className="px-3 sm:px-6 py-2 border-b border-green-900/30 bg-black/90 flex items-center gap-2 flex-shrink-0">
+            <FileSearch className="w-4 h-4 text-yellow-500 flex-shrink-0" />
+            <input
+              ref={deepSearchInputRef}
+              type="text"
+              value={deepSearchInput}
+              onChange={(e) => setDeepSearchInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleDeepSearch();
+                }
+              }}
+              placeholder="全文搜索 summary + note ... [Enter 确认]"
+              className="bg-black border-b border-yellow-800 text-yellow-400 font-mono focus:outline-none focus:border-yellow-400 placeholder-yellow-900/60 flex-1 py-1 text-sm"
+            />
+            {deepQuery && (
+              <span className="text-yellow-600 text-xs font-mono flex-shrink-0">
+                匹配: {filteredEvents.length}
+              </span>
+            )}
+            <button
+              onClick={closeDeepSearch}
+              className="text-yellow-700 hover:text-yellow-400 flex-shrink-0"
+              title="关闭搜索 [Esc]"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
 
         {/* Full Page List Container */}
         <div ref={containerRef} className="flex-grow p-3 sm:p-6 pl-6 sm:pl-10 overflow-y-auto">
@@ -382,7 +474,17 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
                                             <div className={`text-base sm:text-lg font-sans tracking-wide leading-relaxed max-w-3xl transition-colors
                                                 ${isSelected ? 'text-green-100' : 'text-green-500/80'}
                                             `}>
-                                                {event.description}
+                                                {deepQuery ? (
+                                                  <SearchHighlight
+                                                    text={event.description}
+                                                    query={deepQuery}
+                                                    currentIndex={-1}
+                                                    startMatchIndex={0}
+                                                    onRegisterMatch={() => {}}
+                                                  />
+                                                ) : (
+                                                  event.description
+                                                )}
                                             </div>
                                         </div>
                                     </div>
@@ -429,7 +531,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
 
         {/* Shortcut hint footer */}
         <div className="fixed bottom-4 right-4 text-[10px] text-green-800 font-mono bg-black/80 px-2 py-1 border border-green-900 z-50">
-            HELP: [SHIFT+?]
+            FILTER: [/] | SEARCH: [S] | HELP: [SHIFT+?]
         </div>
 
         {/* Help Panel Modal */}
@@ -465,7 +567,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
                   <div className="text-green-300">查看详情</div>
 
                   <div className="text-green-600 pl-2 sm:pl-4">/</div>
-                  <div className="text-green-300">搜索</div>
+                  <div className="text-green-300">筛选</div>
+
+                  <div className="text-green-600 pl-2 sm:pl-4">S</div>
+                  <div className="text-green-300">全文搜索</div>
 
                   <div className="text-green-600 pl-2 sm:pl-4">R</div>
                   <div className="text-green-300">刷新</div>

@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { X, MessageSquare, FileText, Wrench, GitCommit, Clock, Check, XCircle, ChevronRight } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { X, MessageSquare, FileText, Wrench, GitCommit, Clock, Check, XCircle, ChevronRight, Search, ChevronUp, ChevronDown } from 'lucide-react';
 import { fetchHistoryDetail, HistoryDetail, ConversationMessage, ToolUsageRecord, GitCommitRecord, formatDuration } from '../services/api';
+import { useSearch } from '../hooks/useSearch';
+import { SearchHighlight, countMatches } from './SearchHighlight';
 
 interface HistoryDetailModalProps {
   historyId: number;
@@ -27,6 +29,63 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const search = useSearch();
+
+  // Collect all searchable text blocks for the current tab
+  const searchableTexts = useMemo(() => {
+    if (!detail || !search.query) return [];
+    switch (activeTab) {
+      case 'messages':
+        return (detail.messages || []).map(m => m.content);
+      case 'summary':
+        return [detail.summary, detail.completion_note, detail.resume_command].filter(Boolean) as string[];
+      case 'tools':
+        return (detail.tool_usage || []).flatMap(t => [t.tool_name, t.tool_args, t.result_summary].filter(Boolean));
+      case 'commits':
+        return (detail.commits || []).flatMap(c => [c.commit_hash, c.commit_message].filter(Boolean));
+      default:
+        return [];
+    }
+  }, [detail, activeTab, search.query]);
+
+  // Count total matches and update search state
+  useEffect(() => {
+    if (!search.query) {
+      search.resetMatches(0);
+      return;
+    }
+    let total = 0;
+    for (const text of searchableTexts) {
+      total += countMatches(text, search.query);
+    }
+    search.resetMatches(total);
+  }, [search.query, searchableTexts]);
+
+  // Focus search input when activated
+  useEffect(() => {
+    if (search.isActive) {
+      searchInputRef.current?.focus();
+    }
+  }, [search.isActive]);
+
+  // Close search when switching tabs
+  useEffect(() => {
+    if (search.isActive) {
+      search.setQuery('');
+      search.resetMatches(0);
+    }
+  }, [activeTab]);
+
+  // Helper: get the startMatchIndex for a given text block index
+  const getStartMatchIndex = useCallback((textIndex: number) => {
+    if (!search.query) return 0;
+    let total = 0;
+    for (let i = 0; i < textIndex; i++) {
+      total += countMatches(searchableTexts[i] || '', search.query);
+    }
+    return total;
+  }, [searchableTexts, search.query]);
 
   // Fetch detail data
   useEffect(() => {
@@ -53,13 +112,56 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInSearchInput = target === searchInputRef.current;
+
       // Prevent all keyboard events from bubbling to main page
       e.stopPropagation();
 
+      // When search input is focused, only handle Escape and Enter
+      if (isInSearchInput) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          search.close();
+          return;
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (e.shiftKey) {
+            search.prev();
+          } else {
+            search.next();
+          }
+          return;
+        }
+        return; // Let normal typing work
+      }
+
       switch (e.key) {
         case 'Escape':
+        case 'q':
           e.preventDefault();
-          onClose();
+          if (search.isActive) {
+            search.close();
+          } else {
+            onClose();
+          }
+          break;
+        case '/':
+          e.preventDefault();
+          search.open();
+          break;
+        case 'n':
+          e.preventDefault();
+          if (search.isActive) {
+            search.next();
+          }
+          break;
+        case 'N':
+          e.preventDefault();
+          if (search.isActive) {
+            search.prev();
+          }
           break;
         case '1':
           e.preventDefault();
@@ -96,7 +198,7 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
 
     window.addEventListener('keydown', handleKeyDown, true); // Use capture phase
     return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, search]);
 
   if (!isOpen) return null;
 
@@ -107,36 +209,49 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
 
     return (
       <div className="space-y-4">
-        {messages.map((msg, index) => (
-          <div
-            key={index}
-            className={`p-4 rounded border ${
-              msg.role === 'user'
-                ? 'bg-blue-900/20 border-blue-800/50'
-                : 'bg-green-900/20 border-green-800/50'
-            }`}
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <span
-                className={`text-xs font-bold uppercase px-2 py-0.5 rounded ${
-                  msg.role === 'user'
-                    ? 'bg-blue-500/20 text-blue-400'
-                    : 'bg-green-500/20 text-green-400'
-                }`}
-              >
-                {msg.role === 'user' ? 'USER' : 'ASSISTANT'}
-              </span>
-              {msg.created_at && (
-                <span className="text-xs text-green-700">
-                  {new Date(msg.created_at).toLocaleTimeString()}
+        {messages.map((msg, index) => {
+          const content = msg.content.length > 2000 ? msg.content.slice(0, 2000) + '...' : msg.content;
+          const startIdx = getStartMatchIndex(index);
+
+          return (
+            <div
+              key={index}
+              className={`p-4 rounded border ${
+                msg.role === 'user'
+                  ? 'bg-blue-900/20 border-blue-800/50'
+                  : 'bg-green-900/20 border-green-800/50'
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-2">
+                <span
+                  className={`text-xs font-bold uppercase px-2 py-0.5 rounded ${
+                    msg.role === 'user'
+                      ? 'bg-blue-500/20 text-blue-400'
+                      : 'bg-green-500/20 text-green-400'
+                  }`}
+                >
+                  {msg.role === 'user' ? 'USER' : 'ASSISTANT'}
                 </span>
-              )}
+                {msg.created_at && (
+                  <span className="text-xs text-green-700">
+                    {new Date(msg.created_at).toLocaleTimeString()}
+                  </span>
+                )}
+              </div>
+              <div className="text-green-300 text-sm whitespace-pre-wrap font-mono leading-relaxed">
+                {search.query ? (
+                  <SearchHighlight
+                    text={content}
+                    query={search.query}
+                    currentIndex={search.currentIndex}
+                    startMatchIndex={startIdx}
+                    onRegisterMatch={search.registerMatch}
+                  />
+                ) : content}
+              </div>
             </div>
-            <div className="text-green-300 text-sm whitespace-pre-wrap font-mono leading-relaxed">
-              {msg.content.length > 2000 ? msg.content.slice(0, 2000) + '...' : msg.content}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
   };
@@ -433,12 +548,56 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
           })}
         </div>
 
+        {/* Search Bar */}
+        {search.isActive && (
+          <div className="flex items-center gap-2 px-4 py-2 border-b border-green-800 bg-green-900/10">
+            <Search className="w-4 h-4 text-green-600 flex-shrink-0" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={search.query}
+              onChange={(e) => search.setQuery(e.target.value)}
+              placeholder="搜索..."
+              className="flex-1 bg-transparent text-green-300 text-sm font-mono outline-none placeholder-green-700"
+              autoFocus
+            />
+            {search.query && (
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <span className="text-xs text-green-600 font-mono">
+                  {search.matchCount > 0 ? `${search.currentIndex + 1}/${search.matchCount}` : '0/0'}
+                </span>
+                <button
+                  onClick={search.prev}
+                  className="p-0.5 text-green-600 hover:text-green-400 transition-colors"
+                  title="上一个 (N)"
+                >
+                  <ChevronUp className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={search.next}
+                  className="p-0.5 text-green-600 hover:text-green-400 transition-colors"
+                  title="下一个 (n)"
+                >
+                  <ChevronDown className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={search.close}
+                  className="p-0.5 text-green-600 hover:text-green-400 transition-colors ml-1"
+                  title="关闭 (Esc)"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Content */}
         <div ref={contentRef} className="flex-1 overflow-y-auto p-4 min-h-[200px]">{renderTabContent()}</div>
 
         {/* Footer */}
         <div className="border-t border-green-800 px-4 py-2 text-xs text-green-700 font-mono flex justify-between">
-          <span className="hidden sm:inline">SCROLL: [J/K] | TAB: [1/2/3/4] | CLOSE: [ESC]</span>
+          <span className="hidden sm:inline">SCROLL: [J/K] | TAB: [1/2/3/4] | SEARCH: [/] | CLOSE: [ESC]</span>
           <span className="sm:hidden">TAB: [1-4] | [ESC]</span>
           {detail?.transcript_path && (
             <span className="hidden md:inline text-green-800 truncate max-w-[300px]">

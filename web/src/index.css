@@ -2,12 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+html {
+  overflow: hidden;
+  height: 100%;
+  -webkit-text-size-adjust: 100%;
+  -moz-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   background-color: #050505;
   color: #4ade80;
   font-family: 'IBM Plex Mono', 'Noto Sans SC', monospace;
-  overflow-x: hidden;
+  overflow: hidden;
+  height: 100%;
   min-height: 100vh;
+  max-width: 100vw;
 }
 
 /* Pixel font for titles */
@@ -69,19 +79,25 @@ body {
 
 .noise-overlay {
   position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 40;
+}
+
+.noise-overlay::after {
+  content: '';
+  position: absolute;
   top: -50%;
   left: -50%;
-  right: -50%;
-  bottom: -50%;
-  width: 200%;
-  height: 200vh;
+  width: 300%;
+  height: 300%;
   background: transparent url('http://assets.iceable.com/img/noise-transparent.png') repeat 0 0;
   background-repeat: repeat;
   animation: noise .2s infinite;
   opacity: .05;
-  visibility: visible;
-  pointer-events: none;
-  z-index: 40;
 }
 
 /* RGB SHIFT */

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { X, MessageSquare, Send, Paperclip, XCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { tmuxSendKeys, sendImage } from '../services/api';
+import { tmuxSendKeys, sendImages } from '../services/api';
 import { ClaudeStatus } from '../types';
 
 export interface ChatMessage {
@@ -35,7 +35,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const [isSending, setIsSending] = useState(false);
   const [sendStatus, setSendStatus] = useState<SendStatus>('idle');
   const [isAtBottom, setIsAtBottom] = useState(true);  // Track if user is at bottom
-  const [pendingImage, setPendingImage] = useState<{ file: File; preview: string } | null>(null);
+  const [pendingImages, setPendingImages] = useState<{ file: File; preview: string }[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -56,40 +56,53 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     });
   }, []);
 
-  const handleImageFile = useCallback((file: File) => {
-    if (!file.type.startsWith('image/')) return;
-    const preview = URL.createObjectURL(file);
-    setPendingImage({ file, preview });
+  const addImageFiles = useCallback((files: File[]) => {
+    const imageFiles = files.filter(f => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    const newItems = imageFiles.map(file => ({
+      file,
+      preview: URL.createObjectURL(file),
+    }));
+    setPendingImages(prev => [...prev, ...newItems]);
   }, []);
 
-  const clearPendingImage = useCallback(() => {
-    if (pendingImage) {
-      URL.revokeObjectURL(pendingImage.preview);
-      setPendingImage(null);
-    }
-  }, [pendingImage]);
+  const removeImage = useCallback((index: number) => {
+    setPendingImages(prev => {
+      const removed = prev[index];
+      if (removed) URL.revokeObjectURL(removed.preview);
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
+
+  const clearAllImages = useCallback(() => {
+    setPendingImages(prev => {
+      prev.forEach(img => URL.revokeObjectURL(img.preview));
+      return [];
+    });
+  }, []);
 
   const handlePaste = useCallback((e: ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
+    const files: File[] = [];
     for (const item of items) {
       if (item.type.startsWith('image/')) {
-        e.preventDefault();
         const file = item.getAsFile();
-        if (file) handleImageFile(file);
-        return;
+        if (file) files.push(file);
       }
     }
-  }, [handleImageFile]);
+    if (files.length > 0) {
+      e.preventDefault();
+      addImageFiles(files);
+    }
+  }, [addImageFiles]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith('image/')) {
-      handleImageFile(file);
-    }
-  }, [handleImageFile]);
+    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+    if (files.length > 0) addImageFiles(files);
+  }, [addImageFiles]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -102,11 +115,10 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   }, []);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) handleImageFile(file);
-    // Reset so same file can be selected again
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) addImageFiles(files);
     e.target.value = '';
-  }, [handleImageFile]);
+  }, [addImageFiles]);
 
   // Listen for paste events when modal is open
   useEffect(() => {
@@ -117,8 +129,8 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
 
   const handleSend = async () => {
     const hasText = inputValue.trim().length > 0;
-    const hasImage = pendingImage !== null;
-    if ((!hasText && !hasImage) || !sessionName || !windowId || isSending) return;
+    const hasImages = pendingImages.length > 0;
+    if ((!hasText && !hasImages) || !sessionName || !windowId || isSending) return;
 
     const msgText = inputValue.trim();
     setInputValue('');
@@ -128,17 +140,17 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     try {
       const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
 
-      if (pendingImage) {
-        // Send image (with optional text message)
-        const base64 = await fileToBase64(pendingImage.file);
-        const result = await sendImage(
+      if (hasImages) {
+        // Convert all images to base64
+        const base64List = await Promise.all(pendingImages.map(img => fileToBase64(img.file)));
+        const result = await sendImages(
           sessionName,
           windowId,
           targetPane,
-          base64,
+          base64List,
           msgText || undefined
         );
-        clearPendingImage();
+        clearAllImages();
         setSendStatus(result.success ? 'success' : 'failed');
       } else {
         // Text-only message
@@ -311,21 +323,33 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
         {/* Input Area */}
         {sessionName && windowId && (
           <div className="p-2 sm:p-3 border-t border-green-800 bg-green-900/10 flex-shrink-0">
-            {/* Image preview */}
-            {pendingImage && (
-              <div className="mb-2 flex items-start gap-2 p-2 border border-green-800 bg-green-900/20">
-                <img
-                  src={pendingImage.preview}
-                  alt="Preview"
-                  className="max-h-24 max-w-[200px] object-contain border border-green-800"
-                />
-                <button
-                  onClick={clearPendingImage}
-                  className="text-green-700 hover:text-red-400 transition-colors flex-shrink-0"
-                  title="Remove image"
-                >
-                  <XCircle className="w-5 h-5" />
-                </button>
+            {/* Image previews */}
+            {pendingImages.length > 0 && (
+              <div className="mb-2 flex flex-wrap items-start gap-2 p-2 border border-green-800 bg-green-900/20">
+                {pendingImages.map((img, idx) => (
+                  <div key={img.preview} className="relative group">
+                    <img
+                      src={img.preview}
+                      alt={`Preview ${idx + 1}`}
+                      className="h-16 w-16 object-cover border border-green-800 rounded"
+                    />
+                    <button
+                      onClick={() => removeImage(idx)}
+                      className="absolute -top-1.5 -right-1.5 bg-black rounded-full text-green-700 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
+                      title="移除"
+                    >
+                      <XCircle className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+                {pendingImages.length > 1 && (
+                  <button
+                    onClick={clearAllImages}
+                    className="text-green-800 hover:text-red-400 text-xs font-mono self-center px-2 transition-colors"
+                  >
+                    清除全部
+                  </button>
+                )}
               </div>
             )}
             <div className="flex gap-2">
@@ -342,6 +366,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
                 ref={fileInputRef}
                 type="file"
                 accept="image/*"
+                multiple
                 onChange={handleFileSelect}
                 className="hidden"
               />
@@ -357,7 +382,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
               />
               <button
                 onClick={handleSend}
-                disabled={(!inputValue.trim() && !pendingImage) || isSending}
+                disabled={(!inputValue.trim() && pendingImages.length === 0) || isSending}
                 className="px-4 py-2 bg-green-900/50 border border-green-700 text-green-400 hover:bg-green-800 hover:text-green-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               >
                 <Send className="w-4 h-4" />

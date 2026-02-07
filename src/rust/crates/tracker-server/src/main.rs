@@ -3799,13 +3799,16 @@ async fn resume_closed_window(
     })
 }
 
-/// Send image request
+/// Send image request (supports single or multiple images)
 #[derive(Deserialize)]
 struct SendImageRequest {
     session: String,
     window_id: String,
     pane: String,
-    image_base64: String,  // data:image/png;base64,xxx
+    #[serde(default)]
+    image_base64: String,  // data:image/png;base64,xxx (single, backwards compat)
+    #[serde(default)]
+    images: Vec<String>,   // Multiple images as base64 data URLs
     #[serde(default)]
     message: Option<String>,
 }
@@ -3816,84 +3819,108 @@ struct SendImageResponse {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     image_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_paths: Option<Vec<String>>,
 }
 
-/// Save base64 image to temp file and send path via tmux send-keys
-async fn tmux_send_image(Json(req): Json<SendImageRequest>) -> Json<SendImageResponse> {
+/// Helper: decode base64 image data URL, save to temp file, return path
+fn save_base64_image(base64_data: &str) -> Result<String, String> {
     use base64::Engine;
     use std::io::Write;
 
-    // Parse data URL: data:image/png;base64,xxxxx
-    let data_part = if let Some(comma_pos) = req.image_base64.find(',') {
-        &req.image_base64[comma_pos + 1..]
+    let data_part = if let Some(comma_pos) = base64_data.find(',') {
+        &base64_data[comma_pos + 1..]
     } else {
-        &req.image_base64
+        base64_data
     };
 
-    // Detect extension from MIME type
-    let ext = if req.image_base64.starts_with("data:image/png") {
+    let ext = if base64_data.starts_with("data:image/png") {
         "png"
-    } else if req.image_base64.starts_with("data:image/jpeg") || req.image_base64.starts_with("data:image/jpg") {
+    } else if base64_data.starts_with("data:image/jpeg") || base64_data.starts_with("data:image/jpg") {
         "jpg"
-    } else if req.image_base64.starts_with("data:image/gif") {
+    } else if base64_data.starts_with("data:image/gif") {
         "gif"
-    } else if req.image_base64.starts_with("data:image/webp") {
+    } else if base64_data.starts_with("data:image/webp") {
         "webp"
     } else {
-        "png" // default
+        "png"
     };
 
-    // Decode base64
-    let image_data = match base64::engine::general_purpose::STANDARD.decode(data_part) {
-        Ok(data) => data,
-        Err(e) => {
-            return Json(SendImageResponse {
-                success: false,
-                message: format!("Failed to decode base64: {}", e),
-                image_path: None,
-            });
-        }
-    };
+    let image_data = base64::engine::general_purpose::STANDARD.decode(data_part)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
 
-    // Write to temp file
     let filename = format!("agent-tracker-img-{}.{}", Uuid::new_v4(), ext);
     let tmp_path = std::path::PathBuf::from("/tmp").join(&filename);
 
-    if let Err(e) = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp_path)?;
-        f.write_all(&image_data)?;
-        Ok(())
-    })() {
+    let mut f = std::fs::File::create(&tmp_path)
+        .map_err(|e| format!("Failed to create image file: {}", e))?;
+    f.write_all(&image_data)
+        .map_err(|e| format!("Failed to write image file: {}", e))?;
+
+    Ok(tmp_path.to_string_lossy().to_string())
+}
+
+/// Save base64 image(s) to temp file and send path via tmux send-keys
+async fn tmux_send_image(Json(req): Json<SendImageRequest>) -> Json<SendImageResponse> {
+    // Collect all images (support both single and multi)
+    let mut all_base64: Vec<&str> = Vec::new();
+    if !req.images.is_empty() {
+        for img in &req.images {
+            all_base64.push(img);
+        }
+    } else if !req.image_base64.is_empty() {
+        all_base64.push(&req.image_base64);
+    }
+
+    if all_base64.is_empty() {
         return Json(SendImageResponse {
             success: false,
-            message: format!("Failed to write image file: {}", e),
+            message: "No image data provided".to_string(),
             image_path: None,
+            image_paths: None,
         });
     }
 
-    let image_path = tmp_path.to_string_lossy().to_string();
+    // Save all images and send each path
+    let mut saved_paths: Vec<String> = Vec::new();
+    for base64_data in &all_base64 {
+        let image_path = match save_base64_image(base64_data) {
+            Ok(path) => path,
+            Err(e) => {
+                return Json(SendImageResponse {
+                    success: false,
+                    message: e,
+                    image_path: saved_paths.first().cloned(),
+                    image_paths: if saved_paths.is_empty() { None } else { Some(saved_paths) },
+                });
+            }
+        };
 
-    // Step 1: Send image path + Enter (Claude Code will detect and attach as [Image #N])
-    if let Err(e) = agent::TmuxAgent::send_keys_with_suffix(
-        &req.session,
-        &req.window_id,
-        &req.pane,
-        &image_path,
-        Some("Enter"),
-    )
-    .await
-    {
-        return Json(SendImageResponse {
-            success: false,
-            message: format!("Failed to send image path: {}", e),
-            image_path: Some(image_path),
-        });
+        // Send image path + Enter (Claude Code attaches as [Image #N])
+        if let Err(e) = agent::TmuxAgent::send_keys_with_suffix(
+            &req.session,
+            &req.window_id,
+            &req.pane,
+            &image_path,
+            Some("Enter"),
+        )
+        .await
+        {
+            return Json(SendImageResponse {
+                success: false,
+                message: format!("Failed to send image path: {}", e),
+                image_path: Some(image_path),
+                image_paths: if saved_paths.is_empty() { None } else { Some(saved_paths) },
+            });
+        }
+
+        saved_paths.push(image_path);
+
+        // Wait for Claude Code to process the image attachment
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    // Step 2: Wait for Claude Code to process the image attachment
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    // Step 3: Send message text + Enter to submit (or just Enter if no message)
+    // Send message text + Enter to submit (or just Enter if no message)
     let msg_text = req.message.as_deref().unwrap_or("").trim().to_string();
     match agent::TmuxAgent::send_keys_with_suffix(
         &req.session,
@@ -3906,13 +3933,15 @@ async fn tmux_send_image(Json(req): Json<SendImageRequest>) -> Json<SendImageRes
     {
         Ok(()) => Json(SendImageResponse {
             success: true,
-            message: "Image sent successfully".to_string(),
-            image_path: Some(image_path),
+            message: format!("{} image(s) sent successfully", saved_paths.len()),
+            image_path: saved_paths.first().cloned(),
+            image_paths: Some(saved_paths),
         }),
         Err(e) => Json(SendImageResponse {
             success: false,
             message: format!("Failed to send message: {}", e),
-            image_path: Some(image_path),
+            image_path: saved_paths.first().cloned(),
+            image_paths: Some(saved_paths),
         }),
     }
 }

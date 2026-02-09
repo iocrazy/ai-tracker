@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { X, MessageSquare, FileText, Wrench, GitCommit, Clock, Check, XCircle, ChevronRight, Search, ChevronUp, ChevronDown } from 'lucide-react';
-import { fetchHistoryDetail, HistoryDetail, ConversationMessage, ToolUsageRecord, GitCommitRecord, formatDuration } from '../services/api';
+import { fetchHistoryDetail, fetchSessionDetail, HistoryDetail, ConversationMessage, ToolUsageRecord, GitCommitRecord, formatDuration } from '../services/api';
 import { useSearch } from '../hooks/useSearch';
 import { SearchHighlight, countMatches } from './SearchHighlight';
+import { MarkdownText } from './MarkdownText';
 
 interface HistoryDetailModalProps {
   historyId: number;
+  filePath?: string;
   onClose: () => void;
   isOpen: boolean;
 }
@@ -21,6 +23,7 @@ const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
 
 export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
   historyId,
+  filePath,
   onClose,
   isOpen,
 }) => {
@@ -37,7 +40,7 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     if (!detail || !search.query) return [];
     switch (activeTab) {
       case 'messages':
-        return (detail.messages || []).map(m => m.content);
+        return (detail.messages || []).filter(m => m.content.trim().length > 0).map(m => m.content);
       case 'summary':
         return [detail.summary, detail.completion_note, detail.resume_command].filter(Boolean) as string[];
       case 'tools':
@@ -89,13 +92,17 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
 
   // Fetch detail data
   useEffect(() => {
-    if (!isOpen || !historyId) return;
+    if (!isOpen) return;
+    // Need either filePath or historyId
+    if (!filePath && !historyId) return;
 
     const loadDetail = async () => {
       setIsLoading(true);
       setError(null);
       try {
-        const data = await fetchHistoryDetail(historyId);
+        const data = filePath
+          ? await fetchSessionDetail(filePath)
+          : await fetchHistoryDetail(historyId);
         setDetail(data);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load detail');
@@ -105,7 +112,7 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     };
 
     loadDetail();
-  }, [historyId, isOpen]);
+  }, [historyId, filePath, isOpen]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -207,9 +214,15 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
       return <div className="text-green-700 italic">暂无对话记录</div>;
     }
 
+    // Filter out empty messages (tool-only assistant turns with no text)
+    const filtered = messages.filter(m => m.content.trim().length > 0);
+    if (filtered.length === 0) {
+      return <div className="text-green-700 italic">暂无对话记录</div>;
+    }
+
     return (
       <div className="space-y-4">
-        {messages.map((msg, index) => {
+        {filtered.map((msg, index) => {
           const content = msg.content.length > 2000 ? msg.content.slice(0, 2000) + '...' : msg.content;
           const startIdx = getStartMatchIndex(index);
 
@@ -238,16 +251,14 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
                   </span>
                 )}
               </div>
-              <div className="text-green-300 text-sm whitespace-pre-wrap font-mono leading-relaxed">
-                {search.query ? (
-                  <SearchHighlight
-                    text={content}
-                    query={search.query}
-                    currentIndex={search.currentIndex}
-                    startMatchIndex={startIdx}
-                    onRegisterMatch={search.registerMatch}
-                  />
-                ) : content}
+              <div className="text-green-300 text-sm font-mono leading-relaxed">
+                <MarkdownText
+                  content={content}
+                  searchQuery={search.query || undefined}
+                  searchCurrentIndex={search.currentIndex}
+                  searchStartMatchIndex={startIdx}
+                  onRegisterMatch={search.query ? search.registerMatch : undefined}
+                />
               </div>
             </div>
           );
@@ -333,14 +344,14 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
         {detail.summary && (
           <div className="bg-black/40 border border-green-800/50 p-4 rounded">
             <div className="text-green-500 font-bold mb-2 uppercase tracking-wider">任务摘要</div>
-            <div className="text-green-300 text-sm">{detail.summary}</div>
+            <div className="text-green-300 text-sm"><MarkdownText content={detail.summary} /></div>
           </div>
         )}
 
         {detail.completion_note && (
           <div className="bg-black/40 border border-green-800/50 p-4 rounded">
             <div className="text-green-500 font-bold mb-2 uppercase tracking-wider">完成备注</div>
-            <div className="text-green-300 text-sm">{detail.completion_note}</div>
+            <div className="text-green-300 text-sm"><MarkdownText content={detail.completion_note} /></div>
           </div>
         )}
 

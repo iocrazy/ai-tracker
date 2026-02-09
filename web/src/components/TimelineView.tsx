@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { TimelineEvent } from '../types';
 import { Search, X, RefreshCw, Download, ChevronDown, ChevronLeft, ChevronRight, MessageSquare, Wrench, FileSearch } from 'lucide-react';
-import { fetchHistory, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory } from '../services/api';
+import { fetchHistory, fetchSessions, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory } from '../services/api';
 import { SearchHighlight } from './SearchHighlight';
+import { MarkdownText } from './MarkdownText';
 
 interface TimelineViewProps {
   events: TimelineEvent[];
@@ -62,6 +63,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
       description: entry.summary || entry.completion_note || 'No description',
       // Store extra data for detail view
       historyId: entry.id,
+      filePath: entry.file_path,
       messageCount: entry.message_count,
       duration: entry.duration_seconds,
     };
@@ -91,7 +93,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
       if (deepQuery) {
         params.search = deepQuery;
       }
-      const data = await fetchHistory(params);
+      const data = await fetchSessions(params);
       setHistoryData(data);
       setTotal(data.total);
     } catch (error) {
@@ -474,17 +476,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
                                             <div className={`text-base sm:text-lg font-sans tracking-wide leading-relaxed max-w-3xl transition-colors
                                                 ${isSelected ? 'text-green-100' : 'text-green-500/80'}
                                             `}>
-                                                {deepQuery ? (
-                                                  <SearchHighlight
-                                                    text={event.description}
-                                                    query={deepQuery}
-                                                    currentIndex={-1}
-                                                    startMatchIndex={0}
-                                                    onRegisterMatch={() => {}}
-                                                  />
-                                                ) : (
-                                                  event.description
-                                                )}
+                                                <MarkdownText
+                                                  content={event.description}
+                                                  searchQuery={deepQuery}
+                                                  onRegisterMatch={deepQuery ? () => {} : undefined}
+                                                />
                                             </div>
                                         </div>
                                     </div>

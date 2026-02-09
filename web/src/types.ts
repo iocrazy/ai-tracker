@@ -42,6 +42,7 @@ export interface TimelineEvent {
     linkText?: string;
     // Enhanced fields from history API
     historyId?: number;
+    filePath?: string;  // Session JSONL file path (for session-based entries)
     messageCount?: number;
     duration?: number;
 }

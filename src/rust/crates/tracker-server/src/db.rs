@@ -2,7 +2,9 @@
 //!
 //! Handles SQLite persistence for tasks, notes, goals, and history.
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -11,9 +13,11 @@ use tracing::info;
 
 use tracker_core::{ConversationMessage, GitCommit, Goal, HistoryRecord, Note, NoteScope, Task, TaskStatus, ToolUsage};
 
-/// Database wrapper
+/// Database wrapper with SQLite change tracking
 pub struct Database {
     conn: Connection,
+    /// Tables that changed since last broadcast (populated by SQLite update_hook)
+    pub changed_tables: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Database {
@@ -25,9 +29,27 @@ impl Database {
         }
 
         let conn = Connection::open(path)?;
-        let db = Self { conn };
+
+        // Set up SQLite update hook for change tracking
+        let changed = Arc::new(Mutex::new(HashSet::new()));
+        let changed_clone = changed.clone();
+        conn.update_hook(Some(move |_action: rusqlite::hooks::Action, _db: &str, table: &str, _rowid: i64| {
+            if matches!(table, "tasks" | "notes" | "goals") {
+                if let Ok(mut set) = changed_clone.lock() {
+                    set.insert(table.to_string());
+                }
+            }
+        }));
+
+        let db = Self { conn, changed_tables: changed };
         db.init_schema()?;
         Ok(db)
+    }
+
+    /// Take the set of changed tables (clears it for next broadcast cycle)
+    pub fn take_changes(&self) -> HashSet<String> {
+        let mut set = self.changed_tables.lock().unwrap();
+        std::mem::take(&mut *set)
     }
 
     /// Initialize database schema
@@ -201,6 +223,31 @@ impl Database {
             [],
         )?;
 
+        // Session index table (populated by background scanner from Claude JSONL files)
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_index (
+                file_path TEXT PRIMARY KEY,
+                project TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                started_at TEXT,
+                ended_at TEXT,
+                message_count INTEGER DEFAULT 0,
+                duration_seconds REAL DEFAULT 0,
+                file_size INTEGER DEFAULT 0,
+                file_mtime TEXT
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_index_started ON session_index(started_at)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_index_ended ON session_index(ended_at)",
+            [],
+        )?;
+
         // Create indices
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_id)",
@@ -261,6 +308,32 @@ impl Database {
         Ok(())
     }
 
+    /// Cleanup stale tasks on startup (orphan recovery)
+    /// - Delete tasks with empty keys (dirty data)
+    /// - Delete completed tasks (no longer needed, Timeline uses session JSONL)
+    /// - Reset in_progress tasks to awaiting_input (hook chain broken by restart)
+    pub fn cleanup_stale_tasks(&self) -> Result<(usize, usize, usize)> {
+        // 1. Delete dirty data (empty key fields)
+        let dirty = self.conn.execute(
+            "DELETE FROM tasks WHERE TRIM(session_id) = '' OR TRIM(window_id) = ''",
+            [],
+        )?;
+
+        // 2. Delete completed tasks
+        let completed = self.conn.execute(
+            "DELETE FROM tasks WHERE status = 'completed'",
+            [],
+        )?;
+
+        // 3. Reset in_progress to awaiting_input
+        let reset = self.conn.execute(
+            "UPDATE tasks SET status = 'awaiting_input' WHERE status = 'in_progress'",
+            [],
+        )?;
+
+        Ok((dirty, completed, reset))
+    }
+
     /// Load all active tasks
     pub fn load_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
@@ -308,28 +381,65 @@ impl Database {
         Ok(tasks)
     }
 
-    /// Archive a completed task to history
-    pub fn archive_to_history(&self, task: &Task) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO history
-             (session_id, session, window_id, window, pane, summary,
-              completion_note, started_at, completed_at, duration_seconds, transcript_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                task.session_id,
-                task.session,
-                task.window_id,
-                task.window,
-                task.pane,
-                task.summary,
-                task.completion_note,
-                task.started_at.map(|t| t.to_rfc3339()),
-                task.completed_at.map(|t| t.to_rfc3339()),
-                task.duration_seconds,
-                task.transcript_path,
-            ],
-        )?;
-        Ok(())
+    /// Archive a completed task to history (upsert: merge with recent entry for same session/window/pane)
+    pub fn archive_to_history(&self, task: &Task) -> Result<i64> {
+        // Check for a recent history entry for the same session/window/pane (within 60 minutes)
+        let recent_id: Option<i64> = self.conn.query_row(
+            "SELECT id FROM history
+             WHERE session_id = ?1 AND window_id = ?2 AND pane = ?3
+               AND completed_at > datetime('now', '-60 minutes')
+             ORDER BY id DESC LIMIT 1",
+            params![task.session_id, task.window_id, task.pane],
+            |row| row.get(0),
+        ).ok();
+
+        if let Some(id) = recent_id {
+            // Update existing entry — keep the longer/more informative summary
+            self.conn.execute(
+                "UPDATE history SET
+                    summary = CASE WHEN LENGTH(?1) > LENGTH(summary) THEN ?1 ELSE summary END,
+                    completion_note = CASE WHEN ?2 != '' THEN ?2 ELSE completion_note END,
+                    completed_at = ?3,
+                    duration_seconds = ?4,
+                    transcript_path = CASE WHEN ?5 != '' THEN ?5 ELSE transcript_path END
+                 WHERE id = ?6",
+                params![
+                    task.summary,
+                    task.completion_note,
+                    task.completed_at.map(|t| t.to_rfc3339()),
+                    task.duration_seconds,
+                    task.transcript_path,
+                    id,
+                ],
+            )?;
+            // Clear old related data (will be re-parsed from transcript)
+            let _ = self.conn.execute("DELETE FROM conversation_messages WHERE history_id = ?", [id]);
+            let _ = self.conn.execute("DELETE FROM tool_usage WHERE history_id = ?", [id]);
+            let _ = self.conn.execute("DELETE FROM commits WHERE history_id = ?", [id]);
+            Ok(id)
+        } else {
+            // Insert new entry
+            self.conn.execute(
+                "INSERT INTO history
+                 (session_id, session, window_id, window, pane, summary,
+                  completion_note, started_at, completed_at, duration_seconds, transcript_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    task.session_id,
+                    task.session,
+                    task.window_id,
+                    task.window,
+                    task.pane,
+                    task.summary,
+                    task.completion_note,
+                    task.started_at.map(|t| t.to_rfc3339()),
+                    task.completed_at.map(|t| t.to_rfc3339()),
+                    task.duration_seconds,
+                    task.transcript_path,
+                ],
+            )?;
+            Ok(self.conn.last_insert_rowid())
+        }
     }
 
     /// Get recent history entries
@@ -987,6 +1097,135 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // =========================================================================
+    // Session index operations (populated by background JSONL scanner)
+    // =========================================================================
+
+    /// Upsert a session index entry
+    pub fn upsert_session_index(&self, entry: &SessionIndexEntry) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO session_index
+             (file_path, project, summary, started_at, ended_at, message_count,
+              duration_seconds, file_size, file_mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                entry.file_path,
+                entry.project,
+                entry.summary,
+                entry.started_at,
+                entry.ended_at,
+                entry.message_count,
+                entry.duration_seconds,
+                entry.file_size,
+                entry.file_mtime,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Check if a session file needs re-indexing (by comparing mtime + size)
+    pub fn session_needs_reindex(&self, file_path: &str, file_size: i64, file_mtime: &str) -> bool {
+        let result: Option<(i64, String)> = self.conn.query_row(
+            "SELECT file_size, COALESCE(file_mtime, '') FROM session_index WHERE file_path = ?1",
+            [file_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).ok();
+
+        match result {
+            Some((size, mtime)) => size != file_size || mtime != file_mtime,
+            None => true, // Not indexed yet
+        }
+    }
+
+    /// Load session index entries with pagination and filtering
+    pub fn load_sessions(
+        &self,
+        page: i64,
+        page_size: i64,
+        time_after: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<(Vec<SessionIndexEntry>, i64)> {
+        let mut where_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(after) = time_after {
+            where_clauses.push(format!("started_at >= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(after.to_string()));
+        }
+
+        if let Some(q) = search {
+            where_clauses.push(format!("(summary LIKE ?{} OR project LIKE ?{})", param_values.len() + 1, param_values.len() + 2));
+            let pattern = format!("%{}%", q);
+            param_values.push(Box::new(pattern.clone()));
+            param_values.push(Box::new(pattern));
+        }
+
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_clauses.join(" AND "))
+        };
+
+        // Count total
+        let count_sql = format!("SELECT COUNT(*) FROM session_index {}", where_sql);
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let total: i64 = self.conn.query_row(&count_sql, params_ref.as_slice(), |row| row.get(0))?;
+
+        // Query with pagination
+        let offset = (page - 1) * page_size;
+        let query_sql = format!(
+            "SELECT file_path, project, summary, COALESCE(started_at, ''), COALESCE(ended_at, ''),
+                    message_count, duration_seconds, file_size, COALESCE(file_mtime, '')
+             FROM session_index {}
+             ORDER BY ended_at DESC
+             LIMIT ?{} OFFSET ?{}",
+            where_sql,
+            param_values.len() + 1,
+            param_values.len() + 2,
+        );
+        let mut all_params = param_values;
+        all_params.push(Box::new(page_size));
+        all_params.push(Box::new(offset));
+        let all_params_ref: Vec<&dyn rusqlite::types::ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = self.conn.prepare(&query_sql)?;
+        let entries = stmt.query_map(all_params_ref.as_slice(), |row| {
+            Ok(SessionIndexEntry {
+                file_path: row.get(0)?,
+                project: row.get(1)?,
+                summary: row.get(2)?,
+                started_at: row.get(3)?,
+                ended_at: row.get(4)?,
+                message_count: row.get(5)?,
+                duration_seconds: row.get(6)?,
+                file_size: row.get(7)?,
+                file_mtime: row.get(8)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok((entries, total))
+    }
+
+    /// Remove session index entries whose files no longer exist
+    pub fn cleanup_stale_sessions(&self, valid_paths: &[String]) -> Result<usize> {
+        if valid_paths.is_empty() {
+            return Ok(0);
+        }
+        // Get all indexed paths
+        let mut stmt = self.conn.prepare("SELECT file_path FROM session_index")?;
+        let all_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut removed = 0;
+        for path in &all_paths {
+            if !valid_paths.contains(path) {
+                self.conn.execute("DELETE FROM session_index WHERE file_path = ?1", [path])?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
 }
 
 /// Closed window record
@@ -1000,6 +1239,20 @@ pub struct ClosedWindow {
     pub git_branch: String,
     pub pane_count: i32,
     pub closed_at: Option<DateTime<Utc>>,
+}
+
+/// Session index entry (metadata from Claude JSONL session files)
+#[derive(Debug, Clone)]
+pub struct SessionIndexEntry {
+    pub file_path: String,
+    pub project: String,
+    pub summary: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub message_count: i32,
+    pub duration_seconds: f64,
+    pub file_size: i64,
+    pub file_mtime: String,
 }
 
 /// Get default database path

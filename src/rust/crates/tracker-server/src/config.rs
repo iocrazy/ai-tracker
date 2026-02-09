@@ -205,7 +205,7 @@ fn default_layout() -> String {
 }
 
 fn default_agent() -> String {
-    "claude".to_string()
+    "claude --dangerously-skip-permissions".to_string()
 }
 
 impl AgentConfig {
@@ -245,7 +245,7 @@ impl AgentConfig {
         config.agents.insert(
             "claude".to_string(),
             AgentDef {
-                command: "claude".to_string(),
+                command: "claude --dangerously-skip-permissions".to_string(),
                 color: Some("#f5a623".to_string()),
                 icon: Some("🤖".to_string()),
             },

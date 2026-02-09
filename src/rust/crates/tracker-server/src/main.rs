@@ -75,6 +75,21 @@ impl ServerState {
 
     /// Load all data from database
     fn load_from_db(&mut self) -> Result<()> {
+        // Startup cleanup: fix stale state from previous run
+        match self.db.cleanup_stale_tasks() {
+            Ok((dirty, completed, reset)) => {
+                if dirty > 0 || completed > 0 || reset > 0 {
+                    info!(
+                        "Startup cleanup: removed {} dirty + {} completed tasks, reset {} in_progress → awaiting_input",
+                        dirty, completed, reset
+                    );
+                }
+            }
+            Err(e) => {
+                error!("Failed to cleanup stale tasks: {}", e);
+            }
+        }
+
         // Load tasks (separate active vs archived)
         let tasks = self.db.load_tasks()?;
         for task in tasks {
@@ -232,7 +247,17 @@ impl AppState {
 
     /// Broadcast state to all WebSocket subscribers (with tmux names)
     fn broadcast_state(&self) {
-        let state = self.get_state_response_with_tmux_names();
+        let mut state = self.get_state_response_with_tmux_names();
+
+        // Populate changed tables from SQLite hook tracking
+        {
+            let server_state = self.state.lock().unwrap();
+            let changes = server_state.db.take_changes();
+            if !changes.is_empty() {
+                state.changed = changes.into_iter().collect();
+            }
+        }
+
         let tmux_windows = agent::TmuxAgent::list_all_windows_sync();
 
         // Write cache file for tmux status line
@@ -561,6 +586,8 @@ struct HistoryEntry {
     #[serde(skip_serializing_if = "String::is_empty")]
     ended_at: String,
     message_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_path: Option<String>,
 }
 
 /// History response (grouped)
@@ -1053,98 +1080,11 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
             let key = format!("{}|{}|{}", req.session_id, req.window_id, req.pane);
             let mut state = app_state.state.lock().unwrap();
 
-            if let Some(task) = state.tasks.get_mut(&key) {
-                let was_already_completed = task.status == TaskStatus::Completed;
-
-                task.status = TaskStatus::Completed;
-                task.completed_at = Some(Utc::now());
-                task.acknowledged = false;
-                if !req.summary.is_empty() {
-                    task.completion_note = req.summary.clone();
-                }
-                if !req.transcript_path.is_empty() {
-                    task.transcript_path = req.transcript_path.clone();
-                }
-                if let Some(started) = task.started_at {
-                    task.duration_seconds = (Utc::now() - started).num_seconds() as f64;
-                }
-
-                let task_clone = task.clone();
-                if let Err(e) = state.db.save_task(&task_clone) {
-                    error!("Failed to save task to database: {}", e);
-                }
-
-                if !was_already_completed {
-                    if let Err(e) = state.db.archive_to_history(&task_clone) {
-                        error!("Failed to archive task to history: {}", e);
-                    } else {
-                        let history_id = state.db.last_insert_rowid();
-
-                        if !task_clone.transcript_path.is_empty() {
-                            let transcript_path = task_clone.transcript_path.clone();
-                            let started_at = task_clone.started_at;
-                            let completed_at = task_clone.completed_at;
-
-                            tokio::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                                let path = std::path::Path::new(&transcript_path);
-                                if !path.exists() {
-                                    return;
-                                }
-
-                                match transcript::parse_transcript_full_for_task(
-                                    path,
-                                    started_at,
-                                    completed_at,
-                                ) {
-                                    Ok(result) => {
-                                        info!(
-                                            "Parsed {} messages, {} tools, {} commits from transcript",
-                                            result.messages.len(),
-                                            result.tool_usages.len(),
-                                            result.commits.len()
-                                        );
-                                        let db_path = db::default_db_path();
-                                        if let Ok(db) = Database::open(&db_path) {
-                                            // Save conversation messages
-                                            if let Err(e) =
-                                                db.save_conversation_messages(history_id, &result.messages)
-                                            {
-                                                error!(
-                                                    "Failed to save conversation messages: {}",
-                                                    e
-                                                );
-                                            }
-                                            // Save tool usage
-                                            if let Err(e) =
-                                                db.save_tool_usage(history_id, &result.tool_usages)
-                                            {
-                                                error!(
-                                                    "Failed to save tool usage: {}",
-                                                    e
-                                                );
-                                            }
-                                            // Save commits
-                                            if let Err(e) =
-                                                db.save_commits(history_id, &result.commits)
-                                            {
-                                                error!(
-                                                    "Failed to save commits: {}",
-                                                    e
-                                                );
-                                            }
-                                        } else {
-                                            error!("Failed to open database for saving messages");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to parse transcript: {}", e);
-                                    }
-                                }
-                            });
-                        }
-                    }
+            // Remove completed task from memory and DB
+            // Timeline data is provided by session JSONL scanning
+            if state.tasks.remove(&key).is_some() {
+                if let Err(e) = state.db.delete_task(&key) {
+                    error!("Failed to delete finished task: {}", e);
                 }
             }
             drop(state);
@@ -1785,6 +1725,7 @@ async fn get_history(Query(params): Query<HistoryQueryParams>) -> Json<HistoryRe
                 started_at: row.get::<_, String>(6).unwrap_or_default(),
                 ended_at: row.get::<_, String>(7).unwrap_or_default(),
                 message_count: 0,
+                file_path: None,
             })
         })
         .ok()
@@ -1848,6 +1789,127 @@ async fn get_history(Query(params): Query<HistoryQueryParams>) -> Json<HistoryRe
         .unwrap_or(0);
 
     Json(HistoryResponse { groups, total })
+}
+
+/// Session query parameters
+#[derive(Deserialize)]
+struct SessionQueryParams {
+    #[serde(default)]
+    page: Option<i32>,
+    #[serde(default)]
+    per_page: Option<i32>,
+    #[serde(default)]
+    range: Option<String>,
+    #[serde(default)]
+    search: Option<String>,
+}
+
+/// Get sessions from session_index (scanned from Claude JSONL files)
+async fn get_sessions(Query(params): Query<SessionQueryParams>) -> Json<HistoryResponse> {
+    let db_path = get_db_path();
+    let db = match db::Database::open(&db_path) {
+        Ok(d) => d,
+        Err(e) => {
+            error!("Failed to open database: {}", e);
+            return Json(HistoryResponse { groups: vec![], total: 0 });
+        }
+    };
+
+    let page = params.page.unwrap_or(1).max(1) as i64;
+    let per_page = params.per_page.unwrap_or(50) as i64;
+
+    // Time range filter
+    let today = chrono::Local::now().date_naive();
+    let time_after = params.range.as_deref().and_then(|r| {
+        let date = match r {
+            "today" => Some(today),
+            "yesterday" => Some(today - chrono::Duration::days(1)),
+            "7days" => Some(today - chrono::Duration::days(7)),
+            "30days" => Some(today - chrono::Duration::days(30)),
+            _ => None,
+        };
+        date.map(|d| format!("{}T00:00:00Z", d.format("%Y-%m-%d")))
+    });
+
+    let (entries, total) = match db.load_sessions(
+        page,
+        per_page,
+        time_after.as_deref(),
+        params.search.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to load sessions: {}", e);
+            return Json(HistoryResponse { groups: vec![], total: 0 });
+        }
+    };
+
+    // Convert to HistoryEntry and group by date
+    let history_entries: Vec<HistoryEntry> = entries.iter().map(|e| {
+        // Convert project name to readable form: -Volumes-program-... -> Volumes/program/...
+        let project_display = e.project
+            .strip_prefix('-')
+            .unwrap_or(&e.project)
+            .replace('-', "/");
+
+        HistoryEntry {
+            id: 0, // Not used for session-based entries
+            session: project_display,
+            window: e.file_path
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(".jsonl")
+                .to_string(),
+            summary: e.summary.clone(),
+            completion_note: String::new(),
+            duration_seconds: e.duration_seconds,
+            started_at: e.started_at.clone(),
+            ended_at: e.ended_at.clone(),
+            message_count: e.message_count,
+            file_path: Some(e.file_path.clone()),
+        }
+    }).collect();
+
+    // Group by date
+    let mut today_entries = vec![];
+    let mut yesterday_entries = vec![];
+    let mut this_week_entries = vec![];
+    let mut older_entries = vec![];
+    let yesterday = today - chrono::Duration::days(1);
+
+    for entry in history_entries {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&entry.started_at) {
+            let date = dt.date_naive();
+            if date == today {
+                today_entries.push(entry);
+            } else if date == yesterday {
+                yesterday_entries.push(entry);
+            } else if (today - date).num_days() < 7 {
+                this_week_entries.push(entry);
+            } else {
+                older_entries.push(entry);
+            }
+        } else {
+            older_entries.push(entry);
+        }
+    }
+
+    let mut groups = vec![];
+    if !today_entries.is_empty() {
+        groups.push(HistoryGroup { label: "Today".to_string(), records: today_entries });
+    }
+    if !yesterday_entries.is_empty() {
+        groups.push(HistoryGroup { label: "Yesterday".to_string(), records: yesterday_entries });
+    }
+    if !this_week_entries.is_empty() {
+        groups.push(HistoryGroup { label: "This Week".to_string(), records: this_week_entries });
+    }
+    if !older_entries.is_empty() {
+        groups.push(HistoryGroup { label: "Older".to_string(), records: older_entries });
+    }
+
+    Json(HistoryResponse { groups, total: total as i32 })
 }
 
 /// Get history statistics
@@ -2027,7 +2089,7 @@ async fn get_history_detail(AxumPath(id): AxumPath<i64>) -> Json<HistoryDetailRe
     // Load conversation messages
     let mut messages: Vec<ConversationMessageResponse> = vec![];
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT role, content, COALESCE(created_at, '') FROM conversation_messages WHERE history_id = ? ORDER BY id ASC"
+        "SELECT role, content, COALESCE(created_at, '') FROM conversation_messages WHERE history_id = ? AND TRIM(content) != '' ORDER BY id ASC"
     ) {
         if let Ok(rows) = stmt.query_map([id], |row| {
             Ok(ConversationMessageResponse {
@@ -2110,6 +2172,144 @@ async fn get_history_detail(AxumPath(id): AxumPath<i64>) -> Json<HistoryDetailRe
         started_at,
         ended_at,
         transcript_path,
+        resume_command,
+        messages,
+        tool_usage,
+        commits,
+        stats,
+    })
+}
+
+/// Session detail query parameters
+#[derive(Deserialize)]
+struct SessionDetailParams {
+    /// File path of the session JSONL
+    file_path: String,
+}
+
+/// Get session detail by parsing the JSONL file on demand
+async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> Json<HistoryDetailResponse> {
+    let empty_response = || Json(HistoryDetailResponse {
+        id: 0,
+        session: String::new(),
+        window: String::new(),
+        summary: String::new(),
+        completion_note: String::new(),
+        started_at: String::new(),
+        ended_at: String::new(),
+        transcript_path: params.file_path.clone(),
+        resume_command: String::new(),
+        messages: vec![],
+        tool_usage: vec![],
+        commits: vec![],
+        stats: None,
+    });
+
+    let path = std::path::Path::new(&params.file_path);
+    if !path.exists() {
+        return empty_response();
+    }
+
+    // Parse transcript using existing infrastructure
+    let result = match transcript::parse_transcript_full(path) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to parse session file {}: {}", params.file_path, e);
+            return empty_response();
+        }
+    };
+
+    // Convert messages (filter empty content)
+    let messages: Vec<ConversationMessageResponse> = result.messages
+        .iter()
+        .filter(|m| !m.content.trim().is_empty())
+        .map(|m| ConversationMessageResponse {
+            role: m.role.clone(),
+            content: m.content.clone(),
+            created_at: m.created_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
+        })
+        .collect();
+
+    // Convert tool usage
+    let mut tools_used: Vec<String> = vec![];
+    let tool_usage: Vec<ToolUsageResponse> = result.tool_usages
+        .iter()
+        .map(|t| {
+            if !tools_used.contains(&t.tool_name) {
+                tools_used.push(t.tool_name.clone());
+            }
+            ToolUsageResponse {
+                id: t.id,
+                tool_name: t.tool_name.clone(),
+                tool_args: t.tool_args.clone(),
+                result_summary: t.result_summary.clone(),
+                success: t.success,
+                timestamp: t.timestamp.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    // Convert commits
+    let commits: Vec<CommitResponse> = result.commits
+        .iter()
+        .map(|c| CommitResponse {
+            id: c.id,
+            commit_hash: c.commit_hash.clone(),
+            commit_message: c.commit_message.clone(),
+            files_changed: c.files_changed,
+            timestamp: c.timestamp.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
+        })
+        .collect();
+
+    // Get session metadata from index
+    let db_path = get_db_path();
+    let (summary, started_at, ended_at, duration_seconds, project) = if let Ok(db) = db::Database::open(&db_path) {
+        let (entries, _) = db.load_sessions(1, 1, None, None).unwrap_or_default();
+        // Query specific entry
+        let conn = rusqlite::Connection::open(&db_path).ok();
+        if let Some(conn) = conn {
+            conn.query_row(
+                "SELECT summary, COALESCE(started_at, ''), COALESCE(ended_at, ''), duration_seconds, project FROM session_index WHERE file_path = ?",
+                [&params.file_path],
+                |row| Ok((
+                    row.get::<_, String>(0).unwrap_or_default(),
+                    row.get::<_, String>(1).unwrap_or_default(),
+                    row.get::<_, String>(2).unwrap_or_default(),
+                    row.get::<_, f64>(3).unwrap_or(0.0),
+                    row.get::<_, String>(4).unwrap_or_default(),
+                )),
+            ).unwrap_or_default()
+        } else {
+            Default::default()
+        }
+    } else {
+        Default::default()
+    };
+
+    let resume_command = format!("claude --resume {}", params.file_path);
+
+    let project_display = project
+        .strip_prefix('-')
+        .unwrap_or(&project)
+        .replace('-', "/");
+
+    let stats = Some(HistoryDetailStats {
+        message_count: messages.len() as i32,
+        tool_count: tool_usage.len() as i32,
+        commit_count: commits.len() as i32,
+        duration_seconds,
+        tools_used,
+    });
+
+    Json(HistoryDetailResponse {
+        id: 0,
+        session: project_display,
+        window: path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+        summary,
+        completion_note: String::new(),
+        started_at,
+        ended_at,
+        transcript_path: params.file_path,
         resume_command,
         messages,
         tool_usage,
@@ -2320,6 +2520,194 @@ struct ClaudeMessagesParams {
     session: Option<String>,
     /// Tmux window name (optional) - used with session to get pane's working directory
     window: Option<String>,
+}
+
+/// Background scanner: index Claude session JSONL files into session_index table
+fn scan_claude_sessions(db_path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::{BufRead, BufReader};
+
+    let claude_projects = dirs::home_dir()
+        .map(|h| h.join(".claude/projects"))
+        .unwrap_or_default();
+
+    if !claude_projects.exists() {
+        return Ok(());
+    }
+
+    let db = db::Database::open(db_path)?;
+    let mut valid_paths: Vec<String> = Vec::new();
+
+    let entries = std::fs::read_dir(&claude_projects)?;
+    for project_entry in entries.flatten() {
+        let project_dir = project_entry.path();
+        if !project_dir.is_dir() {
+            continue;
+        }
+        let project_name = project_dir.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        // Skip non-project directories (memory, etc.)
+        let files = match std::fs::read_dir(&project_dir) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+
+        for file_entry in files.flatten() {
+            let path = file_entry.path();
+            if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                let path_str = path.to_string_lossy().to_string();
+                valid_paths.push(path_str.clone());
+
+                // Check if we need to re-index this file
+                let meta = match path.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let file_size = meta.len() as i64;
+                let file_mtime = meta.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs().to_string())
+                    .unwrap_or_default();
+
+                if !db.session_needs_reindex(&path_str, file_size, &file_mtime) {
+                    continue;
+                }
+
+                // Parse metadata from JSONL file
+                let file = match std::fs::File::open(&path) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+
+                let reader = BufReader::new(&file);
+                let mut first_timestamp = String::new();
+                let mut last_timestamp = String::new();
+                let mut summary = String::new();
+                let mut message_count: i32 = 0;
+
+                // Read first few lines for start time and summary
+                for line in reader.lines().take(50) {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    if line.trim().is_empty() { continue; }
+
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                        // Get timestamp
+                        if first_timestamp.is_empty() {
+                            if let Some(ts) = data.get("timestamp").and_then(|t| t.as_str()) {
+                                first_timestamp = ts.to_string();
+                            }
+                        }
+
+                        let msg_type = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                        // Count user/assistant messages
+                        if msg_type == "user" || msg_type == "assistant" {
+                            message_count += 1;
+                        }
+
+                        // Get first user message as summary
+                        if summary.is_empty() && msg_type == "user" {
+                            if let Some(msg) = data.get("message") {
+                                let content = msg.get("content");
+                                // Extract text from content (string or array)
+                                let raw_text = if let Some(text) = content.and_then(|c| c.as_str()) {
+                                    text.to_string()
+                                } else if let Some(arr) = content.and_then(|c| c.as_array()) {
+                                    arr.iter()
+                                        .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("text"))
+                                        .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                } else {
+                                    String::new()
+                                };
+
+                                // Strip XML tags to get readable text
+                                let stripped = {
+                                    let mut result = String::new();
+                                    let mut in_tag = false;
+                                    for ch in raw_text.chars() {
+                                        if ch == '<' { in_tag = true; continue; }
+                                        if ch == '>' { in_tag = false; continue; }
+                                        if !in_tag { result.push(ch); }
+                                    }
+                                    result
+                                };
+                                let trimmed = stripped.trim();
+                                if !trimmed.is_empty() {
+                                    summary = trimmed.chars().take(200).collect();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Read remaining lines: count messages + get last timestamp
+                // For large files, skip to near the end for last_timestamp
+                let file2 = match std::fs::File::open(&path) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let total_lines_reader = BufReader::new(&file2);
+                let mut total_msg_count: i32 = 0;
+                for line in total_lines_reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    if line.trim().is_empty() { continue; }
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                        let msg_type = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        if msg_type == "user" || msg_type == "assistant" {
+                            total_msg_count += 1;
+                        }
+                        if let Some(ts) = data.get("timestamp").and_then(|t| t.as_str()) {
+                            last_timestamp = ts.to_string();
+                        }
+                    }
+                }
+                message_count = total_msg_count;
+
+                // Calculate duration
+                let duration = {
+                    let start = chrono::DateTime::parse_from_rfc3339(&first_timestamp).ok();
+                    let end = chrono::DateTime::parse_from_rfc3339(&last_timestamp).ok();
+                    match (start, end) {
+                        (Some(s), Some(e)) => (e - s).num_seconds() as f64,
+                        _ => 0.0,
+                    }
+                };
+
+                let entry = db::SessionIndexEntry {
+                    file_path: path_str,
+                    project: project_name.clone(),
+                    summary,
+                    started_at: first_timestamp,
+                    ended_at: last_timestamp,
+                    message_count,
+                    duration_seconds: duration,
+                    file_size,
+                    file_mtime,
+                };
+
+                if let Err(e) = db.upsert_session_index(&entry) {
+                    tracing::error!("Failed to index session {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+
+    // Clean up stale entries
+    if let Err(e) = db.cleanup_stale_sessions(&valid_paths) {
+        tracing::error!("Failed to cleanup stale sessions: {}", e);
+    }
+
+    Ok(())
 }
 
 /// Parse claude messages from a JSONL session file (blocking I/O)
@@ -2949,7 +3337,7 @@ async fn resume_workspace(Json(req): Json<ResumeWorkspaceRequest>) -> Json<Start
 
     // Determine layout
     let layout_type = req.layout.as_deref().unwrap_or("default");
-    let agent_cmd = req.agent.clone().unwrap_or_else(|| "claude".to_string());
+    let agent_cmd = req.agent.clone().unwrap_or_else(|| "claude --dangerously-skip-permissions".to_string());
     let layout = match layout_type {
         "workspace" => layout::LayoutTemplate::Workspace {
             agent_cmd,
@@ -3761,7 +4149,7 @@ async fn resume_closed_window(
         let working_dir = Path::new(&req.working_dir);
         if working_dir.exists() {
             // Default agent command
-            let agent_cmd = "claude".to_string();
+            let agent_cmd = "claude --dangerously-skip-permissions".to_string();
 
             let template = match layout_type {
                 "workspace" => layout::LayoutTemplate::Workspace {
@@ -4157,6 +4545,37 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Start background task for Claude session file scanning
+    let scanner_db_path = db_path.clone();
+    tokio::spawn(async move {
+        // Initial delay to let server start up
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if let Err(e) = scan_claude_sessions(&scanner_db_path) {
+                tracing::error!("Session scanner error: {}", e);
+            }
+        }
+    });
+
+    // Background safety net: auto-broadcast if DB changes weren't explicitly broadcast
+    let safety_state = app_state.clone();
+    let changed_tables = {
+        let state = safety_state.state.lock().unwrap();
+        state.db.changed_tables.clone()
+    };
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            if !changed_tables.lock().unwrap().is_empty() {
+                debug!("Safety net: broadcasting un-handled DB changes");
+                safety_state.broadcast_state();
+            }
+        }
+    });
+
     // Build router
     let app = Router::new()
         // Health
@@ -4175,7 +4594,10 @@ async fn main() -> Result<()> {
         .route("/api/task/restore", post(restore_task))
         .route("/api/note/archive", post(archive_note))
         .route("/api/note/restore", post(restore_note))
-        // History
+        // Sessions (from Claude JSONL files)
+        .route("/api/sessions", get(get_sessions))
+        .route("/api/sessions/detail", get(get_session_detail))
+        // History (legacy, from hooks)
         .route("/api/history", get(get_history))
         .route("/api/history/stats", get(get_history_stats))
         .route("/api/history/:id/resume", post(resume_history))

@@ -122,6 +122,11 @@ pub struct Envelope {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversations: Vec<Conversation>,
+
+    /// Changed tables since last broadcast (for incremental updates)
+    /// e.g. ["tasks", "notes"] — frontend can skip re-rendering unchanged sections
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<String>,
 }
 
 fn is_zero(n: &i32) -> bool {

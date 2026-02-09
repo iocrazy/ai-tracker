@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { LogEntry } from '../types';
+import { MarkdownText } from './MarkdownText';
 
 interface TerminalProps {
   logs: LogEntry[];
@@ -30,7 +31,7 @@ export const Terminal: React.FC<TerminalProps> = ({ logs }) => {
             }`}>
               {log.level}
             </span>
-            <span className="text-green-300 opacity-90 break-all">{log.message}</span>
+            <span className="text-green-300 opacity-90 break-all"><MarkdownText content={log.message} inline /></span>
           </div>
         ))}
         <div ref={bottomRef} />

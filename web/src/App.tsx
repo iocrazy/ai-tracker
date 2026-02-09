@@ -59,10 +59,19 @@ const App: React.FC = () => {
   }, [sessions]);
 
   // Handle realtime updates from WebSocket (state + tmux_windows in one message)
+  // Uses `changed` field to skip re-rendering unchanged sections
   const handleRealtimeUpdate = useCallback((msg: RealtimeMessage) => {
+    const changed = msg.state.changed;
+    const hasChange = (table: string) => !changed || changed.length === 0 || changed.includes(table);
+
+    // Always update sessions (tmux windows can change without DB changes)
     setSessions(mapTmuxToSessions(msg.tmux_windows, msg.state.tasks));
-    setTimeline(mapHistoryToTimeline(msg.state.history));
-    setConsoleLogs(generateConsoleLogs(msg.state));
+
+    // Only update other sections if their backing table changed
+    if (hasChange('tasks')) {
+      setConsoleLogs(generateConsoleLogs(msg.state));
+    }
+
     setIsConnected(true);
     latestStateRef.current = msg.state;
   }, []);
@@ -176,6 +185,7 @@ const App: React.FC = () => {
 
   // History Detail Modal
   const [historyDetailId, setHistoryDetailId] = useState<number | null>(null);
+  const [historyDetailFilePath, setHistoryDetailFilePath] = useState<string | null>(null);
   const [modalTarget, setModalTarget] = useState<{ session: string; window: string; windowId: string; claudePane?: string } | null>(null);
   const modalTargetRef = useRef<{ session: string; window: string; windowId: string; claudePane?: string } | null>(null);
 
@@ -477,9 +487,16 @@ const App: React.FC = () => {
   };
 
   const handleTimelineDetails = (event: TimelineEvent) => {
-      // Use historyId if available (from enhanced TimelineView), otherwise parse id
-      const id = event.historyId || parseInt(event.id);
-      setHistoryDetailId(id);
+      if (event.filePath) {
+        // Session-based: use file path for JSONL detail
+        setHistoryDetailFilePath(event.filePath);
+        setHistoryDetailId(null);
+      } else {
+        // Legacy: use history ID
+        const id = event.historyId || parseInt(event.id);
+        setHistoryDetailId(id);
+        setHistoryDetailFilePath(null);
+      }
   };
 
   const renderContent = () => {
@@ -626,8 +643,9 @@ const App: React.FC = () => {
             {/* History Detail Modal */}
             <HistoryDetailModal
                 historyId={historyDetailId || 0}
-                isOpen={historyDetailId !== null}
-                onClose={() => setHistoryDetailId(null)}
+                filePath={historyDetailFilePath || undefined}
+                isOpen={historyDetailId !== null || historyDetailFilePath !== null}
+                onClose={() => { setHistoryDetailId(null); setHistoryDetailFilePath(null); }}
             />
 
             {/* Add Window Modal */}

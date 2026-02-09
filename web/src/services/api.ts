@@ -63,6 +63,7 @@ export interface BackendState {
   goals: BackendGoal[];
   history: BackendHistoryRecord[];
   message: string;
+  changed?: string[];  // Tables that changed (for selective re-rendering)
 }
 
 // Fetch current state
@@ -480,6 +481,7 @@ export interface HistoryEntry {
   started_at: string;
   ended_at: string;
   message_count: number;
+  file_path?: string;  // Session JSONL file path (for session-based entries)
 }
 
 export interface HistoryGroup {
@@ -535,6 +537,31 @@ export async function exportHistory(
     throw new Error(`HTTP ${response.status}`);
   }
   return response.blob();
+}
+
+// Fetch sessions (from Claude JSONL files, scanned by background indexer)
+export async function fetchSessions(params: HistoryQueryParams = {}): Promise<HistoryResponse> {
+  const searchParams = new URLSearchParams();
+  if (params.range) searchParams.set('range', params.range);
+  if (params.search) searchParams.set('search', params.search);
+  if (params.page) searchParams.set('page', String(params.page));
+  if (params.per_page) searchParams.set('per_page', String(params.per_page));
+
+  const response = await fetch(`${API_BASE}/sessions?${searchParams}`);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+// Fetch session detail (parsed on demand from JSONL file)
+export async function fetchSessionDetail(filePath: string): Promise<HistoryDetail> {
+  const searchParams = new URLSearchParams({ file_path: filePath });
+  const response = await fetch(`${API_BASE}/sessions/detail?${searchParams}`);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
 }
 
 // Claude messages API

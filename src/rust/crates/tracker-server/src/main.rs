@@ -22,7 +22,7 @@ use anyhow::Result;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path as AxumPath, Query, State,
+        DefaultBodyLimit, Path as AxumPath, Query, State,
     },
     http::StatusCode,
     response::{IntoResponse, Json},
@@ -2497,6 +2497,30 @@ struct ClaudeMessage {
     role: String,  // "user" or "assistant"
     timestamp: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interaction: Option<ToolInteraction>,
+}
+
+#[derive(Serialize, Clone)]
+struct ToolInteraction {
+    tool_name: String,
+    questions: Vec<InteractiveQuestion>,
+}
+
+#[derive(Serialize, Clone)]
+struct InteractiveQuestion {
+    question: String,
+    header: String,
+    options: Vec<InteractiveOption>,
+    multi_select: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct InteractiveOption {
+    label: String,
+    description: String,
 }
 
 /// Response for Claude messages API
@@ -2710,6 +2734,25 @@ fn scan_claude_sessions(db_path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Strip inline <thinking>...</thinking> tags from text
+fn strip_thinking_tags(text: &str) -> String {
+    // Use a simple approach: find and remove <thinking>...</thinking> blocks
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<thinking>") {
+        result.push_str(&remaining[..start]);
+        if let Some(end) = remaining[start..].find("</thinking>") {
+            remaining = &remaining[start + end + "</thinking>".len()..];
+        } else {
+            // No closing tag, skip the rest
+            remaining = "";
+            break;
+        }
+    }
+    result.push_str(remaining);
+    result
+}
+
 /// Parse claude messages from a JSONL session file (blocking I/O)
 /// Reads only the last chunk of the file for performance with large files
 fn parse_claude_messages(session_file: &std::path::Path, _count: usize) -> Vec<ClaudeMessage> {
@@ -2770,52 +2813,126 @@ fn parse_claude_messages(session_file: &std::path::Path, _count: usize) -> Vec<C
 
         // Handle string content (user-typed messages)
         if let Some(text) = msg_content.and_then(|c| c.as_str()) {
-            if !text.is_empty()
-                && !text.starts_with("<bash")
-                && !text.starts_with("<system")
-                && !text.starts_with("<task-")
-                && !text.starts_with("<local-")
-                && !text.starts_with("<command-name>")
+            // Strip inline <thinking>...</thinking> tags
+            let cleaned = strip_thinking_tags(text);
+            let trimmed = cleaned.trim();
+            if !trimmed.is_empty()
+                && !trimmed.starts_with("<bash")
+                && !trimmed.starts_with("<system")
+                && !trimmed.starts_with("<task-")
+                && !trimmed.starts_with("<local-")
+                && !trimmed.starts_with("<command-name>")
             {
                 all_messages.push(ClaudeMessage {
                     role: msg_type.to_string(),
                     timestamp,
-                    text: text.to_string(),
+                    text: cleaned,
+                    thinking: None,
+                    interaction: None,
                 });
             }
         }
         // Handle array content
         else if let Some(arr) = msg_content.and_then(|c| c.as_array()) {
-            let first_type = arr.first()
-                .and_then(|item| item.get("type"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let mut text_parts: Vec<String> = Vec::new();
+            let mut thinking_parts: Vec<String> = Vec::new();
+            let mut interaction: Option<ToolInteraction> = None;
 
-            if first_type == "tool_result" || first_type == "tool_use" || first_type == "thinking" {
-                continue;
-            }
-
-            // Extract first meaningful text item
             for item in arr {
-                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty()
-                            && !trimmed.starts_with("<system")
-                            && !trimmed.starts_with("<bash")
-                            && !trimmed.starts_with("<task-")
-                            && !trimmed.starts_with("<local-")
-                            && !trimmed.starts_with("<command-name>")
-                        {
-                            all_messages.push(ClaudeMessage {
-                                role: msg_type.to_string(),
-                                timestamp,
-                                text: text.to_string(),
-                            });
-                            break;
+                let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match item_type {
+                    "text" => {
+                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty()
+                                && !trimmed.starts_with("<system")
+                                && !trimmed.starts_with("<bash")
+                                && !trimmed.starts_with("<task-")
+                                && !trimmed.starts_with("<local-")
+                                && !trimmed.starts_with("<command-name>")
+                            {
+                                // Strip inline <thinking> tags from text
+                                let cleaned = strip_thinking_tags(text);
+                                if !cleaned.trim().is_empty() {
+                                    text_parts.push(cleaned);
+                                }
+                            }
                         }
                     }
+                    "thinking" => {
+                        if let Some(text) = item.get("thinking").and_then(|t| t.as_str()) {
+                            if !text.trim().is_empty() {
+                                thinking_parts.push(text.to_string());
+                            }
+                        }
+                    }
+                    "tool_use" => {
+                        let tool_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        if tool_name == "AskUserQuestion" {
+                            if let Some(input) = item.get("input") {
+                                if let Some(questions_arr) = input.get("questions").and_then(|q| q.as_array()) {
+                                    let questions: Vec<InteractiveQuestion> = questions_arr.iter().filter_map(|q| {
+                                        let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let header = q.get("header").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        let options = q.get("options").and_then(|o| o.as_array())
+                                            .map(|opts| opts.iter().filter_map(|opt| {
+                                                Some(InteractiveOption {
+                                                    label: opt.get("label").and_then(|v| v.as_str())?.to_string(),
+                                                    description: opt.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                })
+                                            }).collect())
+                                            .unwrap_or_default();
+                                        if question.is_empty() { return None; }
+                                        Some(InteractiveQuestion { question, header, options, multi_select })
+                                    }).collect();
+
+                                    if !questions.is_empty() {
+                                        interaction = Some(ToolInteraction {
+                                            tool_name: tool_name.to_string(),
+                                            questions,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        else if tool_name == "ExitPlanMode" {
+                            // Surface plan approval as an interaction so Web UI can display it
+                            interaction = Some(ToolInteraction {
+                                tool_name: "ExitPlanMode".to_string(),
+                                questions: vec![InteractiveQuestion {
+                                    question: "Plan is ready for review. Would you like to proceed?".to_string(),
+                                    header: "PLAN APPROVAL".to_string(),
+                                    options: vec![
+                                        InteractiveOption { label: "1. Yes, clear context and bypass permissions".to_string(), description: String::new() },
+                                        InteractiveOption { label: "2. Yes, and bypass permissions".to_string(), description: String::new() },
+                                        InteractiveOption { label: "3. Yes, manually approve edits".to_string(), description: String::new() },
+                                    ],
+                                    multi_select: false,
+                                }],
+                            });
+                        }
+                        // Skip other tool_use types
+                    }
+                    "tool_result" => {
+                        // Skip tool results entirely
+                    }
+                    _ => {}
                 }
+            }
+
+            let combined_text = text_parts.join("\n\n");
+            let thinking = if thinking_parts.is_empty() { None } else { Some(thinking_parts.join("\n\n")) };
+
+            // Only skip if there's no text AND no interaction
+            if !combined_text.trim().is_empty() || interaction.is_some() {
+                all_messages.push(ClaudeMessage {
+                    role: msg_type.to_string(),
+                    timestamp,
+                    text: combined_text,
+                    thinking,
+                    interaction,
+                });
             }
         }
     }
@@ -2828,29 +2945,65 @@ async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json
     let count = params.count.or(params.limit).unwrap_or(1);
 
     // Determine project filter: either from explicit project param or from tmux pane's working directory
-    let project_filter = if let (Some(session), Some(window)) = (&params.session, &params.window) {
-        // Get the pane's current working directory via tmux
-        let target = format!("{}:{}", session, window);
-        let output = std::process::Command::new("tmux")
-            .args(["display-message", "-p", "-t", &target, "#{pane_current_path}"])
+    // Returns a list of candidate filters (original path + parent paths) to try matching
+    let project_filters: Vec<String> = if let (Some(session), Some(window)) = (&params.session, &params.window) {
+        // Try all panes in the window to find one that matches a Claude project directory
+        // This handles cases where the active pane is lazygit but Claude runs in another pane
+        let list_output = std::process::Command::new("tmux")
+            .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
             .output();
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !path.is_empty() {
-                    // Convert path to Claude project directory format
-                    // /Users/heygo/.config -> -Users-heygo--config
-                    // Both '/' and '.' are replaced with '-'
-                    Some(path.replace('/', "-").replace('.', "-"))
-                } else {
-                    params.project.clone()
+        let mut paths: Vec<String> = Vec::new();
+        if let Ok(out) = list_output {
+            if out.status.success() {
+                let output_str = String::from_utf8_lossy(&out.stdout);
+                for line in output_str.lines() {
+                    let path = line.trim().to_string();
+                    if !path.is_empty() && !paths.contains(&path) {
+                        paths.push(path);
+                    }
                 }
             }
-            _ => params.project.clone()
         }
+
+        // Fallback: try the active pane if list-panes failed
+        if paths.is_empty() {
+            let target = format!("{}:{}", session, window);
+            let output = std::process::Command::new("tmux")
+                .args(["display-message", "-p", "-t", &target, "#{pane_current_path}"])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+
+        // Convert each path to Claude project directory format and also add parent paths
+        // Claude Code replaces '/', '.', and '_' with '-' in project directory names
+        let mut filters: Vec<String> = Vec::new();
+        for path in &paths {
+            let mut current = path.as_str();
+            loop {
+                let converted = current.replace('/', "-").replace('.', "-").replace('_', "-");
+                if !filters.contains(&converted) {
+                    filters.push(converted);
+                }
+                // Try parent directory
+                match current.rfind('/') {
+                    Some(pos) if pos > 0 => current = &current[..pos],
+                    _ => break,
+                }
+            }
+        }
+        filters
+    } else if let Some(ref project) = params.project {
+        vec![project.clone()]
     } else {
-        params.project.clone()
+        vec![]
     };
 
     // Find session files
@@ -2874,14 +3027,12 @@ async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json
             let project_dir = entry.path();
             if project_dir.is_dir() {
                 // Apply project filter if specified
-                // The filter is a path converted from tmux pane's working directory
-                // (e.g., "/Users/heygo/.config" -> "-Users-heygo--config")
-                // Use exact match on directory name to avoid matching subdirectories
-                if let Some(ref filter) = project_filter {
+                // Try each candidate filter (exact path, parent paths) against directory name
+                if !project_filters.is_empty() {
                     let dir_name = project_dir.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    if dir_name != *filter {
+                    if !project_filters.iter().any(|f| dir_name == *f) {
                         continue;
                     }
                 }
@@ -2905,7 +3056,7 @@ async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json
     // Sort by modification time, newest first
     candidate_files.sort_by(|a, b| b.1.cmp(&a.1));
 
-    debug!("Claude messages: Found {} candidate session files for filter {:?}", candidate_files.len(), project_filter);
+    debug!("Claude messages: Found {} candidate session files for filter {:?}", candidate_files.len(), project_filters);
 
     // Helper function to check if a file has real conversation content
     // Uses BufReader for efficient streaming without loading entire file
@@ -4634,7 +4785,7 @@ async fn main() -> Result<()> {
         .route("/api/tmux/closed-windows/:session", get(get_closed_windows))
         .route("/api/tmux/closed-windows", delete(delete_closed_window))
         .route("/api/tmux/resume-window", post(resume_closed_window))
-        .route("/api/tmux/send-image", post(tmux_send_image))
+        .route("/api/tmux/send-image", post(tmux_send_image).layer(DefaultBodyLimit::max(50 * 1024 * 1024)))
         .route("/api/tmux/new-window", post(tmux_new_window))
         .route("/api/tmux/select-window", post(tmux_select_window))
         // Stream (real-time pane output)

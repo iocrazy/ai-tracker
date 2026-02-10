@@ -565,10 +565,29 @@ export async function fetchSessionDetail(filePath: string): Promise<HistoryDetai
 }
 
 // Claude messages API
+export interface InteractiveOption {
+  label: string;
+  description: string;
+}
+
+export interface InteractiveQuestion {
+  question: string;
+  header: string;
+  options: InteractiveOption[];
+  multi_select: boolean;
+}
+
+export interface ToolInteraction {
+  tool_name: string;
+  questions: InteractiveQuestion[];
+}
+
 export interface ClaudeMessage {
   role: string;  // "user" or "assistant"
   timestamp: string;
   text: string;
+  thinking?: string;
+  interaction?: ToolInteraction;
 }
 
 export interface ClaudeMessagesResponse {

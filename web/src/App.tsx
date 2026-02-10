@@ -436,11 +436,13 @@ const App: React.FC = () => {
     const win = session?.windows.find(w => w.name === windowName);
     const isActive = win?.status === 'BUSY' || win?.status === 'PAUSED';
 
-    const data = await fetchClaudeMessages(20, { session: sessionName, window: windowName });
+    const data = await fetchClaudeMessages(50, { session: sessionName, window: windowName });
     const messages: ChatMessage[] = data.messages.map(m => ({
       sender: m.role === 'user' ? 'USER' : 'AGENT',
       text: m.text,
       timestamp: m.timestamp?.slice(11, 19) || '',
+      thinking: m.thinking,
+      interaction: m.interaction,
     }));
     return { messages, isActive };
   }, [sessions]);

@@ -248,6 +248,21 @@ impl Database {
             [],
         )?;
 
+        // Projects table (registry of known git projects for per-project storage)
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS projects (
+                git_dir TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                last_session TEXT DEFAULT '',
+                last_window TEXT DEFAULT '',
+                last_active_at TEXT,
+                notes_count INTEGER DEFAULT 0,
+                goals_count INTEGER DEFAULT 0,
+                history_count INTEGER DEFAULT 0
+            )",
+            [],
+        )?;
+
         // Create indices
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_id)",
@@ -1226,6 +1241,118 @@ impl Database {
         }
         Ok(removed)
     }
+
+    // =========================================================================
+    // Project registry operations
+    // =========================================================================
+
+    /// Register a project (insert or ignore if already exists)
+    pub fn register_project(&self, git_dir: &str, name: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO projects (git_dir, name, last_active_at)
+             VALUES (?1, ?2, ?3)",
+            params![git_dir, name, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Update project activity timestamps and counts
+    pub fn update_project_activity(&self, git_dir: &str, session: &str, window: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET
+                last_session = ?2,
+                last_window = ?3,
+                last_active_at = ?4,
+                history_count = (SELECT COUNT(*) FROM history WHERE session_id IN (
+                    SELECT session_id FROM tasks WHERE key LIKE '%' || ?1 || '%'
+                ))
+             WHERE git_dir = ?1",
+            params![git_dir, session, window, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Update project counts from project DB stats
+    pub fn update_project_counts(&self, git_dir: &str, history_count: i32, notes_count: i32, goals_count: i32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET
+                history_count = ?2,
+                notes_count = ?3,
+                goals_count = ?4,
+                last_active_at = ?5
+             WHERE git_dir = ?1",
+            params![git_dir, history_count, notes_count, goals_count, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// List all registered projects
+    pub fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT git_dir, name, last_session, last_window, last_active_at,
+                    notes_count, goals_count, history_count
+             FROM projects
+             ORDER BY last_active_at DESC",
+        )?;
+
+        let projects = stmt
+            .query_map([], |row| {
+                Ok(ProjectInfo {
+                    git_dir: row.get(0)?,
+                    name: row.get(1)?,
+                    last_session: row.get(2)?,
+                    last_window: row.get(3)?,
+                    last_active_at: row.get(4)?,
+                    notes_count: row.get(5)?,
+                    goals_count: row.get(6)?,
+                    history_count: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(projects)
+    }
+
+    /// Get a single project by git_dir
+    pub fn get_project(&self, git_dir: &str) -> Result<Option<ProjectInfo>> {
+        let result = self.conn.query_row(
+            "SELECT git_dir, name, last_session, last_window, last_active_at,
+                    notes_count, goals_count, history_count
+             FROM projects WHERE git_dir = ?1",
+            params![git_dir],
+            |row| {
+                Ok(ProjectInfo {
+                    git_dir: row.get(0)?,
+                    name: row.get(1)?,
+                    last_session: row.get(2)?,
+                    last_window: row.get(3)?,
+                    last_active_at: row.get(4)?,
+                    notes_count: row.get(5)?,
+                    goals_count: row.get(6)?,
+                    history_count: row.get(7)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Project registry info
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectInfo {
+    pub git_dir: String,
+    pub name: String,
+    pub last_session: String,
+    pub last_window: String,
+    pub last_active_at: Option<String>,
+    pub notes_count: i32,
+    pub goals_count: i32,
+    pub history_count: i32,
 }
 
 /// Closed window record

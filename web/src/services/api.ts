@@ -461,6 +461,41 @@ export interface HistoryDetail {
   stats?: HistoryDetailStats;
 }
 
+// Project info (from /api/projects)
+export interface ProjectInfo {
+  git_dir: string;
+  name: string;
+  last_session: string;
+  last_window: string;
+  last_active_at: string | null;
+  notes_count: number;
+  goals_count: number;
+  history_count: number;
+}
+
+// Fetch registered projects
+export async function fetchProjects(): Promise<ProjectInfo[]> {
+  const response = await fetch(`${API_BASE}/projects`);
+  if (!response.ok) return [];
+  return response.json();
+}
+
+// Fetch project-specific history
+export async function fetchProjectHistory(params: HistoryQueryParams = {}): Promise<HistoryResponse> {
+  const searchParams = new URLSearchParams();
+  if (params.project) searchParams.set('project', params.project);
+  if (params.range) searchParams.set('range', params.range);
+  if (params.search) searchParams.set('search', params.search);
+  if (params.page) searchParams.set('page', String(params.page));
+  if (params.per_page) searchParams.set('per_page', String(params.per_page));
+
+  const response = await fetch(`${API_BASE}/projects/history?${searchParams}`);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 // History query params
 export interface HistoryQueryParams {
   range?: 'today' | 'yesterday' | '7days' | '30days' | 'all';
@@ -469,6 +504,7 @@ export interface HistoryQueryParams {
   search?: string;
   page?: number;
   per_page?: number;
+  project?: string;
 }
 
 export interface HistoryEntry {
@@ -482,6 +518,7 @@ export interface HistoryEntry {
   ended_at: string;
   message_count: number;
   file_path?: string;  // Session JSONL file path (for session-based entries)
+  project?: string;    // Project name (for project-filtered entries)
 }
 
 export interface HistoryGroup {

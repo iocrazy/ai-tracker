@@ -1377,7 +1377,7 @@ impl TmuxAgent {
     }
 
     /// Synchronous version of find_git_root
-    fn find_git_root_sync(path: &str) -> Option<String> {
+    pub fn find_git_root_sync(path: &str) -> Option<String> {
         let output = std::process::Command::new("git")
             .args(["-C", path, "rev-parse", "--show-toplevel"])
             .output()

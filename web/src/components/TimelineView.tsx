@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { TimelineEvent } from '../types';
 import { Search, X, RefreshCw, Download, ChevronDown, ChevronLeft, ChevronRight, MessageSquare, Wrench, FileSearch } from 'lucide-react';
-import { fetchHistory, fetchSessions, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory } from '../services/api';
+import { fetchHistory, fetchSessions, fetchProjects, fetchProjectHistory, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory, ProjectInfo } from '../services/api';
 import { SearchHighlight } from './SearchHighlight';
 import { MarkdownText } from './MarkdownText';
 
@@ -38,6 +38,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
   const [deepQuery, setDeepQuery] = useState('');
   const [deepSearchInput, setDeepSearchInput] = useState('');
   const [isDeepSearchOpen, setIsDeepSearchOpen] = useState(false);
+
+  // Project filter
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [selectedProject, setSelectedProject] = useState<string>('all');
 
   // Fetched history data
   const [historyData, setHistoryData] = useState<HistoryResponse | null>(null);
@@ -81,6 +85,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
     setDeepQuery('');
   }, []);
 
+  // Fetch projects on mount
+  useEffect(() => {
+    fetchProjects().then(setProjects).catch(() => {});
+  }, []);
+
   // Fetch history data
   const loadHistory = useCallback(async () => {
     setIsLoading(true);
@@ -93,7 +102,16 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
       if (deepQuery) {
         params.search = deepQuery;
       }
-      const data = await fetchSessions(params);
+
+      let data: HistoryResponse;
+      if (selectedProject !== 'all') {
+        // Fetch from project-specific DB
+        params.project = selectedProject;
+        data = await fetchProjectHistory(params);
+      } else {
+        // Default: fetch from JSONL sessions
+        data = await fetchSessions(params);
+      }
       setHistoryData(data);
       setTotal(data.total);
     } catch (error) {
@@ -101,7 +119,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
     } finally {
       setIsLoading(false);
     }
-  }, [timeRange, page, perPage, deepQuery]);
+  }, [timeRange, page, perPage, deepQuery, selectedProject]);
 
   // Initial load and refresh on filter change
   useEffect(() => {
@@ -362,6 +380,44 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
               </button>
             </div>
         </div>
+
+        {/* Project Filter Bar */}
+        {projects.length > 0 && (
+          <div className="px-3 sm:px-6 py-1.5 border-b border-green-900/30 bg-black/90 flex items-center gap-1 overflow-x-auto flex-shrink-0 scrollbar-hide">
+            <button
+              onClick={() => { setSelectedProject('all'); setPage(1); }}
+              className={`px-2 py-0.5 text-xs font-mono whitespace-nowrap transition-colors ${
+                selectedProject === 'all'
+                  ? 'text-black bg-green-500 font-bold'
+                  : 'text-green-600 hover:text-green-400 hover:bg-green-900/20'
+              }`}
+            >
+              ALL
+            </button>
+            {projects.map((p) => {
+              const name = p.name || p.git_dir.split('/').pop() || p.git_dir;
+              return (
+                <button
+                  key={p.git_dir}
+                  onClick={() => { setSelectedProject(p.git_dir); setPage(1); }}
+                  className={`px-2 py-0.5 text-xs font-mono whitespace-nowrap transition-colors ${
+                    selectedProject === p.git_dir
+                      ? 'text-black bg-cyan-400 font-bold'
+                      : 'text-green-600 hover:text-green-400 hover:bg-green-900/20'
+                  }`}
+                  title={`${p.git_dir} (${p.history_count} tasks)`}
+                >
+                  {name}
+                  {p.history_count > 0 && (
+                    <span className={`ml-1 ${selectedProject === p.git_dir ? 'text-black/60' : 'text-green-800'}`}>
+                      ({p.history_count})
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Deep Search Bar */}
         {isDeepSearchOpen && (

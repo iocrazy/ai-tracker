@@ -10,6 +10,7 @@ mod db;
 mod env_file;
 mod layout;
 mod port;
+mod project_db;
 mod stream;
 mod transcript;
 mod workspace;
@@ -136,6 +137,8 @@ struct AppState {
     last_tmux_windows: Mutex<Vec<agent::TmuxWindowInfo>>,
     /// Stream manager for real-time pane output capture
     stream_manager: stream::StreamManager,
+    /// Per-project database connection cache
+    project_dbs: project_db::ProjectDbManager,
 }
 
 impl AppState {
@@ -148,7 +151,70 @@ impl AppState {
             broadcast_tx,
             last_tmux_windows: Mutex::new(Vec::new()),
             stream_manager: stream::StreamManager::new(),
+            project_dbs: project_db::ProjectDbManager::new(),
         })
+    }
+
+    /// Resolve git_dir for a session/window from cached tmux windows
+    fn resolve_git_dir_for_window(&self, session_id: &str, window_id: &str) -> Option<String> {
+        let windows = self.last_tmux_windows.lock().unwrap();
+        for win in windows.iter() {
+            if win.session_id == session_id && win.window_id == window_id {
+                // Prefer cached git_dir, fall back to working_dir -> git root discovery
+                if let Some(ref gd) = win.git_dir {
+                    if !gd.is_empty() {
+                        return Some(gd.clone());
+                    }
+                }
+                if let Some(ref wd) = win.working_dir {
+                    if !wd.is_empty() {
+                        return agent::TmuxAgent::find_git_root_sync(wd);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Write to project DB if git_dir can be resolved, and register project in global DB
+    fn write_to_project_db_if_possible(
+        &self,
+        git_dir: &str,
+        session: &str,
+        window: &str,
+        action: impl FnOnce(&project_db::ProjectDatabase) -> anyhow::Result<()>,
+    ) {
+        // Register project in global DB
+        let project_name = std::path::Path::new(git_dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        {
+            let state = self.state.lock().unwrap();
+            let _ = state.db.register_project(git_dir, &project_name);
+            let _ = state.db.update_project_activity(git_dir, session, window);
+        }
+
+        // Write to project DB
+        match self.project_dbs.get_or_open(git_dir) {
+            Ok(pdb) => {
+                if let Err(e) = action(&pdb) {
+                    warn!("Failed to write to project DB {}: {}", git_dir, e);
+                }
+                // Update counts in global DB
+                let state = self.state.lock().unwrap();
+                let _ = state.db.update_project_counts(
+                    git_dir,
+                    pdb.history_count(),
+                    pdb.notes_count(),
+                    pdb.goals_count(),
+                );
+            }
+            Err(e) => {
+                warn!("Failed to open project DB {}: {}", git_dir, e);
+            }
+        }
     }
 
     /// Get current state as Envelope for WebSocket broadcast
@@ -380,6 +446,7 @@ impl AppState {
                 old_win.session_name, old_win.window_name, old_win.window_id, working_dir, git_branch, pane_count
             );
 
+            // Save to global DB
             let db = &self.state.lock().unwrap().db;
             if let Err(e) = db.save_closed_window(
                 &old_win.session_id,
@@ -390,6 +457,22 @@ impl AppState {
                 pane_count,
             ) {
                 warn!("Failed to auto-save closed window: {}", e);
+            }
+
+            // Also save to project DB if git_dir is available
+            let git_dir = old_win.git_dir.clone()
+                .or_else(|| agent::TmuxAgent::find_git_root_sync(&working_dir));
+            if let Some(ref gd) = git_dir {
+                self.write_to_project_db_if_possible(gd, &old_win.session_name, &old_win.window_name, |pdb| {
+                    pdb.save_closed_window(
+                        &old_win.session_id,
+                        &old_win.session_name,
+                        &old_win.window_name,
+                        &working_dir,
+                        &git_branch,
+                        pane_count,
+                    )
+                });
             }
         }
     }
@@ -564,6 +647,9 @@ struct HistoryQueryParams {
     /// Items per page
     #[serde(default)]
     per_page: Option<i32>,
+    /// Filter by project git_dir
+    #[serde(default)]
+    project: Option<String>,
 }
 
 /// History group
@@ -588,6 +674,8 @@ struct HistoryEntry {
     message_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
 }
 
 /// History response (grouped)
@@ -1081,15 +1169,30 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
             let mut state = app_state.state.lock().unwrap();
 
             // Remove completed task from memory and DB
-            // Timeline data is provided by session JSONL scanning
-            if state.tasks.remove(&key).is_some() {
+            // Also archive to per-project DB if git_dir can be resolved
+            if let Some(task) = state.tasks.remove(&key) {
                 if let Err(e) = state.db.delete_task(&key) {
                     error!("Failed to delete finished task: {}", e);
                 }
+                let task_clone = task.clone();
+                let session = task.session.clone();
+                let window = task.window.clone();
+                let session_id = task.session_id.clone();
+                let window_id = task.window_id.clone();
+                drop(state);
+
+                // Try to archive to project DB
+                let git_dir = app_state.resolve_git_dir_for_window(&session_id, &window_id);
+                if let Some(ref gd) = git_dir {
+                    app_state.write_to_project_db_if_possible(gd, &session, &window, |pdb| {
+                        pdb.archive_to_history(&task_clone)?;
+                        Ok(())
+                    });
+                }
+            } else {
+                drop(state);
             }
-            drop(state);
             app_state.broadcast_state();
-            // Window status icons are now handled by tmux status bar scripts
         }
 
         commands::PAUSE_TASK => {
@@ -1170,8 +1273,18 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
             if let Err(e) = state.db.save_note(&note) {
                 error!("Failed to save note to database: {}", e);
             }
-            state.notes.insert(note.id.clone(), note);
+            state.notes.insert(note.id.clone(), note.clone());
             drop(state);
+
+            // Also save to project DB
+            let git_dir = app_state.resolve_git_dir_for_window(&req.session_id, &req.window_id);
+            if let Some(ref gd) = git_dir {
+                app_state.write_to_project_db_if_possible(gd, &req.session, &req.window, |pdb| {
+                    pdb.save_note(&note)?;
+                    Ok(())
+                });
+            }
+
             app_state.broadcast_state();
         }
 
@@ -1277,8 +1390,18 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
             if let Err(e) = state.db.save_goal(&goal) {
                 error!("Failed to save goal to database: {}", e);
             }
-            state.goals.insert(goal.id.clone(), goal);
+            state.goals.insert(goal.id.clone(), goal.clone());
             drop(state);
+
+            // Also save to project DB
+            let git_dir = app_state.resolve_git_dir_for_window(&req.session_id, &req.window_id);
+            if let Some(ref gd) = git_dir {
+                app_state.write_to_project_db_if_possible(gd, &req.session, &req.window, |pdb| {
+                    pdb.save_goal(&goal)?;
+                    Ok(())
+                });
+            }
+
             app_state.broadcast_state();
         }
 
@@ -1726,6 +1849,7 @@ async fn get_history(Query(params): Query<HistoryQueryParams>) -> Json<HistoryRe
                 ended_at: row.get::<_, String>(7).unwrap_or_default(),
                 message_count: 0,
                 file_path: None,
+                project: None,
             })
         })
         .ok()
@@ -1868,6 +1992,7 @@ async fn get_sessions(Query(params): Query<SessionQueryParams>) -> Json<HistoryR
             ended_at: e.ended_at.clone(),
             message_count: e.message_count,
             file_path: Some(e.file_path.clone()),
+            project: None,
         }
     }).collect();
 
@@ -4667,6 +4792,141 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
 // Main
 // ============================================================================
 
+// ============================================================================
+// Project API
+// ============================================================================
+
+/// Get all registered projects
+async fn get_projects(State(state): State<Arc<AppState>>) -> Json<Vec<db::ProjectInfo>> {
+    let server_state = state.state.lock().unwrap();
+    Json(server_state.db.list_projects().unwrap_or_default())
+}
+
+/// Get project history (reads from project's .aitracker/tracker.db)
+async fn get_project_history(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HistoryQueryParams>,
+) -> Json<HistoryResponse> {
+    let project = match params.project {
+        Some(ref p) if !p.is_empty() => p.clone(),
+        _ => {
+            return Json(HistoryResponse {
+                groups: vec![],
+                total: 0,
+            });
+        }
+    };
+
+    let pdb = match state.project_dbs.get_or_open(&project) {
+        Ok(db) => db,
+        Err(e) => {
+            error!("Failed to open project DB {}: {}", project, e);
+            return Json(HistoryResponse {
+                groups: vec![],
+                total: 0,
+            });
+        }
+    };
+
+    let (limit, offset) = if let Some(page) = params.page {
+        let per_page = params.per_page.unwrap_or(50);
+        let page_offset = (page - 1).max(0) * per_page;
+        (per_page, page_offset)
+    } else {
+        (params.limit.unwrap_or(100), params.offset.unwrap_or(0))
+    };
+
+    // Build date filter
+    let today = chrono::Local::now().date_naive();
+    let date_filter = params.range.as_deref().map(|r| {
+        match r {
+            "today" => format!(" AND DATE(completed_at) = '{}'", today.format("%Y-%m-%d")),
+            "yesterday" => format!(" AND DATE(completed_at) = '{}'", (today - chrono::Duration::days(1)).format("%Y-%m-%d")),
+            "7days" => format!(" AND DATE(completed_at) >= '{}'", (today - chrono::Duration::days(7)).format("%Y-%m-%d")),
+            "30days" => format!(" AND DATE(completed_at) >= '{}'", (today - chrono::Duration::days(30)).format("%Y-%m-%d")),
+            _ => String::new(),
+        }
+    }).unwrap_or_default();
+
+    let project_name = std::path::Path::new(&project)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let (entries, total) = match pdb.load_history_paginated(
+        limit,
+        offset,
+        &date_filter,
+        params.search.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to load project history: {}", e);
+            return Json(HistoryResponse {
+                groups: vec![],
+                total: 0,
+            });
+        }
+    };
+
+    // Convert project_db::HistoryEntry to main HistoryEntry
+    let entries: Vec<HistoryEntry> = entries.into_iter().map(|e| {
+        HistoryEntry {
+            id: e.id,
+            session: e.session,
+            window: e.window,
+            summary: e.summary,
+            completion_note: e.completion_note,
+            duration_seconds: e.duration_seconds,
+            started_at: e.started_at,
+            ended_at: e.ended_at,
+            message_count: e.message_count,
+            file_path: e.file_path,
+            project: Some(project_name.clone()),
+        }
+    }).collect();
+
+    // Group by date
+    let mut today_entries = vec![];
+    let mut yesterday_entries = vec![];
+    let mut this_week_entries = vec![];
+    let mut older_entries = vec![];
+    let yesterday_date = today - chrono::Duration::days(1);
+
+    for entry in entries {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&entry.started_at) {
+            let date = dt.date_naive();
+            if date == today {
+                today_entries.push(entry);
+            } else if date == yesterday_date {
+                yesterday_entries.push(entry);
+            } else if (today - date).num_days() < 7 {
+                this_week_entries.push(entry);
+            } else {
+                older_entries.push(entry);
+            }
+        } else {
+            older_entries.push(entry);
+        }
+    }
+
+    let mut groups = vec![];
+    if !today_entries.is_empty() {
+        groups.push(HistoryGroup { label: "Today".to_string(), records: today_entries });
+    }
+    if !yesterday_entries.is_empty() {
+        groups.push(HistoryGroup { label: "Yesterday".to_string(), records: yesterday_entries });
+    }
+    if !this_week_entries.is_empty() {
+        groups.push(HistoryGroup { label: "This Week".to_string(), records: this_week_entries });
+    }
+    if !older_entries.is_empty() {
+        groups.push(HistoryGroup { label: "Older".to_string(), records: older_entries });
+    }
+
+    Json(HistoryResponse { groups, total })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -4748,6 +5008,9 @@ async fn main() -> Result<()> {
         // Sessions (from Claude JSONL files)
         .route("/api/sessions", get(get_sessions))
         .route("/api/sessions/detail", get(get_session_detail))
+        // Projects (per-project .aitracker storage)
+        .route("/api/projects", get(get_projects))
+        .route("/api/projects/history", get(get_project_history))
         // History (legacy, from hooks)
         .route("/api/history", get(get_history))
         .route("/api/history/stats", get(get_history_stats))

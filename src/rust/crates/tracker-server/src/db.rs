@@ -13,6 +13,8 @@ use tracing::info;
 
 use tracker_core::{ConversationMessage, GitCommit, Goal, HistoryRecord, Note, NoteScope, Task, TaskStatus, ToolUsage};
 
+use crate::project_db;
+
 /// Database wrapper with SQLite change tracking
 pub struct Database {
     conn: Connection,
@@ -398,63 +400,7 @@ impl Database {
 
     /// Archive a completed task to history (upsert: merge with recent entry for same session/window/pane)
     pub fn archive_to_history(&self, task: &Task) -> Result<i64> {
-        // Check for a recent history entry for the same session/window/pane (within 60 minutes)
-        let recent_id: Option<i64> = self.conn.query_row(
-            "SELECT id FROM history
-             WHERE session_id = ?1 AND window_id = ?2 AND pane = ?3
-               AND completed_at > datetime('now', '-60 minutes')
-             ORDER BY id DESC LIMIT 1",
-            params![task.session_id, task.window_id, task.pane],
-            |row| row.get(0),
-        ).ok();
-
-        if let Some(id) = recent_id {
-            // Update existing entry — keep the longer/more informative summary
-            self.conn.execute(
-                "UPDATE history SET
-                    summary = CASE WHEN LENGTH(?1) > LENGTH(summary) THEN ?1 ELSE summary END,
-                    completion_note = CASE WHEN ?2 != '' THEN ?2 ELSE completion_note END,
-                    completed_at = ?3,
-                    duration_seconds = ?4,
-                    transcript_path = CASE WHEN ?5 != '' THEN ?5 ELSE transcript_path END
-                 WHERE id = ?6",
-                params![
-                    task.summary,
-                    task.completion_note,
-                    task.completed_at.map(|t| t.to_rfc3339()),
-                    task.duration_seconds,
-                    task.transcript_path,
-                    id,
-                ],
-            )?;
-            // Clear old related data (will be re-parsed from transcript)
-            let _ = self.conn.execute("DELETE FROM conversation_messages WHERE history_id = ?", [id]);
-            let _ = self.conn.execute("DELETE FROM tool_usage WHERE history_id = ?", [id]);
-            let _ = self.conn.execute("DELETE FROM commits WHERE history_id = ?", [id]);
-            Ok(id)
-        } else {
-            // Insert new entry
-            self.conn.execute(
-                "INSERT INTO history
-                 (session_id, session, window_id, window, pane, summary,
-                  completion_note, started_at, completed_at, duration_seconds, transcript_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    task.session_id,
-                    task.session,
-                    task.window_id,
-                    task.window,
-                    task.pane,
-                    task.summary,
-                    task.completion_note,
-                    task.started_at.map(|t| t.to_rfc3339()),
-                    task.completed_at.map(|t| t.to_rfc3339()),
-                    task.duration_seconds,
-                    task.transcript_path,
-                ],
-            )?;
-            Ok(self.conn.last_insert_rowid())
-        }
+        project_db::archive_to_history_on(&self.conn, task)
     }
 
     /// Get recent history entries
@@ -745,19 +691,7 @@ impl Database {
 
     /// Save conversation messages for a history record
     pub fn save_conversation_messages(&self, history_id: i64, messages: &[ConversationMessage]) -> Result<()> {
-        for msg in messages {
-            self.conn.execute(
-                "INSERT INTO conversation_messages (history_id, role, content, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    history_id,
-                    msg.role,
-                    msg.content,
-                    msg.created_at.map(|t| t.to_rfc3339()),
-                ],
-            )?;
-        }
-        Ok(())
+        project_db::save_conversation_messages_on(&self.conn, history_id, messages)
     }
 
     /// Load conversation messages for a history record
@@ -798,21 +732,7 @@ impl Database {
 
     /// Save tool usage records for a history entry
     pub fn save_tool_usage(&self, history_id: i64, tool_usages: &[ToolUsage]) -> Result<()> {
-        for usage in tool_usages {
-            self.conn.execute(
-                "INSERT INTO tool_usage (history_id, tool_name, tool_args, result_summary, success, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    history_id,
-                    usage.tool_name,
-                    usage.tool_args,
-                    usage.result_summary,
-                    usage.success as i32,
-                    usage.timestamp.map(|t| t.to_rfc3339()),
-                ],
-            )?;
-        }
-        Ok(())
+        project_db::save_tool_usage_on(&self.conn, history_id, tool_usages)
     }
 
     /// Load tool usage records for a history entry
@@ -850,20 +770,7 @@ impl Database {
 
     /// Save git commit records for a history entry
     pub fn save_commits(&self, history_id: i64, commits: &[GitCommit]) -> Result<()> {
-        for commit in commits {
-            self.conn.execute(
-                "INSERT INTO commits (history_id, commit_hash, commit_message, files_changed, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    history_id,
-                    commit.commit_hash,
-                    commit.commit_message,
-                    commit.files_changed,
-                    commit.timestamp.map(|t| t.to_rfc3339()),
-                ],
-            )?;
-        }
-        Ok(())
+        project_db::save_commits_on(&self.conn, history_id, commits)
     }
 
     /// Load git commit records for a history entry
@@ -1256,16 +1163,13 @@ impl Database {
         Ok(())
     }
 
-    /// Update project activity timestamps and counts
+    /// Update project activity timestamps (counts are synced separately by update_project_counts)
     pub fn update_project_activity(&self, git_dir: &str, session: &str, window: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE projects SET
                 last_session = ?2,
                 last_window = ?3,
-                last_active_at = ?4,
-                history_count = (SELECT COUNT(*) FROM history WHERE session_id IN (
-                    SELECT session_id FROM tasks WHERE key LIKE '%' || ?1 || '%'
-                ))
+                last_active_at = ?4
              WHERE git_dir = ?1",
             params![git_dir, session, window, Utc::now().to_rfc3339()],
         )?;

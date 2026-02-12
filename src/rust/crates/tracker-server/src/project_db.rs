@@ -13,11 +13,139 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use tracing::info;
 
-use tracker_core::{
-    ConversationMessage, GitCommit, Goal, Note, NoteScope, Task, ToolUsage,
-};
+use tracker_core::{ConversationMessage, GitCommit, Goal, Note, NoteScope, Task, ToolUsage};
 
 use crate::db::ClosedWindow;
+
+// =============================================================================
+// Shared free functions (used by both global Database and ProjectDatabase)
+// =============================================================================
+
+/// Archive a completed task to history (with 60-min merge window).
+/// Shared logic used by both global DB and per-project DB.
+pub fn archive_to_history_on(conn: &Connection, task: &Task) -> Result<i64> {
+    let recent_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM history
+             WHERE session_id = ?1 AND window_id = ?2 AND pane = ?3
+               AND completed_at > datetime('now', '-60 minutes')
+             ORDER BY id DESC LIMIT 1",
+            params![task.session_id, task.window_id, task.pane],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(id) = recent_id {
+        conn.execute(
+            "UPDATE history SET
+                summary = CASE WHEN LENGTH(?1) > LENGTH(summary) THEN ?1 ELSE summary END,
+                completion_note = CASE WHEN ?2 != '' THEN ?2 ELSE completion_note END,
+                completed_at = ?3,
+                duration_seconds = ?4,
+                transcript_path = CASE WHEN ?5 != '' THEN ?5 ELSE transcript_path END
+             WHERE id = ?6",
+            params![
+                task.summary,
+                task.completion_note,
+                task.completed_at.map(|t| t.to_rfc3339()),
+                task.duration_seconds,
+                task.transcript_path,
+                id,
+            ],
+        )?;
+        let _ = conn.execute("DELETE FROM conversation_messages WHERE history_id = ?", [id]);
+        let _ = conn.execute("DELETE FROM tool_usage WHERE history_id = ?", [id]);
+        let _ = conn.execute("DELETE FROM commits WHERE history_id = ?", [id]);
+        Ok(id)
+    } else {
+        conn.execute(
+            "INSERT INTO history
+             (session_id, session, window_id, window, pane, summary,
+              completion_note, started_at, completed_at, duration_seconds, transcript_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                task.session_id,
+                task.session,
+                task.window_id,
+                task.window,
+                task.pane,
+                task.summary,
+                task.completion_note,
+                task.started_at.map(|t| t.to_rfc3339()),
+                task.completed_at.map(|t| t.to_rfc3339()),
+                task.duration_seconds,
+                task.transcript_path,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+}
+
+/// Save conversation messages for a history entry. Shared logic.
+pub fn save_conversation_messages_on(
+    conn: &Connection,
+    history_id: i64,
+    messages: &[ConversationMessage],
+) -> Result<()> {
+    for msg in messages {
+        conn.execute(
+            "INSERT INTO conversation_messages (history_id, role, content, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                history_id,
+                msg.role,
+                msg.content,
+                msg.created_at.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Save tool usage records for a history entry. Shared logic.
+pub fn save_tool_usage_on(
+    conn: &Connection,
+    history_id: i64,
+    tool_usages: &[ToolUsage],
+) -> Result<()> {
+    for usage in tool_usages {
+        conn.execute(
+            "INSERT INTO tool_usage (history_id, tool_name, tool_args, result_summary, success, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                history_id,
+                usage.tool_name,
+                usage.tool_args,
+                usage.result_summary,
+                usage.success as i32,
+                usage.timestamp.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Save git commit records for a history entry. Shared logic.
+pub fn save_commits_on(
+    conn: &Connection,
+    history_id: i64,
+    commits: &[GitCommit],
+) -> Result<()> {
+    for commit in commits {
+        conn.execute(
+            "INSERT INTO commits (history_id, commit_hash, commit_message, files_changed, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                history_id,
+                commit.commit_hash,
+                commit.commit_message,
+                commit.files_changed,
+                commit.timestamp.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+    }
+    Ok(())
+}
 
 /// Per-project database stored at `<git_root>/.aitracker/tracker.db`
 ///
@@ -186,6 +314,12 @@ impl ProjectDatabase {
             [],
         )?;
 
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_history_session_window_pane
+             ON history(session_id, window_id, pane)",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -196,62 +330,7 @@ impl ProjectDatabase {
     /// Archive a completed task to history (with 60-min merge window)
     pub fn archive_to_history(&self, task: &Task) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-
-        let recent_id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM history
-                 WHERE session_id = ?1 AND window_id = ?2 AND pane = ?3
-                   AND completed_at > datetime('now', '-60 minutes')
-                 ORDER BY id DESC LIMIT 1",
-                params![task.session_id, task.window_id, task.pane],
-                |row| row.get(0),
-            )
-            .ok();
-
-        if let Some(id) = recent_id {
-            conn.execute(
-                "UPDATE history SET
-                    summary = CASE WHEN LENGTH(?1) > LENGTH(summary) THEN ?1 ELSE summary END,
-                    completion_note = CASE WHEN ?2 != '' THEN ?2 ELSE completion_note END,
-                    completed_at = ?3,
-                    duration_seconds = ?4,
-                    transcript_path = CASE WHEN ?5 != '' THEN ?5 ELSE transcript_path END
-                 WHERE id = ?6",
-                params![
-                    task.summary,
-                    task.completion_note,
-                    task.completed_at.map(|t| t.to_rfc3339()),
-                    task.duration_seconds,
-                    task.transcript_path,
-                    id,
-                ],
-            )?;
-            let _ = conn.execute("DELETE FROM conversation_messages WHERE history_id = ?", [id]);
-            let _ = conn.execute("DELETE FROM tool_usage WHERE history_id = ?", [id]);
-            let _ = conn.execute("DELETE FROM commits WHERE history_id = ?", [id]);
-            Ok(id)
-        } else {
-            conn.execute(
-                "INSERT INTO history
-                 (session_id, session, window_id, window, pane, summary,
-                  completion_note, started_at, completed_at, duration_seconds, transcript_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    task.session_id,
-                    task.session,
-                    task.window_id,
-                    task.window,
-                    task.pane,
-                    task.summary,
-                    task.completion_note,
-                    task.started_at.map(|t| t.to_rfc3339()),
-                    task.completed_at.map(|t| t.to_rfc3339()),
-                    task.duration_seconds,
-                    task.transcript_path,
-                ],
-            )?;
-            Ok(conn.last_insert_rowid())
-        }
+        archive_to_history_on(&conn, task)
     }
 
     /// Load history with pagination and filtering (for API queries)
@@ -259,37 +338,63 @@ impl ProjectDatabase {
         &self,
         limit: i32,
         offset: i32,
-        date_filter: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
         search: Option<&str>,
     ) -> Result<(Vec<HistoryEntry>, i32)> {
         let conn = self.conn.lock().unwrap();
 
-        let mut sql = String::from(
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(start) = start_date {
+            conditions.push("completed_at >= ?".to_string());
+            params_vec.push(Box::new(start.to_string()));
+        }
+        if let Some(end) = end_date {
+            conditions.push("completed_at <= ?".to_string());
+            params_vec.push(Box::new(end.to_string()));
+        }
+        if let Some(q) = search {
+            conditions.push("(summary LIKE ? OR completion_note LIKE ?)".to_string());
+            let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        // Get total count with same filters
+        let count_sql = format!("SELECT COUNT(*) FROM history {}", where_clause);
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let total: i32 = conn
+            .prepare(&count_sql)?
+            .query_row(params_refs.as_slice(), |row| row.get(0))
+            .unwrap_or(0);
+
+        // Query with pagination
+        let select_sql = format!(
             "SELECT id, COALESCE(NULLIF(session, ''), session_id) as session,
                     COALESCE(NULLIF(window, ''), window_id) as window,
                     summary, completion_note,
                     duration_seconds, started_at, completed_at, transcript_path
-             FROM history WHERE 1=1",
+             FROM history {} ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            where_clause
         );
 
-        if !date_filter.is_empty() {
-            sql.push_str(date_filter);
-        }
+        params_vec.push(Box::new(limit));
+        params_vec.push(Box::new(offset));
+        let all_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
 
-        if let Some(q) = search {
-            sql.push_str(&format!(
-                " AND (summary LIKE '%{}%' OR completion_note LIKE '%{}%')",
-                q.replace('\'', "''"),
-                q.replace('\'', "''")
-            ));
-        }
-
-        sql.push_str(" ORDER BY started_at DESC");
-        sql.push_str(&format!(" LIMIT {} OFFSET {}", limit, offset));
-
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare(&select_sql)?;
         let entries: Vec<HistoryEntry> = stmt
-            .query_map([], |row| {
+            .query_map(all_refs.as_slice(), |row| {
                 Ok(HistoryEntry {
                     id: row.get(0)?,
                     session: row.get::<_, String>(1).unwrap_or_default(),
@@ -303,14 +408,9 @@ impl ProjectDatabase {
                     file_path: None,
                     project: None,
                 })
-            })
-            .ok()
-            .map(|iter| iter.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default();
-
-        let total: i32 = conn
-            .query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))
-            .unwrap_or(0);
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         Ok((entries, total))
     }
@@ -351,56 +451,17 @@ impl ProjectDatabase {
         messages: &[ConversationMessage],
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        for msg in messages {
-            conn.execute(
-                "INSERT INTO conversation_messages (history_id, role, content, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    history_id,
-                    msg.role,
-                    msg.content,
-                    msg.created_at.map(|t| t.to_rfc3339()),
-                ],
-            )?;
-        }
-        Ok(())
+        save_conversation_messages_on(&conn, history_id, messages)
     }
 
     pub fn save_tool_usage(&self, history_id: i64, tool_usages: &[ToolUsage]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        for usage in tool_usages {
-            conn.execute(
-                "INSERT INTO tool_usage (history_id, tool_name, tool_args, result_summary, success, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    history_id,
-                    usage.tool_name,
-                    usage.tool_args,
-                    usage.result_summary,
-                    usage.success as i32,
-                    usage.timestamp.map(|t| t.to_rfc3339()),
-                ],
-            )?;
-        }
-        Ok(())
+        save_tool_usage_on(&conn, history_id, tool_usages)
     }
 
     pub fn save_commits(&self, history_id: i64, commits: &[GitCommit]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        for commit in commits {
-            conn.execute(
-                "INSERT INTO commits (history_id, commit_hash, commit_message, files_changed, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    history_id,
-                    commit.commit_hash,
-                    commit.commit_message,
-                    commit.files_changed,
-                    commit.timestamp.map(|t| t.to_rfc3339()),
-                ],
-            )?;
-        }
-        Ok(())
+        save_commits_on(&conn, history_id, commits)
     }
 
     // =========================================================================

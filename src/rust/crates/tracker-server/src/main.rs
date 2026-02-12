@@ -184,36 +184,31 @@ impl AppState {
         window: &str,
         action: impl FnOnce(&project_db::ProjectDatabase) -> anyhow::Result<()>,
     ) {
-        // Register project in global DB
         let project_name = std::path::Path::new(git_dir)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        {
-            let state = self.state.lock().unwrap();
-            let _ = state.db.register_project(git_dir, &project_name);
-            let _ = state.db.update_project_activity(git_dir, session, window);
-        }
-
-        // Write to project DB
-        match self.project_dbs.get_or_open(git_dir) {
+        // Write to project DB first (no global lock needed)
+        let counts = match self.project_dbs.get_or_open(git_dir) {
             Ok(pdb) => {
                 if let Err(e) = action(&pdb) {
                     warn!("Failed to write to project DB {}: {}", git_dir, e);
                 }
-                // Update counts in global DB
-                let state = self.state.lock().unwrap();
-                let _ = state.db.update_project_counts(
-                    git_dir,
-                    pdb.history_count(),
-                    pdb.notes_count(),
-                    pdb.goals_count(),
-                );
+                Some((pdb.history_count(), pdb.notes_count(), pdb.goals_count()))
             }
             Err(e) => {
                 warn!("Failed to open project DB {}: {}", git_dir, e);
+                None
             }
+        };
+
+        // Single lock for all global DB updates
+        let state = self.state.lock().unwrap();
+        let _ = state.db.register_project(git_dir, &project_name);
+        let _ = state.db.update_project_activity(git_dir, session, window);
+        if let Some((h, n, g)) = counts {
+            let _ = state.db.update_project_counts(git_dir, h, n, g);
         }
     }
 
@@ -4836,17 +4831,30 @@ async fn get_project_history(
         (params.limit.unwrap_or(100), params.offset.unwrap_or(0))
     };
 
-    // Build date filter
+    // Build date range from range param
     let today = chrono::Local::now().date_naive();
-    let date_filter = params.range.as_deref().map(|r| {
-        match r {
-            "today" => format!(" AND DATE(completed_at) = '{}'", today.format("%Y-%m-%d")),
-            "yesterday" => format!(" AND DATE(completed_at) = '{}'", (today - chrono::Duration::days(1)).format("%Y-%m-%d")),
-            "7days" => format!(" AND DATE(completed_at) >= '{}'", (today - chrono::Duration::days(7)).format("%Y-%m-%d")),
-            "30days" => format!(" AND DATE(completed_at) >= '{}'", (today - chrono::Duration::days(30)).format("%Y-%m-%d")),
-            _ => String::new(),
+    let (start_date, end_date): (Option<String>, Option<String>) = match params.range.as_deref() {
+        Some("today") => (
+            Some(format!("{}T00:00:00Z", today.format("%Y-%m-%d"))),
+            None,
+        ),
+        Some("yesterday") => {
+            let d = today - chrono::Duration::days(1);
+            (
+                Some(format!("{}T00:00:00Z", d.format("%Y-%m-%d"))),
+                Some(format!("{}T23:59:59Z", d.format("%Y-%m-%d"))),
+            )
         }
-    }).unwrap_or_default();
+        Some("7days") => (
+            Some(format!("{}T00:00:00Z", (today - chrono::Duration::days(7)).format("%Y-%m-%d"))),
+            None,
+        ),
+        Some("30days") => (
+            Some(format!("{}T00:00:00Z", (today - chrono::Duration::days(30)).format("%Y-%m-%d"))),
+            None,
+        ),
+        _ => (None, None),
+    };
 
     let project_name = std::path::Path::new(&project)
         .file_name()
@@ -4856,7 +4864,8 @@ async fn get_project_history(
     let (entries, total) = match pdb.load_history_paginated(
         limit,
         offset,
-        &date_filter,
+        start_date.as_deref(),
+        end_date.as_deref(),
         params.search.as_deref(),
     ) {
         Ok(r) => r,

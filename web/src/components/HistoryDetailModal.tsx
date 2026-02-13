@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { X, MessageSquare, FileText, Wrench, GitCommit, Clock, Check, XCircle, ChevronRight, Search, ChevronUp, ChevronDown } from 'lucide-react';
-import { fetchHistoryDetail, fetchSessionDetail, HistoryDetail, ConversationMessage, ToolUsageRecord, GitCommitRecord, formatDuration } from '../services/api';
+import { fetchHistoryDetail, fetchSessionDetail, HistoryDetail, ConversationMessage, ToolUsageRecord, GitCommitRecord, formatDuration, TimelineEntry } from '../services/api';
+import { ChatTimeline, fromHistoryTimeline } from './ChatTimeline';
 import { useSearch } from '../hooks/useSearch';
 import { SearchHighlight, countMatches } from './SearchHighlight';
 import { MarkdownText } from './MarkdownText';
@@ -472,6 +473,14 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
 
     switch (activeTab) {
       case 'messages':
+        // Use rich timeline view when available (session detail), fallback to legacy messages
+        if (detail.timeline && detail.timeline.length > 0) {
+          return (
+            <div className="font-mono">
+              <ChatTimeline items={fromHistoryTimeline(detail.timeline)} />
+            </div>
+          );
+        }
         return renderMessages(detail.messages || []);
       case 'summary':
         return renderSummary();

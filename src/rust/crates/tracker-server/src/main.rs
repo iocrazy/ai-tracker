@@ -5,6 +5,7 @@
 
 mod agent;
 mod browser;
+mod chat_watcher;
 mod config;
 mod db;
 mod env_file;
@@ -139,6 +140,8 @@ struct AppState {
     stream_manager: stream::StreamManager,
     /// Per-project database connection cache
     project_dbs: project_db::ProjectDbManager,
+    /// Chat watcher for JSONL file monitoring → WS push
+    chat_watcher: chat_watcher::ChatWatcher,
 }
 
 impl AppState {
@@ -152,6 +155,7 @@ impl AppState {
             last_tmux_windows: Mutex::new(Vec::new()),
             stream_manager: stream::StreamManager::new(),
             project_dbs: project_db::ProjectDbManager::new(),
+            chat_watcher: chat_watcher::ChatWatcher::new(),
         })
     }
 
@@ -381,6 +385,9 @@ impl AppState {
             // Detect reappeared windows (in new but not in old) and clean up closed_windows
             self.detect_reopened_windows(&old_windows, &new_windows);
 
+            // Clean up stale tasks whose session/window no longer exist in tmux
+            self.cleanup_stale_tasks(&new_windows);
+
             let state = self.get_state_response_with_tmux_names();
             let msg = RealtimeMessage { state, tmux_windows: new_windows };
             let _ = self.broadcast_tx.send(msg);
@@ -485,6 +492,38 @@ impl AppState {
             let db = &self.state.lock().unwrap().db;
             if let Err(e) = db.delete_closed_window_by_name(&new_win.session_name, &new_win.window_name) {
                 warn!("Failed to clean up closed window record for {}: {}", new_win.window_name, e);
+            }
+        }
+    }
+
+    /// Clean up stale tasks whose tmux session or window no longer exists.
+    /// This prevents ghost icons in the tmux status bar.
+    fn cleanup_stale_tasks(&self, current_windows: &[agent::TmuxWindowInfo]) {
+        // Build sets of live session_ids and (session_id, window_id) pairs
+        let live_sessions: std::collections::HashSet<&str> = current_windows.iter()
+            .map(|w| w.session_id.as_str()).collect();
+        let live_windows: std::collections::HashSet<(&str, &str)> = current_windows.iter()
+            .map(|w| (w.session_id.as_str(), w.window_id.as_str())).collect();
+
+        let mut state = self.state.lock().unwrap();
+        let stale_keys: Vec<String> = state.tasks.iter()
+            .filter(|(_, task)| {
+                // Task is stale if its session doesn't exist OR its window doesn't exist
+                !live_sessions.contains(task.session_id.as_str())
+                    || !live_windows.contains(&(task.session_id.as_str(), task.window_id.as_str()))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        for key in &stale_keys {
+            if let Some(task) = state.tasks.remove(key) {
+                info!(
+                    "Cleaned up stale task: session={} window={} (id={}) status={}",
+                    task.session, task.window, task.window_id, task.status.as_str()
+                );
+                // Archive to history before deleting
+                let _ = state.db.archive_to_history(&task);
+                let _ = state.db.delete_task(key);
             }
         }
     }
@@ -730,6 +769,8 @@ struct HistoryDetailResponse {
     commits: Vec<CommitResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stats: Option<HistoryDetailStats>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    timeline: Vec<transcript::TimelineEntry>,
 }
 
 /// Tool usage for API response
@@ -2163,6 +2204,7 @@ async fn get_history_detail(AxumPath(id): AxumPath<i64>) -> Json<HistoryDetailRe
                 tool_usage: vec![],
                 commits: vec![],
                 stats: None,
+                timeline: vec![],
             });
         }
     };
@@ -2202,6 +2244,7 @@ async fn get_history_detail(AxumPath(id): AxumPath<i64>) -> Json<HistoryDetailRe
                 tool_usage: vec![],
                 commits: vec![],
                 stats: None,
+                timeline: vec![],
             });
         }
     };
@@ -2297,6 +2340,7 @@ async fn get_history_detail(AxumPath(id): AxumPath<i64>) -> Json<HistoryDetailRe
         tool_usage,
         commits,
         stats,
+        timeline: vec![],  // Legacy history doesn't have timeline
     })
 }
 
@@ -2323,6 +2367,7 @@ async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> Json<H
         tool_usage: vec![],
         commits: vec![],
         stats: None,
+        timeline: vec![],
     });
 
     let path = std::path::Path::new(&params.file_path);
@@ -2421,6 +2466,8 @@ async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> Json<H
         tools_used,
     });
 
+    let timeline = result.timeline;
+
     Json(HistoryDetailResponse {
         id: 0,
         session: project_display,
@@ -2435,6 +2482,7 @@ async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> Json<H
         tool_usage,
         commits,
         stats,
+        timeline,
     })
 }
 
@@ -2611,8 +2659,26 @@ async fn reparse_history(AxumPath(id): AxumPath<i64>) -> Json<ReparseResponse> {
 // Claude Messages API
 // ============================================================================
 
+/// Tool call info (from assistant's tool_use blocks)
+#[derive(Serialize, Clone, Debug)]
+struct ToolCallInfo {
+    tool_use_id: String,
+    tool_name: String,
+    args_summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args_full: Option<String>,
+}
+
+/// Tool result info (from user's tool_result blocks)
+#[derive(Serialize, Clone, Debug)]
+struct ToolResultInfo {
+    tool_use_id: String,
+    content: String,       // truncated display
+    is_error: bool,
+}
+
 /// Claude message from session
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 struct ClaudeMessage {
     role: String,  // "user" or "assistant"
     timestamp: String,
@@ -2621,15 +2687,19 @@ struct ClaudeMessage {
     thinking: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interaction: Option<ToolInteraction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<ToolCallInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_results: Vec<ToolResultInfo>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 struct ToolInteraction {
     tool_name: String,
     questions: Vec<InteractiveQuestion>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 struct InteractiveQuestion {
     question: String,
     header: String,
@@ -2637,7 +2707,7 @@ struct InteractiveQuestion {
     multi_select: bool,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 struct InteractiveOption {
     label: String,
     description: String,
@@ -2873,6 +2943,243 @@ fn strip_thinking_tags(text: &str) -> String {
     result
 }
 
+/// Truncate a string to max chars (UTF-8 safe)
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{}...", truncated)
+    }
+}
+
+/// Generate a concise args summary for a tool call
+fn tool_args_summary(tool_name: &str, input: &serde_json::Value) -> String {
+    match tool_name {
+        "Bash" => {
+            let cmd = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            truncate_str(cmd, 200)
+        }
+        "Read" => {
+            input.get("file_path").and_then(|p| p.as_str()).unwrap_or("").to_string()
+        }
+        "Write" => {
+            input.get("file_path").and_then(|p| p.as_str()).unwrap_or("").to_string()
+        }
+        "Edit" => {
+            input.get("file_path").and_then(|p| p.as_str()).unwrap_or("").to_string()
+        }
+        "Grep" => {
+            let pattern = input.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+            let path = input.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+            format!("{} in {}", pattern, path)
+        }
+        "Glob" => {
+            input.get("pattern").and_then(|p| p.as_str()).unwrap_or("").to_string()
+        }
+        "Task" => {
+            let desc = input.get("description").and_then(|d| d.as_str()).unwrap_or("");
+            truncate_str(desc, 100)
+        }
+        "WebSearch" | "WebFetch" => {
+            let q = input.get("query").or_else(|| input.get("url")).and_then(|v| v.as_str()).unwrap_or("");
+            truncate_str(q, 150)
+        }
+        _ => {
+            let json_str = serde_json::to_string(input).unwrap_or_default();
+            truncate_str(&json_str, 200)
+        }
+    }
+}
+
+/// Parse a single JSONL line into a ClaudeMessage.
+/// Used by both parse_claude_messages (HTTP API) and chat_watcher (WS push).
+fn parse_single_jsonl_entry(line: &str) -> Option<ClaudeMessage> {
+    let data = serde_json::from_str::<serde_json::Value>(line).ok()?;
+
+    let msg_type = match data.get("type").and_then(|t| t.as_str()) {
+        Some("user") => "user",
+        Some("assistant") => "assistant",
+        _ => return None,
+    };
+
+    let timestamp = data.get("timestamp")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let msg = data.get("message")?;
+    let msg_content = msg.get("content");
+
+    // Handle string content (user-typed messages)
+    if let Some(text) = msg_content.and_then(|c| c.as_str()) {
+        let cleaned = strip_thinking_tags(text);
+        let trimmed = cleaned.trim();
+        if !trimmed.is_empty()
+            && !trimmed.starts_with("<bash")
+            && !trimmed.starts_with("<system")
+            && !trimmed.starts_with("<task-")
+            && !trimmed.starts_with("<local-")
+            && !trimmed.starts_with("<command-name>")
+        {
+            return Some(ClaudeMessage {
+                role: msg_type.to_string(),
+                timestamp,
+                text: cleaned,
+                thinking: None,
+                interaction: None,
+                tool_calls: vec![],
+                tool_results: vec![],
+            });
+        }
+        return None;
+    }
+
+    // Handle array content
+    let arr = msg_content.and_then(|c| c.as_array())?;
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut thinking_parts: Vec<String> = Vec::new();
+    let mut interaction: Option<ToolInteraction> = None;
+    let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
+    let mut tool_results: Vec<ToolResultInfo> = Vec::new();
+
+    for item in arr {
+        let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match item_type {
+            "text" => {
+                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty()
+                        && !trimmed.starts_with("<system")
+                        && !trimmed.starts_with("<bash")
+                        && !trimmed.starts_with("<task-")
+                        && !trimmed.starts_with("<local-")
+                        && !trimmed.starts_with("<command-name>")
+                    {
+                        let cleaned = strip_thinking_tags(text);
+                        if !cleaned.trim().is_empty() {
+                            text_parts.push(cleaned);
+                        }
+                    }
+                }
+            }
+            "thinking" => {
+                if let Some(text) = item.get("thinking").and_then(|t| t.as_str()) {
+                    if !text.trim().is_empty() {
+                        thinking_parts.push(text.to_string());
+                    }
+                }
+            }
+            "tool_use" => {
+                let tool_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let tool_use_id = item.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let input = item.get("input").cloned().unwrap_or(serde_json::Value::Null);
+
+                // AskUserQuestion → interactive UI
+                if tool_name == "AskUserQuestion" {
+                    if let Some(questions_arr) = input.get("questions").and_then(|q| q.as_array()) {
+                        let questions: Vec<InteractiveQuestion> = questions_arr.iter().filter_map(|q| {
+                            let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let header = q.get("header").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let options = q.get("options").and_then(|o| o.as_array())
+                                .map(|opts| opts.iter().filter_map(|opt| {
+                                    Some(InteractiveOption {
+                                        label: opt.get("label").and_then(|v| v.as_str())?.to_string(),
+                                        description: opt.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    })
+                                }).collect())
+                                .unwrap_or_default();
+                            if question.is_empty() { return None; }
+                            Some(InteractiveQuestion { question, header, options, multi_select })
+                        }).collect();
+
+                        if !questions.is_empty() {
+                            interaction = Some(ToolInteraction {
+                                tool_name: tool_name.to_string(),
+                                questions,
+                            });
+                        }
+                    }
+                }
+                else if tool_name == "ExitPlanMode" {
+                    interaction = Some(ToolInteraction {
+                        tool_name: "ExitPlanMode".to_string(),
+                        questions: vec![InteractiveQuestion {
+                            question: "Plan is ready for review. Would you like to proceed?".to_string(),
+                            header: "PLAN APPROVAL".to_string(),
+                            options: vec![
+                                InteractiveOption { label: "1. Yes, clear context and bypass permissions".to_string(), description: String::new() },
+                                InteractiveOption { label: "2. Yes, and bypass permissions".to_string(), description: String::new() },
+                                InteractiveOption { label: "3. Yes, manually approve edits".to_string(), description: String::new() },
+                            ],
+                            multi_select: false,
+                        }],
+                    });
+                }
+                else {
+                    // All other tools → ToolCallInfo
+                    let args_summary = tool_args_summary(tool_name, &input);
+                    let args_full = serde_json::to_string(&input).ok();
+                    tool_calls.push(ToolCallInfo {
+                        tool_use_id,
+                        tool_name: tool_name.to_string(),
+                        args_summary,
+                        args_full,
+                    });
+                }
+            }
+            "tool_result" => {
+                let tool_use_id = item.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let is_error = item.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+                let content_val = item.get("content");
+                let content_str = match content_val {
+                    Some(serde_json::Value::String(s)) => truncate_str(s, 500),
+                    Some(serde_json::Value::Array(arr)) => {
+                        // Extract text from content array
+                        let texts: Vec<&str> = arr.iter()
+                            .filter_map(|item| {
+                                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    item.get("text").and_then(|t| t.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        truncate_str(&texts.join("\n"), 500)
+                    }
+                    Some(other) => truncate_str(&serde_json::to_string(other).unwrap_or_default(), 500),
+                    None => String::new(),
+                };
+                tool_results.push(ToolResultInfo {
+                    tool_use_id,
+                    content: content_str,
+                    is_error,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let combined_text = text_parts.join("\n\n");
+    let thinking = if thinking_parts.is_empty() { None } else { Some(thinking_parts.join("\n\n")) };
+
+    // Include message if it has text, interaction, tool_calls, or tool_results
+    if !combined_text.trim().is_empty() || interaction.is_some() || !tool_calls.is_empty() || !tool_results.is_empty() {
+        Some(ClaudeMessage {
+            role: msg_type.to_string(),
+            timestamp,
+            text: combined_text,
+            thinking,
+            interaction,
+            tool_calls,
+            tool_results,
+        })
+    } else {
+        None
+    }
+}
+
 /// Parse claude messages from a JSONL session file (blocking I/O)
 /// Reads only the last chunk of the file for performance with large files
 fn parse_claude_messages(session_file: &std::path::Path, _count: usize) -> Vec<ClaudeMessage> {
@@ -2908,152 +3215,8 @@ fn parse_claude_messages(session_file: &std::path::Path, _count: usize) -> Vec<C
         if line.is_empty() {
             continue;
         }
-
-        let data = match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        let msg_type = match data.get("type").and_then(|t| t.as_str()) {
-            Some("user") => "user",
-            Some("assistant") => "assistant",
-            _ => continue,
-        };
-
-        let timestamp = data.get("timestamp")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let msg = match data.get("message") {
-            Some(m) => m,
-            None => continue,
-        };
-        let msg_content = msg.get("content");
-
-        // Handle string content (user-typed messages)
-        if let Some(text) = msg_content.and_then(|c| c.as_str()) {
-            // Strip inline <thinking>...</thinking> tags
-            let cleaned = strip_thinking_tags(text);
-            let trimmed = cleaned.trim();
-            if !trimmed.is_empty()
-                && !trimmed.starts_with("<bash")
-                && !trimmed.starts_with("<system")
-                && !trimmed.starts_with("<task-")
-                && !trimmed.starts_with("<local-")
-                && !trimmed.starts_with("<command-name>")
-            {
-                all_messages.push(ClaudeMessage {
-                    role: msg_type.to_string(),
-                    timestamp,
-                    text: cleaned,
-                    thinking: None,
-                    interaction: None,
-                });
-            }
-        }
-        // Handle array content
-        else if let Some(arr) = msg_content.and_then(|c| c.as_array()) {
-            let mut text_parts: Vec<String> = Vec::new();
-            let mut thinking_parts: Vec<String> = Vec::new();
-            let mut interaction: Option<ToolInteraction> = None;
-
-            for item in arr {
-                let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                match item_type {
-                    "text" => {
-                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                            let trimmed = text.trim();
-                            if !trimmed.is_empty()
-                                && !trimmed.starts_with("<system")
-                                && !trimmed.starts_with("<bash")
-                                && !trimmed.starts_with("<task-")
-                                && !trimmed.starts_with("<local-")
-                                && !trimmed.starts_with("<command-name>")
-                            {
-                                // Strip inline <thinking> tags from text
-                                let cleaned = strip_thinking_tags(text);
-                                if !cleaned.trim().is_empty() {
-                                    text_parts.push(cleaned);
-                                }
-                            }
-                        }
-                    }
-                    "thinking" => {
-                        if let Some(text) = item.get("thinking").and_then(|t| t.as_str()) {
-                            if !text.trim().is_empty() {
-                                thinking_parts.push(text.to_string());
-                            }
-                        }
-                    }
-                    "tool_use" => {
-                        let tool_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                        if tool_name == "AskUserQuestion" {
-                            if let Some(input) = item.get("input") {
-                                if let Some(questions_arr) = input.get("questions").and_then(|q| q.as_array()) {
-                                    let questions: Vec<InteractiveQuestion> = questions_arr.iter().filter_map(|q| {
-                                        let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        let header = q.get("header").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
-                                        let options = q.get("options").and_then(|o| o.as_array())
-                                            .map(|opts| opts.iter().filter_map(|opt| {
-                                                Some(InteractiveOption {
-                                                    label: opt.get("label").and_then(|v| v.as_str())?.to_string(),
-                                                    description: opt.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                                })
-                                            }).collect())
-                                            .unwrap_or_default();
-                                        if question.is_empty() { return None; }
-                                        Some(InteractiveQuestion { question, header, options, multi_select })
-                                    }).collect();
-
-                                    if !questions.is_empty() {
-                                        interaction = Some(ToolInteraction {
-                                            tool_name: tool_name.to_string(),
-                                            questions,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        else if tool_name == "ExitPlanMode" {
-                            // Surface plan approval as an interaction so Web UI can display it
-                            interaction = Some(ToolInteraction {
-                                tool_name: "ExitPlanMode".to_string(),
-                                questions: vec![InteractiveQuestion {
-                                    question: "Plan is ready for review. Would you like to proceed?".to_string(),
-                                    header: "PLAN APPROVAL".to_string(),
-                                    options: vec![
-                                        InteractiveOption { label: "1. Yes, clear context and bypass permissions".to_string(), description: String::new() },
-                                        InteractiveOption { label: "2. Yes, and bypass permissions".to_string(), description: String::new() },
-                                        InteractiveOption { label: "3. Yes, manually approve edits".to_string(), description: String::new() },
-                                    ],
-                                    multi_select: false,
-                                }],
-                            });
-                        }
-                        // Skip other tool_use types
-                    }
-                    "tool_result" => {
-                        // Skip tool results entirely
-                    }
-                    _ => {}
-                }
-            }
-
-            let combined_text = text_parts.join("\n\n");
-            let thinking = if thinking_parts.is_empty() { None } else { Some(thinking_parts.join("\n\n")) };
-
-            // Only skip if there's no text AND no interaction
-            if !combined_text.trim().is_empty() || interaction.is_some() {
-                all_messages.push(ClaudeMessage {
-                    role: msg_type.to_string(),
-                    timestamp,
-                    text: combined_text,
-                    thinking,
-                    interaction,
-                });
-            }
+        if let Some(msg) = parse_single_jsonl_entry(line) {
+            all_messages.push(msg);
         }
     }
 
@@ -3754,6 +3917,8 @@ async fn list_workspaces() -> Json<WorkspaceListResponse> {
 struct BranchInfo {
     name: String,
     has_worktree: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -3801,16 +3966,20 @@ async fn list_git_branches(Query(query): Query<GitBranchesQuery>) -> Json<GitBra
 
     let all = worktree.list_all_branches().await.unwrap_or_default();
 
-    // Get branches that have worktrees
-    let worktree_branches: std::collections::HashSet<String> =
+    // Get branches that have worktrees (branch_name -> worktree_path)
+    let worktree_branches: std::collections::HashMap<String, String> =
         get_worktree_branches(&git_dir).await;
 
     // Build branch info with worktree status
     let branches_with_status: Vec<BranchInfo> = all
         .iter()
-        .map(|name| BranchInfo {
-            name: name.clone(),
-            has_worktree: worktree_branches.contains(name),
+        .map(|name| {
+            let wt_path = worktree_branches.get(name).cloned();
+            BranchInfo {
+                name: name.clone(),
+                has_worktree: wt_path.is_some(),
+                worktree_path: wt_path,
+            }
         })
         .collect();
 
@@ -3822,8 +3991,8 @@ async fn list_git_branches(Query(query): Query<GitBranchesQuery>) -> Json<GitBra
     })
 }
 
-/// Get branches that have worktrees
-async fn get_worktree_branches(git_dir: &std::path::Path) -> std::collections::HashSet<String> {
+/// Get branches that have worktrees, returning branch_name -> worktree_path
+async fn get_worktree_branches(git_dir: &std::path::Path) -> std::collections::HashMap<String, String> {
     use tokio::process::Command;
 
     let output = Command::new("git")
@@ -3832,14 +4001,17 @@ async fn get_worktree_branches(git_dir: &std::path::Path) -> std::collections::H
         .output()
         .await;
 
-    let mut branches = std::collections::HashSet::new();
+    let mut branches = std::collections::HashMap::new();
 
     if let Ok(output) = output {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut current_path = String::new();
             for line in stdout.lines() {
-                if let Some(branch) = line.strip_prefix("branch refs/heads/") {
-                    branches.insert(branch.to_string());
+                if let Some(path) = line.strip_prefix("worktree ") {
+                    current_path = path.to_string();
+                } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+                    branches.insert(branch.to_string(), current_path.clone());
                 }
             }
         }
@@ -4717,6 +4889,9 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     // Subscribe to stream chunks
     let mut stream_rx = state.stream_manager.subscribe();
 
+    // Subscribe to chat message events
+    let mut chat_rx = state.chat_watcher.subscribe();
+
     // Send initial realtime message (state + tmux windows)
     let initial_msg = state.get_realtime_message();
     let initial_json = serde_json::to_string(&initial_msg).unwrap_or_default();
@@ -4756,6 +4931,18 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    // Spawn task to forward chat message events to WebSocket
+    let sender_clone3 = sender.clone();
+    let chat_send_task = tokio::spawn(async move {
+        while let Ok(event) = chat_rx.recv().await {
+            let json = serde_json::to_string(&event).unwrap_or_default();
+            let mut sender_guard = sender_clone3.lock().await;
+            if sender_guard.send(Message::Text(json)).await.is_err() {
+                break;
+            }
+        }
+    });
+
     // Handle incoming messages (ping/pong, close, commands)
     while let Some(msg) = receiver.next().await {
         match msg {
@@ -4780,6 +4967,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     // Clean up
     state_send_task.abort();
     stream_send_task.abort();
+    chat_send_task.abort();
     info!("WebSocket connection closed");
 }
 
@@ -4936,6 +5124,103 @@ async fn get_project_history(
     Json(HistoryResponse { groups, total })
 }
 
+/// Discover active JSONL files for chat_watcher.
+/// Looks at current tasks (in_progress/awaiting_input) and finds their JSONL session files.
+fn discover_active_jsonl_files(state: &AppState) -> Vec<(String, std::path::PathBuf)> {
+    let claude_projects = match dirs::home_dir().map(|h| h.join(".claude/projects")) {
+        Some(p) if p.exists() => p,
+        _ => return vec![],
+    };
+
+    // Get active tasks with their session/window info
+    let server_state = state.state.lock().unwrap();
+    let active_windows: Vec<(String, String)> = server_state.tasks.values()
+        .filter(|t| matches!(t.status, TaskStatus::InProgress | TaskStatus::AwaitingInput))
+        .map(|t| (t.session.clone(), t.window.clone()))
+        .collect();
+    drop(server_state);
+
+    if active_windows.is_empty() {
+        return vec![];
+    }
+
+    let mut result = Vec::new();
+
+    for (session, window) in &active_windows {
+        // Get working directory from tmux pane
+        let list_output = std::process::Command::new("tmux")
+            .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
+            .output();
+
+        let mut pane_paths: Vec<String> = Vec::new();
+        if let Ok(out) = list_output {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let path = line.trim().to_string();
+                    if !path.is_empty() && !pane_paths.contains(&path) {
+                        pane_paths.push(path);
+                    }
+                }
+            }
+        }
+
+        // Convert paths to Claude project directory names
+        let mut project_dirs: Vec<String> = Vec::new();
+        for path in &pane_paths {
+            let mut current = path.as_str();
+            loop {
+                let converted = current.replace('/', "-").replace('.', "-").replace('_', "-");
+                if !project_dirs.contains(&converted) {
+                    project_dirs.push(converted);
+                }
+                match current.rfind('/') {
+                    Some(pos) if pos > 0 => current = &current[..pos],
+                    _ => break,
+                }
+            }
+        }
+
+        // Find newest JSONL file in matching project directories
+        let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+
+        if let Ok(entries) = std::fs::read_dir(&claude_projects) {
+            for entry in entries.flatten() {
+                let project_dir = entry.path();
+                if !project_dir.is_dir() { continue; }
+
+                let dir_name = project_dir.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                if !project_dirs.iter().any(|f| dir_name == *f) {
+                    continue;
+                }
+
+                if let Ok(files) = std::fs::read_dir(&project_dir) {
+                    for file in files.flatten() {
+                        let path = file.path();
+                        if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                            if let Ok(meta) = path.metadata() {
+                                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                                if best.as_ref().map_or(true, |(_, t)| mtime > *t) {
+                                    best = Some((path, mtime));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((path, _)) = best {
+            let key = format!("{}:{}", session, window);
+            result.push((key, path));
+        }
+    }
+
+    result
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -4962,6 +5247,30 @@ async fn main() -> Result<()> {
             interval.tick().await;
             let windows = agent::TmuxAgent::list_all_windows_sync();
             tmux_monitor_state.broadcast_if_tmux_changed(windows);
+        }
+    });
+
+    // Start background task for chat watcher (JSONL file polling → WS push)
+    // Two parts: 1) poll for file changes every 500ms, 2) sync watched sessions every 5s
+    let chat_poll_state = app_state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            chat_poll_state.chat_watcher.poll();
+        }
+    });
+
+    let chat_sync_state = app_state.clone();
+    tokio::spawn(async move {
+        // Initial delay to let things settle
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            // Discover active sessions and their JSONL files
+            let active_files = discover_active_jsonl_files(&chat_sync_state);
+            chat_sync_state.chat_watcher.sync_sessions(active_files);
         }
     });
 

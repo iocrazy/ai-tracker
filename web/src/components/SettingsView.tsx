@@ -8,7 +8,9 @@ interface SettingsViewProps {
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }) => {
-  
+
+  const isModern = settings.theme === 'MODERN';
+
   const effects = [
       { id: 'scanlines', label: 'Scanlines' },
       { id: 'flicker', label: 'Flicker Effect' },
@@ -27,22 +29,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
        </div>
 
        {/* Theme Selection */}
-       <div className="border-2 border-green-600 p-4 sm:p-8 relative">
-           <h3 className="absolute -top-4 left-4 bg-[#050505] px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase">
+       <div className={`border-2 p-4 sm:p-8 relative ${isModern ? 'border-green-600 rounded-lg' : 'border-green-600'}`}>
+           <h3 className={`absolute -top-4 left-4 px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase ${isModern ? 'bg-[#0d1117]' : 'bg-[#050505]'}`}>
                THEME
            </h3>
-           <div className="flex flex-wrap gap-3 sm:gap-6 mt-2">
-               {['PHOSPHOR GREEN', 'AMBER', 'CYAN'].map((theme) => {
-                   const themeKey = theme.replace(' ', '_') as 'PHOSPHOR_GREEN' | 'AMBER' | 'CYAN';
+           <div className="flex flex-wrap gap-3 sm:gap-4 mt-2">
+               {(['PHOSPHOR GREEN', 'AMBER', 'CYAN', 'MODERN'] as const).map((theme) => {
+                   const themeKey = theme.replace(' ', '_') as AppSettings['theme'];
                    const isSelected = settings.theme === themeKey;
+                   const isModernBtn = theme === 'MODERN';
                    return (
                        <button
                             key={theme}
                             onClick={() => onUpdate('theme', themeKey)}
                             className={`
-                                px-4 sm:px-8 py-2 sm:py-4 border-2 font-bold tracking-widest text-sm sm:text-xl transition-all uppercase flex-grow min-w-[100px] sm:min-w-[200px]
+                                px-4 sm:px-6 py-2 sm:py-3 border-2 font-bold tracking-widest text-sm sm:text-base transition-all uppercase flex-grow min-w-[100px] sm:min-w-[140px]
+                                ${isModernBtn ? 'rounded-lg' : ''}
                                 ${isSelected
-                                    ? 'border-green-400 bg-green-900/30 text-green-300 shadow-[0_0_20px_rgba(74,222,128,0.3)]'
+                                    ? isModernBtn
+                                        ? 'border-green-400 bg-green-900/30 text-green-300'
+                                        : 'border-green-400 bg-green-900/30 text-green-300 shadow-[0_0_20px_rgba(74,222,128,0.3)]'
                                     : 'border-green-900 text-green-800 hover:border-green-600 hover:text-green-500'
                                 }
                             `}
@@ -54,7 +60,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
            </div>
        </div>
 
-       {/* Effects List */}
+       {/* Effects List - Hidden for MODERN theme */}
+       {!isModern && (
        <div className="border-2 border-green-600 p-4 sm:p-8 relative">
            <h3 className="absolute -top-4 left-4 bg-[#050505] px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase">
                EFFECTS
@@ -89,10 +96,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
                })}
            </div>
        </div>
-       
+       )}
+
        {/* About */}
-       <div className="border-2 border-green-600 p-4 sm:p-8 relative">
-            <h3 className="absolute -top-4 left-4 bg-[#050505] px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase">
+       <div className={`border-2 border-green-600 p-4 sm:p-8 relative ${isModern ? 'rounded-lg' : ''}`}>
+            <h3 className={`absolute -top-4 left-4 px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase ${isModern ? 'bg-[#0d1117]' : 'bg-[#050505]'}`}>
                ABOUT
             </h3>
             <div className="text-green-600 font-mono text-sm sm:text-lg space-y-2 mt-2 leading-relaxed">

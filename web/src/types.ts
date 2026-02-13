@@ -54,7 +54,7 @@ export interface ConsoleLog {
 }
 
 export interface AppSettings {
-    theme: 'PHOSPHOR_GREEN' | 'AMBER' | 'CYAN';
+    theme: 'PHOSPHOR_GREEN' | 'AMBER' | 'CYAN' | 'MODERN';
     scanlines: boolean;
     flicker: boolean;
     glow: boolean;

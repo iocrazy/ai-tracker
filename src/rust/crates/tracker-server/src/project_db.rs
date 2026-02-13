@@ -548,6 +548,11 @@ impl ProjectDatabase {
         pane_count: i32,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        // Delete any existing record with the same session_name + window_name to prevent duplicates
+        conn.execute(
+            "DELETE FROM closed_windows WHERE session_name = ?1 AND window_name = ?2",
+            params![session_name, window_name],
+        )?;
         conn.execute(
             "INSERT INTO closed_windows
              (session_id, session_name, window_name, working_dir, git_branch, pane_count, closed_at)
@@ -574,7 +579,9 @@ impl ProjectDatabase {
         let mut stmt = conn.prepare(
             "SELECT id, session_id, session_name, window_name, working_dir, git_branch, pane_count, closed_at
              FROM closed_windows
-             WHERE session_name = ?1
+             WHERE session_name = ?1 AND id IN (
+                 SELECT MAX(id) FROM closed_windows WHERE session_name = ?1 GROUP BY window_name
+             )
              ORDER BY closed_at DESC
              LIMIT 50",
         )?;

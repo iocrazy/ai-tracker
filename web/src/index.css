@@ -180,3 +180,284 @@ body {
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+/* ======================================================================
+   MODERN THEME
+   Clean, minimal dark theme inspired by GitHub Dark / VS Code Dark+.
+   Activated via data-theme="modern" on <html>.
+   All overrides use [data-theme="modern"] to avoid touching CRT themes.
+   ====================================================================== */
+
+/* --- Base styles --- */
+[data-theme="modern"] body {
+  background-color: #0d1117;
+  color: #e6edf3;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif;
+}
+
+[data-theme="modern"] .font-pixel {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+[data-theme="modern"] .font-mono,
+[data-theme="modern"] .font-\[\'Share_Tech_Mono\'\] {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Noto Sans SC', monospace;
+}
+
+[data-theme="modern"] .font-\[\'VT323\'\] {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif;
+  font-weight: 700;
+}
+
+/* --- Hardcoded hex backgrounds --- */
+[data-theme="modern"] .bg-\[\#050505\] {
+  background-color: #0d1117 !important;
+}
+
+/* --- Text color remapping --- */
+[data-theme="modern"] .text-green-100 { color: #f0f6fc !important; }
+[data-theme="modern"] .text-green-200 { color: #e6edf3 !important; }
+[data-theme="modern"] .text-green-300 { color: #e6edf3 !important; }
+[data-theme="modern"] .text-green-400 { color: #e6edf3 !important; }
+[data-theme="modern"] .text-green-500 { color: #58a6ff !important; }
+[data-theme="modern"] .text-green-600 { color: #8b949e !important; }
+[data-theme="modern"] .text-green-700 { color: #6e7681 !important; }
+[data-theme="modern"] .text-green-800 { color: #484f58 !important; }
+[data-theme="modern"] .text-green-900 { color: #30363d !important; }
+[data-theme="modern"] .text-white { color: #f0f6fc !important; }
+
+/* --- Background color remapping --- */
+[data-theme="modern"] .bg-green-400 { background-color: #58a6ff !important; }
+[data-theme="modern"] .bg-green-500 { background-color: #58a6ff !important; }
+[data-theme="modern"] .bg-green-600 { background-color: #1f6feb !important; }
+[data-theme="modern"] .bg-green-800 { background-color: #21262d !important; }
+[data-theme="modern"] .bg-green-900 { background-color: #161b22 !important; }
+[data-theme="modern"] .bg-green-900\/10 { background-color: rgba(88,166,255,0.06) !important; }
+[data-theme="modern"] .bg-green-900\/20 { background-color: rgba(88,166,255,0.08) !important; }
+[data-theme="modern"] .bg-green-900\/30 { background-color: rgba(88,166,255,0.12) !important; }
+[data-theme="modern"] .bg-green-500\/20 { background-color: rgba(88,166,255,0.12) !important; }
+
+/* Black backgrounds → modern dark base */
+[data-theme="modern"] .bg-black { background-color: #0d1117 !important; }
+[data-theme="modern"] .bg-black\/40 { background-color: rgba(13,17,23,0.6) !important; }
+[data-theme="modern"] .bg-black\/50 { background-color: rgba(13,17,23,0.7) !important; }
+[data-theme="modern"] .bg-black\/60 { background-color: rgba(13,17,23,0.8) !important; }
+[data-theme="modern"] .bg-black\/80 { background-color: rgba(22,27,34,0.9) !important; }
+[data-theme="modern"] .bg-black\/90 { background-color: rgba(22,27,34,0.95) !important; }
+[data-theme="modern"] .bg-black\/95 { background-color: rgba(22,27,34,0.98) !important; }
+
+/* --- Border color remapping --- */
+[data-theme="modern"] .border-green-300 { border-color: #58a6ff !important; }
+[data-theme="modern"] .border-green-400 { border-color: #58a6ff !important; }
+[data-theme="modern"] .border-green-500 { border-color: #58a6ff !important; }
+[data-theme="modern"] .border-green-600 { border-color: #484f58 !important; }
+[data-theme="modern"] .border-green-700 { border-color: #30363d !important; }
+[data-theme="modern"] .border-green-800 { border-color: #30363d !important; }
+[data-theme="modern"] .border-green-900 { border-color: #21262d !important; }
+
+/* Border with opacity */
+[data-theme="modern"] .border-green-500\/30 { border-color: rgba(88,166,255,0.2) !important; }
+[data-theme="modern"] .border-green-800\/50 { border-color: rgba(48,54,61,0.5) !important; }
+[data-theme="modern"] .border-green-900\/30 { border-color: rgba(33,38,45,0.5) !important; }
+[data-theme="modern"] .border-green-900\/50 { border-color: rgba(33,38,45,0.7) !important; }
+
+/* --- Hover state overrides --- */
+[data-theme="modern"] .hover\:text-green-400:hover { color: #e6edf3 !important; }
+[data-theme="modern"] .hover\:text-green-500:hover { color: #58a6ff !important; }
+[data-theme="modern"] .hover\:text-green-300:hover { color: #f0f6fc !important; }
+[data-theme="modern"] .hover\:bg-green-400:hover { background-color: #58a6ff !important; }
+[data-theme="modern"] .hover\:bg-green-500:hover { background-color: #1f6feb !important; }
+[data-theme="modern"] .hover\:bg-green-800:hover { background-color: #21262d !important; }
+[data-theme="modern"] .hover\:bg-green-900\/10:hover { background-color: rgba(88,166,255,0.06) !important; }
+[data-theme="modern"] .hover\:bg-green-900\/20:hover { background-color: rgba(88,166,255,0.08) !important; }
+[data-theme="modern"] .hover\:bg-green-900\/30:hover { background-color: rgba(88,166,255,0.12) !important; }
+[data-theme="modern"] .hover\:border-green-400:hover { border-color: #58a6ff !important; }
+[data-theme="modern"] .hover\:border-green-500:hover { border-color: #58a6ff !important; }
+[data-theme="modern"] .hover\:border-green-600:hover { border-color: #484f58 !important; }
+[data-theme="modern"] .hover\:border-green-700:hover { border-color: #30363d !important; }
+[data-theme="modern"] .hover\:text-white:hover { color: #f0f6fc !important; }
+
+/* --- Focus state overrides --- */
+[data-theme="modern"] .focus\:border-green-400:focus { border-color: #58a6ff !important; }
+[data-theme="modern"] .focus\:border-green-500:focus { border-color: #58a6ff !important; }
+[data-theme="modern"] .focus\:shadow-\[0_0_15px_rgba\(34\2c 197\2c 94\2c 0\.2\)\]:focus {
+  box-shadow: 0 0 0 2px rgba(88,166,255,0.3) !important;
+}
+[data-theme="modern"] .focus\:shadow-\[0_0_15px_rgba\(34\2c 197\2c 94\2c 0\.3\)\]:focus {
+  box-shadow: 0 0 0 2px rgba(88,166,255,0.3) !important;
+}
+[data-theme="modern"] .focus\:shadow-\[0_0_10px_rgba\(34\2c 197\2c 94\2c 0\.3\)\]:focus {
+  box-shadow: 0 0 0 2px rgba(88,166,255,0.3) !important;
+}
+
+/* --- Group hover overrides --- */
+[data-theme="modern"] .group:hover .group-hover\:text-green-400 { color: #e6edf3 !important; }
+[data-theme="modern"] .group:hover .group-hover\:text-green-500 { color: #58a6ff !important; }
+[data-theme="modern"] .group:hover .group-hover\:text-white { color: #f0f6fc !important; }
+[data-theme="modern"] .group:hover .group-hover\:border-green-400 { border-color: #58a6ff !important; }
+[data-theme="modern"] .group-focus-within\:text-green-500 { color: #58a6ff !important; }
+
+/* --- Shadow / glow overrides --- */
+/* Kill all green glow shadows in modern theme */
+[data-theme="modern"] [class*="shadow-\[0_0_"] {
+  --tw-shadow: none !important;
+  box-shadow: none !important;
+}
+[data-theme="modern"] [class*="shadow-\[inset_0_0_"] {
+  --tw-shadow: none !important;
+  box-shadow: none !important;
+}
+
+/* Re-enable useful shadows */
+[data-theme="modern"] .shadow-lg {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;
+}
+[data-theme="modern"] .shadow-inner {
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.3) !important;
+}
+
+/* --- Retro classes → Modern equivalents --- */
+[data-theme="modern"] .retro-border {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(48,54,61,0.5);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+}
+
+[data-theme="modern"] .retro-text-shadow,
+[data-theme="modern"] .retro-text-shadow-strong {
+  text-shadow: none;
+}
+
+[data-theme="modern"] .retro-text-shadow-alert {
+  text-shadow: none;
+}
+
+/* --- CRT effect classes: hide in modern --- */
+[data-theme="modern"] .scanlines,
+[data-theme="modern"] .crt-flicker,
+[data-theme="modern"] .noise-overlay,
+[data-theme="modern"] .perspective-grid {
+  display: none !important;
+}
+
+[data-theme="modern"] .rgb-shifted {
+  text-shadow: none !important;
+}
+
+/* --- Scrollbar --- */
+[data-theme="modern"] ::-webkit-scrollbar {
+  width: 8px;
+  background: transparent;
+}
+[data-theme="modern"] ::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 4px;
+  border: none;
+}
+[data-theme="modern"] ::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+
+/* --- Status indicator dot overrides (keep green for ONLINE) --- */
+[data-theme="modern"] .bg-green-500.animate-pulse {
+  background-color: #3fb950 !important;
+}
+
+/* --- Active tab: use accent blue instead of green bg --- */
+[data-theme="modern"] .bg-green-600.text-black {
+  background-color: #1f6feb !important;
+  color: #f0f6fc !important;
+}
+
+/* --- Placeholder text --- */
+[data-theme="modern"] .placeholder-green-900::placeholder,
+[data-theme="modern"] .placeholder-green-900\/30::placeholder,
+[data-theme="modern"] .placeholder-green-900\/50::placeholder {
+  color: #484f58 !important;
+}
+
+/* --- Caret color --- */
+[data-theme="modern"] .caret-green-500 {
+  caret-color: #58a6ff !important;
+}
+
+/* --- Prose overrides for markdown --- */
+[data-theme="modern"] .prose-green .prose-headings\:text-green-400 { color: #e6edf3 !important; }
+[data-theme="modern"] .prose-green .prose-code\:text-green-300 { color: #79c0ff !important; }
+[data-theme="modern"] .prose-green .prose-code\:bg-green-900\/30 { background-color: rgba(88,166,255,0.1) !important; }
+[data-theme="modern"] .prose-green .prose-pre\:bg-green-900\/20 { background-color: rgba(13,17,23,0.6) !important; }
+[data-theme="modern"] .prose-green .prose-pre\:border-green-800 { border-color: #30363d !important; }
+[data-theme="modern"] .prose-green .prose-strong\:text-green-300 { color: #f0f6fc !important; }
+[data-theme="modern"] .prose-green .prose-em\:text-green-400 { color: #8b949e !important; }
+
+/* --- Cyan color remapping (used for completed status, badges) --- */
+[data-theme="modern"] .text-cyan-400 { color: #79c0ff !important; }
+[data-theme="modern"] .text-cyan-500 { color: #58a6ff !important; }
+[data-theme="modern"] .bg-cyan-400 { background-color: #58a6ff !important; }
+[data-theme="modern"] .bg-cyan-500 { background-color: #1f6feb !important; }
+[data-theme="modern"] .bg-cyan-900\/10 { background-color: rgba(88,166,255,0.06) !important; }
+[data-theme="modern"] .bg-cyan-900\/20 { background-color: rgba(88,166,255,0.08) !important; }
+[data-theme="modern"] .bg-cyan-900\/30 { background-color: rgba(88,166,255,0.12) !important; }
+[data-theme="modern"] .border-cyan-400 { border-color: #58a6ff !important; }
+[data-theme="modern"] .border-cyan-500 { border-color: #1f6feb !important; }
+[data-theme="modern"] .border-cyan-800\/50 { border-color: rgba(48,54,61,0.5) !important; }
+[data-theme="modern"] .border-cyan-900\/50 { border-color: rgba(33,38,45,0.5) !important; }
+
+/* --- Blue color adjustments --- */
+[data-theme="modern"] .bg-blue-900\/20 { background-color: rgba(88,166,255,0.08) !important; }
+[data-theme="modern"] .border-blue-800\/50 { border-color: rgba(48,54,61,0.5) !important; }
+[data-theme="modern"] .bg-blue-500\/20 { background-color: rgba(88,166,255,0.12) !important; }
+[data-theme="modern"] .text-blue-400 { color: #58a6ff !important; }
+
+/* --- Yellow / orange / red status colors: keep but brighten slightly --- */
+[data-theme="modern"] .text-yellow-400 { color: #d29922 !important; }
+[data-theme="modern"] .text-yellow-500 { color: #d29922 !important; }
+[data-theme="modern"] .text-yellow-600 { color: #bb8009 !important; }
+[data-theme="modern"] .text-orange-400 { color: #db6d28 !important; }
+[data-theme="modern"] .text-red-300 { color: #ffa198 !important; }
+[data-theme="modern"] .text-red-400 { color: #f85149 !important; }
+[data-theme="modern"] .text-red-500 { color: #f85149 !important; }
+[data-theme="modern"] .text-red-600 { color: #da3633 !important; }
+
+/* --- Border-t/b with green (used for nav, dividers) --- */
+[data-theme="modern"] .border-t-2.border-green-600 {
+  border-top-color: #30363d !important;
+}
+[data-theme="modern"] .border-b-2.border-green-600 {
+  border-bottom-color: #30363d !important;
+}
+[data-theme="modern"] .border-t-2.border-green-400 {
+  border-top-color: #58a6ff !important;
+}
+
+/* --- Gradient backgrounds --- */
+[data-theme="modern"] .bg-gradient-to-r.from-green-900\/50 {
+  background: linear-gradient(to right, rgba(33,38,45,0.5), transparent) !important;
+}
+[data-theme="modern"] .bg-gradient-to-b.from-green-800\/30 {
+  background: linear-gradient(to bottom, rgba(33,38,45,0.3), transparent) !important;
+}
+
+/* --- Vignette: softer for modern --- */
+[data-theme="modern"] .bg-\[radial-gradient\(circle_at_center\2c transparent_50\%\2c rgba\(0\2c 0\2c 0\2c 0\.6\)_100\%\)\] {
+  background: none !important;
+}
+
+/* --- Global transition for smooth theme switch --- */
+[data-theme="modern"] * {
+  transition-property: background-color, border-color, color;
+  transition-duration: 0.15s;
+  transition-timing-function: ease;
+}
+/* Preserve full transition on elements that explicitly use transition-all (e.g. radial menu) */
+[data-theme="modern"] .transition-all {
+  transition-property: all !important;
+}
+/* Exclude animations that should be instant */
+[data-theme="modern"] .animate-pulse,
+[data-theme="modern"] .animate-spin,
+[data-theme="modern"] [class*="animate-\["] {
+  transition: none !important;
+}

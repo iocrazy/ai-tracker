@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { X, Layers, Layout, Grid3X3, FolderGit2, ChevronDown, RefreshCw, GitBranch, RotateCcw, FolderOpen, Trash2 } from 'lucide-react';
 import { LayoutType, fetchGitBranches, BranchInfo, fetchClosedWindows, ClosedWindow, deleteClosedWindow, resumeClosedWindow } from '../services/api';
 
@@ -12,6 +12,18 @@ interface AddWindowModalProps {
   onClose: () => void;
   onConfirm: (type: WindowType, branchName: string, baseBranch?: string) => void;
   onResume?: (branchName: string, layout: LayoutType) => void;
+}
+
+// Unified resume item: either a worktree or a closed window
+interface ResumeItem {
+  type: 'worktree' | 'window';
+  id: string;              // unique key for React
+  displayName: string;     // primary display: worktree dir basename or window name
+  branchName?: string;     // git branch (shown as secondary for worktrees)
+  workingDir?: string;     // full path
+  paneCount?: number;      // original pane count (closed windows only)
+  closedWindowId?: number; // DB id for closed window operations
+  closedWindow?: ClosedWindow; // original data for resume
 }
 
 const WINDOW_TYPES: { type: WindowType; label: string; description: string; icon: React.ElementType; layout: LayoutType }[] = [
@@ -38,6 +50,9 @@ const WINDOW_TYPES: { type: WindowType; label: string; description: string; icon
   },
 ];
 
+// Extract basename from a path
+const pathBasename = (p: string) => p.split('/').pop() || p;
+
 export const AddWindowModal: React.FC<AddWindowModalProps> = ({
   sessionName,
   gitDir,
@@ -48,31 +63,63 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
 }) => {
   const [mode, setMode] = useState<ModalMode>('create');
   const [selectedType, setSelectedType] = useState<WindowType>('simple');
-  const [baseBranch, setBaseBranch] = useState('');  // Base branch to create from
-  const [newBranchName, setNewBranchName] = useState('');  // New branch/window name
+  const [baseBranch, setBaseBranch] = useState('');
+  const [newBranchName, setNewBranchName] = useState('');
   const [error, setError] = useState('');
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [loadingBranches, setLoadingBranches] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
-  const [selectedResumeBranch, setSelectedResumeBranch] = useState('');
-  const [resumeLayout, setResumeLayout] = useState<LayoutType>('default');
-  // Closed windows (for resume without worktree)
   const [closedWindows, setClosedWindows] = useState<ClosedWindow[]>([]);
   const [loadingClosedWindows, setLoadingClosedWindows] = useState(false);
-  const [selectedClosedWindow, setSelectedClosedWindow] = useState<ClosedWindow | null>(null);
-  const [resumeType, setResumeType] = useState<'worktree' | 'window'>('worktree');
-  const [closedWindowLayout, setClosedWindowLayout] = useState<'simple' | 'default' | 'workspace'>('simple');
+
+  // Unified selection state
+  const [selectedItem, setSelectedItem] = useState<ResumeItem | null>(null);
+  const [resumeLayout, setResumeLayout] = useState<LayoutType>('default');
 
   const needsBranch = selectedType !== 'simple';
 
   // Convert branch name to window name (replace : and / with -)
   const branchToWindowName = (branch: string) => branch.replace(/[:/]/g, '-');
 
-  // Filter branches that have worktree but are not currently open
-  // Note: openWindows contains window names (sanitized), branches contain git branch names
-  const closedWorktrees = branches.filter(b =>
-    b.has_worktree && !openWindows.includes(branchToWindowName(b.name))
-  );
+  // Build unified resume list
+  const resumeItems = useMemo((): ResumeItem[] => {
+    const items: ResumeItem[] = [];
+
+    // 1. Closed worktrees (worktree exists on disk but no open tmux window)
+    const worktreeWindowNames = new Set<string>();
+    for (const b of branches) {
+      if (!b.has_worktree) continue;
+      const windowName = branchToWindowName(b.name);
+      if (openWindows.includes(windowName)) continue;
+
+      worktreeWindowNames.add(windowName);
+      const dirName = b.worktree_path ? pathBasename(b.worktree_path) : windowName;
+      items.push({
+        type: 'worktree',
+        id: `wt:${b.name}`,
+        displayName: dirName,
+        branchName: b.name,
+        workingDir: b.worktree_path,
+      });
+    }
+
+    // 2. Closed windows (from DB, excluding those already covered by worktrees)
+    for (const w of closedWindows) {
+      if (worktreeWindowNames.has(w.window_name)) continue;
+      items.push({
+        type: 'window',
+        id: `cw:${w.id}`,
+        displayName: w.window_name,
+        branchName: w.git_branch || undefined,
+        workingDir: w.working_dir,
+        paneCount: w.pane_count,
+        closedWindowId: w.id,
+        closedWindow: w,
+      });
+    }
+
+    return items;
+  }, [branches, closedWindows, openWindows]);
 
   // Fetch branches and closed windows when modal opens
   useEffect(() => {
@@ -99,8 +146,8 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
     try {
       await deleteClosedWindow(id);
       setClosedWindows(prev => prev.filter(w => w.id !== id));
-      if (selectedClosedWindow?.id === id) {
-        setSelectedClosedWindow(null);
+      if (selectedItem?.closedWindowId === id) {
+        setSelectedItem(null);
       }
     } catch (err) {
       console.error('Failed to delete closed window:', err);
@@ -111,7 +158,6 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
     setLoadingBranches(true);
     try {
       const result = await fetchGitBranches(gitDir);
-      // Use branches_with_status if available, otherwise fall back to branches
       if (result.branches_with_status) {
         setBranches(result.branches_with_status);
       } else {
@@ -124,37 +170,40 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
     }
   };
 
+  const loadAll = () => {
+    loadBranches();
+    loadClosedWindows();
+  };
+
   const handleConfirm = () => {
     if (needsBranch && !newBranchName.trim()) {
       setError('Branch name is required for worktree layouts');
       return;
     }
-    // Pass the new branch name (which becomes window name) and base branch
     onConfirm(selectedType, newBranchName.trim(), baseBranch || undefined);
   };
 
   const handleResume = async () => {
-    if (resumeType === 'worktree') {
-      if (!selectedResumeBranch) {
-        setError('Please select a worktree to resume');
-        return;
-      }
-      if (onResume) {
-        onResume(selectedResumeBranch, resumeLayout);
+    if (!selectedItem) {
+      setError('Please select an item to resume');
+      return;
+    }
+
+    if (selectedItem.type === 'worktree') {
+      if (onResume && selectedItem.branchName) {
+        onResume(selectedItem.branchName, resumeLayout);
       }
     } else {
-      // Resume closed window with optional layout
-      if (!selectedClosedWindow) {
-        setError('Please select a window to resume');
-        return;
-      }
+      // Resume closed window
+      const cw = selectedItem.closedWindow;
+      if (!cw) return;
       try {
         const result = await resumeClosedWindow(
           sessionName,
-          selectedClosedWindow.window_name,
-          selectedClosedWindow.working_dir,
-          closedWindowLayout,
-          selectedClosedWindow.id
+          cw.window_name,
+          cw.working_dir,
+          resumeLayout as 'simple' | 'default' | 'workspace',
+          cw.id
         );
         if (result.success) {
           onClose();
@@ -166,6 +215,23 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
       }
     }
   };
+
+  const handleSelectItem = (item: ResumeItem) => {
+    setSelectedItem(item);
+    setError('');
+    // Auto-select layout based on type and pane count
+    if (item.type === 'worktree') {
+      setResumeLayout('default');
+    } else if (item.paneCount && item.paneCount >= 5) {
+      setResumeLayout('workspace');
+    } else if (item.paneCount && item.paneCount >= 3) {
+      setResumeLayout('default');
+    } else {
+      setResumeLayout('simple');
+    }
+  };
+
+  const isLoading = loadingBranches || loadingClosedWindows;
 
   return (
     <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto">
@@ -212,9 +278,9 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
             >
               <RotateCcw className="w-4 h-4" />
               RESUME
-              {(closedWorktrees.length > 0 || closedWindows.length > 0) && (
+              {resumeItems.length > 0 && (
                 <span className="bg-yellow-600 text-black text-xs px-1.5 py-0.5 rounded-full font-bold">
-                  {closedWorktrees.length + closedWindows.length}
+                  {resumeItems.length}
                 </span>
               )}
             </button>
@@ -255,203 +321,124 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
             </>
           )}
 
-          {/* RESUME Mode Content */}
+          {/* RESUME Mode Content - Unified List */}
           {mode === 'resume' && (
             <div className="space-y-4">
-              {/* Closed Windows Section */}
-              {closedWindows.length > 0 && (
-                <>
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm text-green-600 tracking-widest font-bold">CLOSED WINDOWS:</label>
-                    <button
-                      onClick={loadClosedWindows}
-                      disabled={loadingClosedWindows}
-                      className="px-2 py-1 border border-green-800 text-green-700 hover:border-green-600 hover:text-green-500 transition-all"
-                      title="Refresh"
-                    >
-                      <RefreshCw className={`w-4 h-4 ${loadingClosedWindows ? 'animate-spin' : ''}`} />
-                    </button>
-                  </div>
-                  <div className="space-y-2 max-h-32 overflow-y-auto">
-                    {closedWindows.map((win) => (
-                      <button
-                        key={win.id}
-                        onClick={() => {
-                          setSelectedClosedWindow(win);
-                          setResumeType('window');
-                          setSelectedResumeBranch('');
-                          // Auto-select layout based on original pane count
-                          if (win.pane_count >= 5) {
-                            setClosedWindowLayout('workspace');
-                          } else if (win.pane_count >= 3) {
-                            setClosedWindowLayout('default');
-                          } else {
-                            setClosedWindowLayout('simple');
-                          }
-                        }}
-                        className={`w-full px-4 py-3 text-left font-mono transition-all flex items-center justify-between border group ${
-                          selectedClosedWindow?.id === win.id
-                            ? 'border-cyan-400 bg-cyan-900/30 text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
-                            : 'border-green-900 text-green-500 hover:border-green-700 hover:bg-green-900/10'
-                        }`}
-                      >
-                        <div className="flex flex-col gap-1">
-                          <span className="flex items-center gap-2">
-                            <FolderOpen className="w-4 h-4" />
-                            {win.window_name}
-                          </span>
-                          {win.working_dir && (
-                            <span className="text-xs text-green-700 truncate max-w-[200px]">
-                              {win.working_dir.replace(/^\/Users\/[^/]+/, '~')}
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {win.pane_count > 1 && (
-                            <span className="text-xs text-yellow-600 bg-yellow-900/20 px-1.5 py-0.5 border border-yellow-800/50">
-                              {win.pane_count}p
-                            </span>
-                          )}
-                          <span className="text-xs text-cyan-600 bg-cyan-900/20 px-2 py-0.5 border border-cyan-800/50">
-                            window
-                          </span>
-                          <button
-                            onClick={(e) => handleDeleteClosedWindow(win.id, e)}
-                            className="opacity-0 group-hover:opacity-100 text-red-600 hover:text-red-400 transition-all p-1"
-                            title="Remove from list"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {/* Closed Worktrees Section */}
               <div className="flex items-center justify-between">
-                <label className="text-sm text-green-600 tracking-widest font-bold">CLOSED WORKTREES:</label>
+                <label className="text-sm text-green-600 tracking-widest font-bold">RESUMABLE:</label>
                 <button
-                  onClick={loadBranches}
-                  disabled={loadingBranches}
+                  onClick={loadAll}
+                  disabled={isLoading}
                   className="px-2 py-1 border border-green-800 text-green-700 hover:border-green-600 hover:text-green-500 transition-all"
                   title="Refresh"
                 >
-                  <RefreshCw className={`w-4 h-4 ${loadingBranches ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
                 </button>
               </div>
 
-              {loadingBranches ? (
+              {isLoading && resumeItems.length === 0 ? (
                 <div className="text-green-600 py-4 text-center">Loading...</div>
-              ) : closedWorktrees.length === 0 && closedWindows.length === 0 ? (
+              ) : resumeItems.length === 0 ? (
                 <div className="text-green-700 py-8 text-center border border-green-900 bg-green-900/10">
                   <RotateCcw className="w-8 h-8 mx-auto mb-2 opacity-50" />
                   <p>No closed windows found</p>
                   <p className="text-xs mt-1 opacity-70">All windows are currently open</p>
                 </div>
-              ) : closedWorktrees.length === 0 ? (
-                <div className="text-green-700 py-4 text-center text-sm opacity-70">
-                  No closed worktrees
-                </div>
               ) : (
-                <div className="space-y-2 max-h-32 overflow-y-auto">
-                  {closedWorktrees.map((branch) => (
-                    <button
-                      key={branch.name}
-                      onClick={() => { setSelectedResumeBranch(branch.name); setResumeType('worktree'); setSelectedClosedWindow(null); }}
-                      className={`w-full px-4 py-3 text-left font-mono transition-all flex items-center justify-between border ${
-                        selectedResumeBranch === branch.name
-                          ? 'border-green-400 bg-green-900/30 text-green-400 shadow-[0_0_10px_rgba(34,197,94,0.3)]'
-                          : 'border-green-900 text-green-500 hover:border-green-700 hover:bg-green-900/10'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2">
-                        <GitBranch className="w-4 h-4" />
-                        {branch.name}
-                      </span>
-                      <span className="text-xs text-yellow-600 bg-yellow-900/20 px-2 py-0.5 border border-yellow-800/50">
-                        worktree
-                      </span>
-                    </button>
-                  ))}
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {resumeItems.map((item) => {
+                    const isSelected = selectedItem?.id === item.id;
+                    const isWorktree = item.type === 'worktree';
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => handleSelectItem(item)}
+                        className={`w-full px-4 py-3 text-left font-mono transition-all flex items-center justify-between border group ${
+                          isSelected
+                            ? isWorktree
+                              ? 'border-green-400 bg-green-900/30 text-green-400 shadow-[0_0_10px_rgba(34,197,94,0.3)]'
+                              : 'border-cyan-400 bg-cyan-900/30 text-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
+                            : 'border-green-900 text-green-500 hover:border-green-700 hover:bg-green-900/10'
+                        }`}
+                      >
+                        <div className="flex flex-col gap-1 min-w-0 flex-1 mr-2">
+                          <span className="flex items-center gap-2">
+                            {isWorktree ? <GitBranch className="w-4 h-4 flex-shrink-0" /> : <FolderOpen className="w-4 h-4 flex-shrink-0" />}
+                            <span className="truncate">{item.displayName}</span>
+                          </span>
+                          {/* Secondary info: branch name for worktrees (when different from display), path for windows */}
+                          {isWorktree && item.branchName && item.displayName !== branchToWindowName(item.branchName) && (
+                            <span className="text-xs text-green-700 truncate pl-6">
+                              branch: {item.branchName}
+                            </span>
+                          )}
+                          {!isWorktree && item.workingDir && (
+                            <span className="text-xs text-green-700 truncate pl-6">
+                              {item.workingDir.replace(/^\/Users\/[^/]+/, '~')}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          {!isWorktree && item.paneCount && item.paneCount > 1 && (
+                            <span className="text-xs text-yellow-600 bg-yellow-900/20 px-1.5 py-0.5 border border-yellow-800/50">
+                              {item.paneCount}p
+                            </span>
+                          )}
+                          <span className={`text-xs px-2 py-0.5 border ${
+                            isWorktree
+                              ? 'text-yellow-600 bg-yellow-900/20 border-yellow-800/50'
+                              : 'text-cyan-600 bg-cyan-900/20 border-cyan-800/50'
+                          }`}>
+                            {isWorktree ? 'worktree' : 'window'}
+                          </span>
+                          {!isWorktree && item.closedWindowId && (
+                            <button
+                              onClick={(e) => handleDeleteClosedWindow(item.closedWindowId!, e)}
+                              className="opacity-0 group-hover:opacity-100 text-red-600 hover:text-red-400 transition-all p-1"
+                              title="Remove from list"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
 
-              {/* Layout selector for worktree resume */}
-              {selectedResumeBranch && resumeType === 'worktree' && (
-                <div className="space-y-2 pt-2 border-t border-green-900">
-                  <label className="text-sm text-green-600 tracking-widest font-bold">RESUME WITH LAYOUT:</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => setResumeLayout('default')}
-                      className={`flex items-center justify-center gap-2 p-3 border transition-all ${
-                        resumeLayout === 'default'
-                          ? 'border-green-400 bg-green-900/30 text-green-400'
-                          : 'border-green-900 text-green-700 hover:border-green-600'
-                      }`}
-                    >
-                      <Layout className="w-5 h-5" />
-                      <span className="text-sm font-bold">3-PANE</span>
-                    </button>
-                    <button
-                      onClick={() => setResumeLayout('workspace')}
-                      className={`flex items-center justify-center gap-2 p-3 border transition-all ${
-                        resumeLayout === 'workspace'
-                          ? 'border-green-400 bg-green-900/30 text-green-400'
-                          : 'border-green-900 text-green-700 hover:border-green-600'
-                      }`}
-                    >
-                      <Grid3X3 className="w-5 h-5" />
-                      <span className="text-sm font-bold">5-PANE</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Layout selector for closed window resume (when original had multiple panes) */}
-              {selectedClosedWindow && resumeType === 'window' && selectedClosedWindow.pane_count >= 3 && (
+              {/* Layout selector (shown when an item is selected) */}
+              {selectedItem && (
                 <div className="space-y-2 pt-2 border-t border-green-900">
                   <label className="text-sm text-green-600 tracking-widest font-bold">
                     RESUME WITH LAYOUT:
-                    <span className="text-green-700 font-normal ml-2">
-                      (originally {selectedClosedWindow.pane_count} panes)
-                    </span>
+                    {selectedItem.paneCount && selectedItem.paneCount > 1 && (
+                      <span className="text-green-700 font-normal ml-2">
+                        (originally {selectedItem.paneCount} panes)
+                      </span>
+                    )}
                   </label>
                   <div className="grid grid-cols-3 gap-2">
-                    <button
-                      onClick={() => setClosedWindowLayout('simple')}
-                      className={`flex items-center justify-center gap-2 p-3 border transition-all ${
-                        closedWindowLayout === 'simple'
-                          ? 'border-cyan-400 bg-cyan-900/30 text-cyan-400'
-                          : 'border-green-900 text-green-700 hover:border-green-600'
-                      }`}
-                    >
-                      <Layers className="w-5 h-5" />
-                      <span className="text-sm font-bold">SIMPLE</span>
-                    </button>
-                    <button
-                      onClick={() => setClosedWindowLayout('default')}
-                      className={`flex items-center justify-center gap-2 p-3 border transition-all ${
-                        closedWindowLayout === 'default'
-                          ? 'border-cyan-400 bg-cyan-900/30 text-cyan-400'
-                          : 'border-green-900 text-green-700 hover:border-green-600'
-                      }`}
-                    >
-                      <Layout className="w-5 h-5" />
-                      <span className="text-sm font-bold">3-PANE</span>
-                    </button>
-                    <button
-                      onClick={() => setClosedWindowLayout('workspace')}
-                      className={`flex items-center justify-center gap-2 p-3 border transition-all ${
-                        closedWindowLayout === 'workspace'
-                          ? 'border-cyan-400 bg-cyan-900/30 text-cyan-400'
-                          : 'border-green-900 text-green-700 hover:border-green-600'
-                      }`}
-                    >
-                      <Grid3X3 className="w-5 h-5" />
-                      <span className="text-sm font-bold">5-PANE</span>
-                    </button>
+                    {([
+                      { layout: 'simple' as LayoutType, label: 'SIMPLE', icon: Layers },
+                      { layout: 'default' as LayoutType, label: '3-PANE', icon: Layout },
+                      { layout: 'workspace' as LayoutType, label: '5-PANE', icon: Grid3X3 },
+                    ]).map(({ layout, label, icon: Icon }) => (
+                      <button
+                        key={layout}
+                        onClick={() => setResumeLayout(layout)}
+                        className={`flex items-center justify-center gap-2 p-3 border transition-all ${
+                          resumeLayout === layout
+                            ? selectedItem.type === 'worktree'
+                              ? 'border-green-400 bg-green-900/30 text-green-400'
+                              : 'border-cyan-400 bg-cyan-900/30 text-cyan-400'
+                            : 'border-green-900 text-green-700 hover:border-green-600'
+                        }`}
+                      >
+                        <Icon className="w-5 h-5" />
+                        <span className="text-sm font-bold">{label}</span>
+                      </button>
+                    ))}
                   </div>
                 </div>
               )}
@@ -605,9 +592,9 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
           ) : (
             <button
               onClick={handleResume}
-              disabled={!selectedResumeBranch && !selectedClosedWindow}
+              disabled={!selectedItem}
               className={`px-6 py-2 font-bold transition-all tracking-widest text-sm flex items-center gap-2 ${
-                selectedResumeBranch || selectedClosedWindow
+                selectedItem
                   ? 'bg-yellow-600 text-black hover:bg-yellow-400 shadow-[0_0_15px_rgba(202,138,4,0.5)]'
                   : 'bg-green-900 text-green-700 cursor-not-allowed'
               }`}

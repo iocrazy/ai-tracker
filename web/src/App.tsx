@@ -14,7 +14,7 @@ import { LoginView } from './components/LoginView';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, List, Terminal as TerminalIcon, Settings } from 'lucide-react';
-import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType } from './services/api';
+import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 // Helper to generate mock chat history
@@ -145,6 +145,30 @@ const App: React.FC = () => {
     ].slice(-200)); // Keep last 200 logs
   }, []);
 
+  // Track the active session file for WS chat messages
+  const activeSessionFileRef = useRef<string>('');
+
+  // Handle real-time chat messages from WebSocket
+  const handleChatMessage = useCallback((event: ChatMessageEvent) => {
+    // Only update if modal is open and this event matches the active session file
+    if (!modalTargetRef.current) return;
+    if (activeSessionFileRef.current && event.session_file !== activeSessionFileRef.current) return;
+
+    const newMessages: ChatMessage[] = event.messages.map(m => ({
+      sender: m.role === 'user' ? 'USER' : 'AGENT',
+      text: m.text,
+      timestamp: m.timestamp?.slice(11, 19) || '',
+      thinking: m.thinking,
+      interaction: m.interaction,
+      toolCalls: m.tool_calls,
+      toolResults: m.tool_results,
+    }));
+
+    if (newMessages.length > 0) {
+      setModalMessages(prev => [...prev, ...newMessages]);
+    }
+  }, []);
+
   // Store latest state for polling
   const latestStateRef = useRef<BackendState | null>(null);
 
@@ -164,10 +188,11 @@ const App: React.FC = () => {
         setConsoleLogs(prev => [...prev, { id: `err-${Date.now()}`, type: 'system', text: `> ERROR: ${err.message}` }]);
       });
 
-    // WebSocket for real-time updates (state + stream)
+    // WebSocket for real-time updates (state + stream + chat)
     wsRef.current = connectWebSocket({
       onStateUpdate: handleRealtimeUpdate,
       onStreamChunk: handleStreamChunk,
+      onChatMessage: handleChatMessage,
     });
 
     return () => {
@@ -175,7 +200,7 @@ const App: React.FC = () => {
         wsRef.current.close();
       }
     };
-  }, [handleRealtimeUpdate, handleStreamChunk]);
+  }, [handleRealtimeUpdate, handleStreamChunk, handleChatMessage]);
   
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -202,15 +227,35 @@ const App: React.FC = () => {
   // Deletion Modal State (for session deletion)
   const [deleteTarget, setDeleteTarget] = useState<{ type: 'SESSION' | 'WINDOW', sessionId: string, windowId?: string, name: string } | null>(null);
 
-  const [settings, setSettings] = useState<AppSettings>({
-      theme: 'PHOSPHOR_GREEN',
-      scanlines: true,
-      flicker: true,
-      glow: true,
-      noise: false,
-      rgbShift: false,
-      perspectiveGrid: false
+  const [settings, setSettings] = useState<AppSettings>(() => {
+      const saved = localStorage.getItem('agent-tracker-settings');
+      if (saved) {
+        try { return JSON.parse(saved); } catch {}
+      }
+      return {
+        theme: 'PHOSPHOR_GREEN',
+        scanlines: true,
+        flicker: true,
+        glow: true,
+        noise: false,
+        rgbShift: false,
+        perspectiveGrid: false,
+      };
   });
+
+  // Apply data-theme attribute for modern theme CSS overrides
+  useEffect(() => {
+    if (settings.theme === 'MODERN') {
+      document.documentElement.setAttribute('data-theme', 'modern');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+  }, [settings.theme]);
+
+  // Persist settings to localStorage
+  useEffect(() => {
+    localStorage.setItem('agent-tracker-settings', JSON.stringify(settings));
+  }, [settings]);
 
   const handleLogin = (username: string) => {
       setCurrentUser(username);
@@ -443,8 +488,10 @@ const App: React.FC = () => {
       timestamp: m.timestamp?.slice(11, 19) || '',
       thinking: m.thinking,
       interaction: m.interaction,
+      toolCalls: m.tool_calls,
+      toolResults: m.tool_results,
     }));
-    return { messages, isActive };
+    return { messages, isActive, sessionFile: data.session_file };
   }, [sessions]);
 
   // Auto-refresh modal messages every 3 seconds when open
@@ -476,7 +523,8 @@ const App: React.FC = () => {
       setIsModalOpen(true);
 
       try {
-        const { messages, isActive } = await fetchModalMessages(sessionName, windowName);
+        const { messages, isActive, sessionFile } = await fetchModalMessages(sessionName, windowName);
+        activeSessionFileRef.current = sessionFile || '';
         setModalSubtitle(`SOURCE: ${sessionName} // ${isActive ? 'LIVE' : 'ARCHIVE'}`);
         setModalMessages(messages.length > 0 ? messages : [
           { sender: 'SYSTEM', text: 'No conversation history available', timestamp: '' }
@@ -623,6 +671,7 @@ const App: React.FC = () => {
                 onClose={() => {
                   setIsModalOpen(false);
                   modalTargetRef.current = null;
+                  activeSessionFileRef.current = '';
                   setModalTarget(null);
                 }}
                 title={modalTitle}

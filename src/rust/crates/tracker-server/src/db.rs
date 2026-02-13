@@ -943,7 +943,7 @@ impl Database {
     // Closed windows operations (for resume without worktree)
     // =========================================================================
 
-    /// Save a closed window for later resume
+    /// Save a closed window for later resume (deduplicates by session_name + window_name)
     pub fn save_closed_window(
         &self,
         session_id: &str,
@@ -953,6 +953,11 @@ impl Database {
         git_branch: &str,
         pane_count: i32,
     ) -> Result<()> {
+        // Delete any existing record with the same session_name + window_name to prevent duplicates
+        self.conn.execute(
+            "DELETE FROM closed_windows WHERE session_name = ?1 AND window_name = ?2",
+            params![session_name, window_name],
+        )?;
         self.conn.execute(
             "INSERT INTO closed_windows
              (session_id, session_name, window_name, working_dir, git_branch, pane_count, closed_at)
@@ -970,12 +975,14 @@ impl Database {
         Ok(())
     }
 
-    /// Load closed windows for a session (excludes windows that are currently open)
+    /// Load closed windows for a session (excludes windows that are currently open, deduplicates by window_name)
     pub fn load_closed_windows(&self, session_name: &str, open_window_names: &[String]) -> Result<Vec<ClosedWindow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, session_name, window_name, working_dir, git_branch, pane_count, closed_at
              FROM closed_windows
-             WHERE session_name = ?1
+             WHERE session_name = ?1 AND id IN (
+                 SELECT MAX(id) FROM closed_windows WHERE session_name = ?1 GROUP BY window_name
+             )
              ORDER BY closed_at DESC
              LIMIT 50",
         )?;

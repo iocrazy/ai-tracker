@@ -179,35 +179,83 @@ WebSocket: ws://127.0.0.1:3099/ws
 | GET | `/api/tmux/closed-windows/:session` | 获取已关闭的窗口列表 |
 | DELETE | `/api/tmux/closed-windows` | 删除已关闭窗口记录 |
 
-#### Closed Windows (已关闭窗口)
+#### Closed Windows & Resume (窗口恢复系统)
 
-当通过 `/api/tmux/kill-window` 关闭窗口时，系统会自动保存窗口信息到 SQLite 数据库的 `closed_windows` 表。这样即使窗口没有关联的 git worktree，也可以在 Web UI 中恢复。
+##### gitDir 检测机制
+
+系统通过实时 tmux 轮询自动检测每个 session 的 git 仓库路径，不依赖 session 名称：
+
+```
+检测流程:
+  tmux pane_current_path (当前工作目录)
+    → 优先: tmux window option @agent_main_repo (脚本预设)
+    → 回退: git rev-parse --show-toplevel (自动发现 git root)
+    → 回退: 直接使用 working directory
+
+数据传递:
+  tmux pane → TmuxWindowInfo.git_dir → WebSocket broadcast
+    → mapTmuxToSessions() → AgentSession.gitDir → AddWindowModal prop
+    → fetchGitBranches(gitDir) 查询 worktree 列表
+```
+
+**关键设计:**
+- gitDir 是 **session 级别**，取自该 session 第一个 window 的第一个 pane 的工作目录
+- 同一个 session 的所有 window 共享一个 gitDir
+- 新建 session 时默认在 `~/`，用 yazi 导航到项目目录后，下次轮询会自动检测到 git root
+
+##### 关闭窗口的保存
+
+窗口关闭时通过两个途径保存记录：
+
+| 触发方式 | 说明 | 写入位置 |
+|----------|------|----------|
+| 自动检测 | tmux 轮询发现窗口消失 | 全局 DB + 项目 DB (双写) |
+| 手动 kill | Web UI 点击关闭窗口 | 全局 DB |
+
+- 存储去重: `save_closed_window()` 写入前先删除同 `session_name + window_name` 的旧记录
+- 查询去重: `load_closed_windows()` 用 `GROUP BY window_name` 只返回每个窗口名的最新记录
+- 全局 DB: `~/.config/agent-tracker/data/tracker.db` → `closed_windows` 表
+- 项目 DB: `<git-root>/.aitracker/tracker.db` → `closed_windows` 表
 
 **数据结构:**
 ```json
 {
   "id": 1,
-  "session_name": "my-project",
-  "window_name": "feature-auth",
-  "working_dir": "/path/to/project",
-  "git_branch": "feature/auth",
-  "closed_at": "2024-01-15T10:30:00Z"
+  "session_name": "2-mediahub",
+  "window_name": "feature-add-whisper-support",
+  "working_dir": "/path/to/worktree",
+  "git_branch": "feature/add-whisper-support",
+  "pane_count": 3,
+  "closed_at": "2026-02-12T06:59:23Z"
 }
 ```
 
-**Web UI Resume 功能:**
+##### Web UI Resume (统一列表)
 
-在 Add Window Modal 的 Resume 标签页中，同时显示两种可恢复的条目：
+Add Window → Resume 标签页显示一个统一的可恢复列表，合并两个数据源：
 
-1. **CLOSED WINDOWS** (青色边框) - 已关闭但数据库中有记录的窗口
-   - 显示窗口名、工作目录、关闭时间
-   - Resume: 在相同 session 中重新创建窗口
-   - Delete: 仅删除数据库记录
+```
+数据源 1: git worktree list --porcelain (通过 gitDir)
+  → 检测磁盘上存在但没有打开 tmux 窗口的 worktree
+  → 显示 worktree 目录名 作为主标题 (不是分支名)
+  → 分支名和目录名不一致时，显示 "branch: xxx" 辅助信息
 
-2. **CLOSED WORKTREES** (黄色边框) - 有 git worktree 但没有打开窗口的分支
-   - 显示分支名、worktree 路径
-   - Resume: 创建窗口并切换到 worktree 目录
-   - DESTROY: 删除 worktree + 删除分支 + 删除数据库记录
+数据源 2: closed_windows DB 记录 (通过 sessionName)
+  → 已关闭但有数据库记录的普通窗口
+  → 自动排除已在 worktree 列表中出现的条目 (跨源去重)
+```
+
+**为什么显示目录名而不是分支名:**
+- 用户在 lazygit、文件管理器中看到的是 worktree 目录名
+- 目录名和分支名可能不一致 (在 worktree 内 checkout 了其他分支)
+- 例: 目录 `feature-Points-capacity-payment-system` 但分支是 `feature/sidebar-architecture`
+
+**条目类型:**
+
+| 类型 | 来源 | 图标 | Badge 颜色 | 主标题 | 辅助信息 |
+|------|------|------|-----------|--------|----------|
+| worktree | git worktree list | GitBranch | 黄色 | 目录名 (basename) | 分支名 (若不同) |
+| window | closed_windows DB | FolderOpen | 青色 | 窗口名 | 工作目录路径 |
 
 **操作对比:**
 
@@ -526,12 +574,23 @@ opencode
 
 ## Data Storage
 
+**全局数据** (`~/.config/agent-tracker/`):
+
 | File | Purpose |
 |------|---------|
-| `data/notes.json` | 笔记持久化 |
-| `data/goals.json` | 目标持久化 |
-| `data/history.db` | SQLite 对话历史 |
+| `data/tracker.db` | SQLite 主数据库 (tasks, notes, goals, history, closed_windows, projects) |
 | `run/latest_notified.txt` | 最近通知的 tmux 目标 |
+| `web/dist/` | 前端静态文件 |
+
+**项目级数据** (`<git-root>/.aitracker/`):
+
+| File | Purpose |
+|------|---------|
+| `tracker.db` | 项目专属 SQLite (history, notes, goals, closed_windows) |
+| `.gitignore` | 自动生成，内容为 `*` (不提交到 git) |
+
+双写机制: history、notes、goals、closed_windows 同时写入全局 DB 和项目 DB。
+全局 DB 用于跨项目聚合查询，项目 DB 用于项目级过滤和持久化。
 
 ---
 

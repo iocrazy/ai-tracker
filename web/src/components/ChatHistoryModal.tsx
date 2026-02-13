@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { X, MessageSquare, Send, Paperclip, XCircle } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import { tmuxSendKeys, sendImages, ToolInteraction } from '../services/api';
+import { tmuxSendKeys, sendImages, ToolInteraction, ToolCallInfo, ToolResultInfo } from '../services/api';
 import { ClaudeStatus } from '../types';
+import { ChatTimeline, fromLiveChatMessages } from './ChatTimeline';
 
 export interface ChatMessage {
   sender: 'USER' | 'AGENT' | 'SYSTEM';
@@ -10,6 +10,8 @@ export interface ChatMessage {
   timestamp: string;
   thinking?: string;
   interaction?: ToolInteraction;
+  toolCalls?: ToolCallInfo[];
+  toolResults?: ToolResultInfo[];
 }
 
 type SendStatus = 'idle' | 'sending' | 'success' | 'failed';
@@ -40,7 +42,6 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const [pendingImages, setPendingImages] = useState<{ file: File; preview: string }[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [expandedThinking, setExpandedThinking] = useState<Set<number>>(new Set());
   const [sentInteractions, setSentInteractions] = useState<Set<number>>(new Set());
 
   // Reset send status after a delay
@@ -291,93 +292,16 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
                 <span className="text-green-400 text-lg font-mono tracking-wider">DROP IMAGE HERE</span>
               </div>
             )}
-            {messages.length === 0 ? (
-                <div className="text-center text-green-900 py-8 italic text-base sm:text-lg">NO_DATA_FOUND_IN_ARCHIVE</div>
-            ) : (
-                messages.map((msg, idx) => (
-                    <div key={idx} className={`flex gap-2 ${msg.sender === 'USER' ? 'flex-row-reverse' : ''}`}>
-                        <div className={`
-                            max-w-[90%] sm:max-w-[85%] p-2 sm:p-3 border leading-snug text-xs sm:text-sm
-                            ${msg.sender === 'SYSTEM'
-                                ? 'w-full text-center border-none text-green-700 italic text-xs sm:text-sm'
-                                : msg.sender === 'USER'
-                                    ? 'border-green-600/50 bg-green-900/10 text-green-300 rounded-tl-lg rounded-br-lg rounded-bl-lg'
-                                    : 'border-green-800/50 text-green-400 rounded-tr-lg rounded-br-lg rounded-bl-lg'
-                            }
-                        `}>
-                            {msg.sender !== 'SYSTEM' && (
-                                <div className={`text-[10px] sm:text-xs font-bold mb-1 opacity-70 ${msg.sender === 'USER' ? 'text-right' : 'text-left'}`}>
-                                    {msg.sender} <span className="font-normal mx-1">|</span> {msg.timestamp}
-                                </div>
-                            )}
-                            {/* Thinking block (collapsible) */}
-                            {msg.thinking && (
-                              <div className="mb-1">
-                                <button
-                                  onClick={() => setExpandedThinking(prev => {
-                                    const next = new Set(prev);
-                                    if (next.has(idx)) next.delete(idx); else next.add(idx);
-                                    return next;
-                                  })}
-                                  className="text-[10px] sm:text-xs text-green-700 hover:text-green-500 font-mono transition-colors"
-                                >
-                                  {expandedThinking.has(idx) ? '▼' : '▶'} Thinking...
-                                </button>
-                                {expandedThinking.has(idx) && (
-                                  <pre className="mt-1 p-2 text-[10px] sm:text-xs text-green-800 bg-green-900/10 border border-green-900/30 overflow-x-auto whitespace-pre-wrap break-words max-h-40 overflow-y-auto custom-scrollbar font-mono">
-                                    {msg.thinking}
-                                  </pre>
-                                )}
-                              </div>
-                            )}
-                            {/* Message text */}
-                            {msg.text && (
-                            <div className="prose prose-invert prose-green prose-xs sm:prose-sm max-w-none break-words
-                                prose-p:my-0.5 prose-p:leading-snug prose-headings:text-green-400 prose-headings:my-1
-                                prose-code:text-green-300 prose-code:bg-green-900/30 prose-code:px-1 prose-code:rounded prose-code:text-xs prose-code:break-all
-                                prose-pre:bg-green-900/20 prose-pre:border prose-pre:border-green-800 prose-pre:my-1 prose-pre:p-2 prose-pre:overflow-x-auto prose-pre:max-w-full
-                                prose-strong:text-green-300 prose-em:text-green-400
-                                prose-ul:my-0.5 prose-ol:my-0.5 prose-li:my-0 prose-li:leading-snug">
-                                <ReactMarkdown>{msg.text}</ReactMarkdown>
-                            </div>
-                            )}
-                            {/* AskUserQuestion interactive options */}
-                            {msg.interaction?.tool_name === 'AskUserQuestion' && msg.interaction.questions.map((q, qIdx) => (
-                              <div key={qIdx} className="mt-2">
-                                {q.header && <div className="text-[10px] sm:text-xs text-green-600 font-mono mb-1 uppercase tracking-wider">{q.header}</div>}
-                                <div className="text-xs sm:text-sm text-green-400 mb-2">{q.question}</div>
-                                <div className="flex flex-col gap-1.5">
-                                  {q.options.map((opt, optIdx) => (
-                                    <button
-                                      key={optIdx}
-                                      disabled={sentInteractions.has(idx)}
-                                      onClick={async () => {
-                                        if (!sessionName || !windowId) return;
-                                        const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
-                                        await tmuxSendKeys(sessionName, windowId, targetPane, String(optIdx + 1), 'Enter');
-                                        setSentInteractions(prev => new Set(prev).add(idx));
-                                      }}
-                                      className={`text-left p-2 border font-mono text-xs sm:text-sm transition-colors ${
-                                        sentInteractions.has(idx)
-                                          ? 'border-green-900/50 text-green-800 cursor-default'
-                                          : 'border-green-700/50 text-green-400 hover:border-green-500 hover:bg-green-900/20 cursor-pointer'
-                                      }`}
-                                    >
-                                      <span className="text-green-600 mr-2">{optIdx + 1}.</span>
-                                      <span className="font-bold">{opt.label}</span>
-                                      {opt.description && <span className="block text-[10px] sm:text-xs text-green-700 mt-0.5 ml-4">{opt.description}</span>}
-                                    </button>
-                                  ))}
-                                </div>
-                                {sentInteractions.has(idx) && (
-                                  <div className="text-[10px] text-green-700 mt-1 font-mono">RESPONSE SENT</div>
-                                )}
-                              </div>
-                            ))}
-                        </div>
-                    </div>
-                ))
-            )}
+            <ChatTimeline
+              items={fromLiveChatMessages(messages)}
+              onInteractionSelect={async (msgIdx, optIdx) => {
+                if (!sessionName || !windowId) return;
+                const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
+                await tmuxSendKeys(sessionName, windowId, targetPane, String(optIdx + 1), 'Enter');
+                setSentInteractions(prev => new Set(prev).add(msgIdx));
+              }}
+              sentInteractions={sentInteractions}
+            />
         </div>
 
         {/* Input Area */}

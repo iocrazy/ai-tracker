@@ -111,6 +111,7 @@ export interface StreamMessage {
 interface WebSocketCallbacks {
   onStateUpdate: (msg: RealtimeMessage) => void;
   onStreamChunk?: (chunk: StreamChunk) => void;
+  onChatMessage?: (event: ChatMessageEvent) => void;
 }
 
 export function connectWebSocket(
@@ -134,6 +135,12 @@ export function connectWebSocket(
       // Handle stream messages
       if (data.kind === 'stream' && callbacks.onStreamChunk) {
         callbacks.onStreamChunk(data.chunk as StreamChunk);
+        return;
+      }
+
+      // Handle chat message events
+      if (data.kind === 'chat' && callbacks.onChatMessage) {
+        callbacks.onChatMessage(data as ChatMessageEvent);
         return;
       }
 
@@ -445,6 +452,30 @@ export interface HistoryDetailStats {
   tools_used: string[];
 }
 
+// Timeline entry from transcript parser (for rich history view)
+export interface TimelineToolCallDetail {
+  tool_use_id: string;
+  tool_name: string;
+  args_summary: string;
+  args_full?: string;
+}
+
+export interface TimelineToolResultDetail {
+  tool_use_id: string;
+  content: string;
+  is_error: boolean;
+}
+
+export interface TimelineEntry {
+  entry_type: 'text' | 'thinking' | 'tool_call' | 'tool_result';
+  timestamp?: string;
+  role: 'user' | 'assistant';
+  text?: string;
+  thinking?: string;
+  tool_call?: TimelineToolCallDetail;
+  tool_result?: TimelineToolResultDetail;
+}
+
 export interface HistoryDetail {
   id: number;
   session: string;
@@ -459,6 +490,7 @@ export interface HistoryDetail {
   tool_usage?: ToolUsageRecord[];
   commits?: GitCommitRecord[];
   stats?: HistoryDetailStats;
+  timeline?: TimelineEntry[];
 }
 
 // Project info (from /api/projects)
@@ -619,12 +651,34 @@ export interface ToolInteraction {
   questions: InteractiveQuestion[];
 }
 
+export interface ToolCallInfo {
+  tool_use_id: string;
+  tool_name: string;
+  args_summary: string;
+  args_full?: string;
+}
+
+export interface ToolResultInfo {
+  tool_use_id: string;
+  content: string;
+  is_error: boolean;
+}
+
 export interface ClaudeMessage {
   role: string;  // "user" or "assistant"
   timestamp: string;
   text: string;
   thinking?: string;
   interaction?: ToolInteraction;
+  tool_calls?: ToolCallInfo[];
+  tool_results?: ToolResultInfo[];
+}
+
+// Chat message event from WebSocket (real-time JSONL push)
+export interface ChatMessageEvent {
+  kind: 'chat';
+  session_file: string;
+  messages: ClaudeMessage[];
 }
 
 export interface ClaudeMessagesResponse {
@@ -801,6 +855,7 @@ export async function closeWindow(session: string, window: string): Promise<{ su
 export interface BranchInfo {
   name: string;
   has_worktree: boolean;
+  worktree_path?: string;
 }
 
 export interface GitBranchesResponse {

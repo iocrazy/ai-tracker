@@ -750,6 +750,12 @@ impl TmuxAgent {
             format!("{}:{}.{}", actual_session, window, pane)
         };
 
+        // Step 0: Exit copy-mode if active (prevents / from triggering search in copy-mode-vi)
+        let _ = Command::new(TMUX_BIN)
+            .args(["send-keys", "-t", &target, "-X", "cancel"])
+            .output()
+            .await;
+
         // Step 1: Send text with -l flag (literal mode, no special char interpretation)
         tracing::info!("send_keys_with_suffix: target={}, keys={}, suffix={:?}", target, keys, suffix_key);
 
@@ -844,11 +850,22 @@ impl TmuxAgent {
         session: &str,
         window: &str,
     ) -> Result<ClaudeStatus> {
-        // Try multiple panes to find Claude Code (usually in pane 1, 2, or 3)
+        // First: detect Claude Code pane by process name (most reliable)
+        let claude_pane_id = Self::find_claude_pane(session, window).await;
+
+        // If we found a Claude pane by process, try to parse its status
+        if let Some(ref pane_id) = claude_pane_id {
+            if let Ok(content) = Self::capture_pane(session, window, pane_id, Some(10)).await {
+                let mut status = Self::parse_claude_status(&content);
+                status.pane = Some(pane_id.clone());
+                return Ok(status);
+            }
+        }
+
+        // Fallback: scan panes by content parsing (for non-standard setups)
         for pane_idx in 1..=5 {
             if let Ok(content) = Self::capture_pane(session, window, &pane_idx.to_string(), Some(10)).await {
                 let mut status = Self::parse_claude_status(&content);
-                // If we found any Claude status info, record the pane and return
                 if status.cost.is_some() || status.model.is_some() || status.action.is_some() {
                     status.pane = Some(pane_idx.to_string());
                     return Ok(status);
@@ -857,6 +874,47 @@ impl TmuxAgent {
         }
         // Return empty status if not found
         Ok(ClaudeStatus::default())
+    }
+
+    /// Find the pane running Claude Code or OpenCode by checking process names.
+    /// Returns the pane ID (e.g., "%4") for reliable targeting.
+    async fn find_claude_pane(session: &str, window: &str) -> Option<String> {
+        let actual_session = Self::find_session(session)
+            .await
+            .unwrap_or_else(|| session.to_string());
+
+        let target = format!("{}:={}", actual_session, window);
+
+        // List panes with their current command and pane ID
+        let output = Command::new(TMUX_BIN)
+            .args(["list-panes", "-t", &target, "-F", "#{pane_id} #{pane_current_command}"])
+            .output()
+            .await
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let pane_id = parts[0];   // e.g., "%4"
+            let command = parts[1];    // e.g., "2.1.39" or "claude" or "opencode"
+
+            // Match Claude Code: version-like command (e.g., "2.1.39") or "claude"
+            if command.starts_with("2.") || command.starts_with("1.")
+                || command == "claude" || command == "claude-code"
+                || command == "opencode"
+            {
+                return Some(pane_id.to_string());
+            }
+        }
+
+        None
     }
 
     /// Strip ANSI escape codes and terminal control sequences from text

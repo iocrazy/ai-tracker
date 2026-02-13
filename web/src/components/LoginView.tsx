@@ -82,7 +82,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onTokenSubmit, error }) =>
                         />
                     </div>
                     <p className="text-green-900 text-[10px] font-mono mt-2 tracking-wider">
-                        TOKEN SOURCE: ~/.config/agent-tracker/agent-config.json
+                        BEARER TOKEN REQUIRED
                     </p>
                 </div>
 

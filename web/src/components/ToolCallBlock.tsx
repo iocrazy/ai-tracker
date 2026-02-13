@@ -45,6 +45,11 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall, toolResu
     ? (isError ? '🔴' : '🟢')
     : '⏳';
 
+  // Parse Edit tool args for diff display
+  const editDiff = toolCall.tool_name === 'Edit' && toolCall.args_full
+    ? parseEditArgs(toolCall.args_full)
+    : null;
+
   return (
     <div className={`my-1 border ${borderColor} bg-black/30 font-mono text-xs`}>
       {/* Header - always visible */}
@@ -62,15 +67,17 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall, toolResu
       {/* Expanded details */}
       {expanded && (
         <div className="px-2 pb-2 space-y-1 border-t border-green-900/30">
-          {/* Full args */}
-          {toolCall.args_full && (
+          {/* Edit tool: diff view */}
+          {editDiff ? (
+            <EditDiffView diff={editDiff} />
+          ) : toolCall.args_full ? (
             <div className="mt-1">
               <div className="text-[10px] text-green-700 uppercase tracking-wider mb-0.5">ARGS</div>
               <pre className="p-1.5 text-[10px] text-green-600 bg-green-900/10 border border-green-900/30 overflow-x-auto whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar">
                 {formatArgs(toolCall.args_full)}
               </pre>
             </div>
-          )}
+          ) : null}
 
           {/* Result */}
           {toolResult && (
@@ -87,6 +94,59 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall, toolResu
           )}
         </div>
       )}
+    </div>
+  );
+};
+
+// ============================================================================
+// Edit diff rendering
+// ============================================================================
+
+interface EditDiffData {
+  file_path: string;
+  old_string: string;
+  new_string: string;
+  replace_all?: boolean;
+}
+
+function parseEditArgs(argsStr: string): EditDiffData | null {
+  try {
+    const parsed = JSON.parse(argsStr);
+    if (parsed.file_path && typeof parsed.old_string === 'string' && typeof parsed.new_string === 'string') {
+      return {
+        file_path: parsed.file_path,
+        old_string: parsed.old_string,
+        new_string: parsed.new_string,
+        replace_all: parsed.replace_all,
+      };
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+const EditDiffView: React.FC<{ diff: EditDiffData }> = ({ diff }) => {
+  const oldLines = diff.old_string.split('\n');
+  const newLines = diff.new_string.split('\n');
+
+  return (
+    <div className="mt-1 space-y-1">
+      {diff.replace_all && (
+        <div className="text-[10px] text-yellow-600">replace_all</div>
+      )}
+      <div className="border border-green-900/30 bg-black/20 overflow-x-auto max-h-60 overflow-y-auto custom-scrollbar">
+        {/* Removed lines */}
+        {oldLines.map((line, i) => (
+          <div key={`old-${i}`} className="px-2 py-px text-[10px] bg-red-900/20 text-red-400 whitespace-pre-wrap break-all">
+            <span className="inline-block w-3 text-red-600 select-none">-</span>{line}
+          </div>
+        ))}
+        {/* Added lines */}
+        {newLines.map((line, i) => (
+          <div key={`new-${i}`} className="px-2 py-px text-[10px] bg-green-900/20 text-green-400 whitespace-pre-wrap break-all">
+            <span className="inline-block w-3 text-green-600 select-none">+</span>{line}
+          </div>
+        ))}
+      </div>
     </div>
   );
 };

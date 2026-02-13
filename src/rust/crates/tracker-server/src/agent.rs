@@ -1308,20 +1308,42 @@ impl TmuxAgent {
 
     /// Find git root directory from a given path
     async fn find_git_root(path: &str) -> Option<String> {
+        // Use --show-toplevel first, then check if we're in a worktree.
+        // For worktrees, resolve to the main repo root so .aitracker is shared.
         let output = Command::new("git")
             .args(["-C", path, "rev-parse", "--show-toplevel"])
             .output()
             .await
             .ok()?;
 
-        if output.status.success() {
-            let git_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !git_root.is_empty() {
-                return Some(git_root);
+        if !output.status.success() {
+            return None;
+        }
+        let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if toplevel.is_empty() {
+            return None;
+        }
+
+        // Check if this is a worktree by looking at --git-common-dir
+        // In a worktree, --git-common-dir points to the main repo's .git directory
+        if let Ok(common) = Command::new("git")
+            .args(["-C", path, "rev-parse", "--git-common-dir"])
+            .output()
+            .await
+        {
+            if common.status.success() {
+                let common_dir = String::from_utf8_lossy(&common.stdout).trim().to_string();
+                // If common dir ends with "/.git", the main repo root is its parent
+                if let Some(main_root) = common_dir.strip_suffix("/.git") {
+                    if main_root != toplevel.trim_end_matches('/') {
+                        // We're in a worktree — return main repo root
+                        return Some(main_root.to_string());
+                    }
+                }
             }
         }
 
-        None
+        Some(toplevel)
     }
 
     /// Synchronous version of list_all_windows (for use in non-async contexts)
@@ -1441,14 +1463,30 @@ impl TmuxAgent {
             .output()
             .ok()?;
 
-        if output.status.success() {
-            let git_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !git_root.is_empty() {
-                return Some(git_root);
+        if !output.status.success() {
+            return None;
+        }
+        let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if toplevel.is_empty() {
+            return None;
+        }
+
+        // Check if this is a worktree — resolve to main repo root
+        if let Ok(common) = std::process::Command::new("git")
+            .args(["-C", path, "rev-parse", "--git-common-dir"])
+            .output()
+        {
+            if common.status.success() {
+                let common_dir = String::from_utf8_lossy(&common.stdout).trim().to_string();
+                if let Some(main_root) = common_dir.strip_suffix("/.git") {
+                    if main_root != toplevel.trim_end_matches('/') {
+                        return Some(main_root.to_string());
+                    }
+                }
             }
         }
 
-        None
+        Some(toplevel)
     }
 
     // ============ tmux Window Options (Metadata Storage) ============

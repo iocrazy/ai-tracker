@@ -42,11 +42,14 @@ export function fromLiveChatMessages(messages: ChatMessage[]): TimelineItem[] {
       blocks.push({ type: 'text', content: msg.text });
     }
 
-    // Tool calls (with result matching from next message)
+    // Tool calls (with result matching from same message or next message)
     if (msg.toolCalls && msg.toolCalls.length > 0) {
       const nextMsg = messages[idx + 1];
       for (const tc of msg.toolCalls) {
-        const result = nextMsg?.toolResults?.find(tr => tr.tool_use_id === tc.tool_use_id);
+        // Check same message first (backend merges tool results into assistant msg),
+        // then fall back to next message (legacy/WS push format)
+        const result = msg.toolResults?.find(tr => tr.tool_use_id === tc.tool_use_id)
+          || nextMsg?.toolResults?.find(tr => tr.tool_use_id === tc.tool_use_id);
         blocks.push({ type: 'tool_call', toolCall: tc, toolResult: result });
       }
     }
@@ -58,10 +61,17 @@ export function fromLiveChatMessages(messages: ChatMessage[]): TimelineItem[] {
 
     return {
       id: `live-${idx}`,
-      role: msg.sender === 'USER' ? 'user' : msg.sender === 'SYSTEM' ? 'system' : 'assistant',
+      role: (msg.sender === 'USER' ? 'user' : msg.sender === 'SYSTEM' ? 'system' : 'assistant') as TimelineItem['role'],
       timestamp: msg.timestamp,
       blocks,
     };
+  }).filter(item => {
+    if (item.blocks.length === 0) return false;
+    // Skip user items with no visible content (tool-result-only entries are automatic, not real user input)
+    if (item.role === 'user' && !item.blocks.some(b => b.type === 'text' || b.type === 'interaction')) {
+      return false;
+    }
+    return true;
   });
 }
 
@@ -132,7 +142,13 @@ export function fromHistoryTimeline(entries: TimelineEntry[]): TimelineItem[] {
     items.push(currentItem);
   }
 
-  return items;
+  return items.filter(item => {
+    if (item.blocks.length === 0) return false;
+    if (item.role === 'user' && !item.blocks.some(b => b.type === 'text' || b.type === 'interaction')) {
+      return false;
+    }
+    return true;
+  });
 }
 
 // ============================================================================
@@ -217,6 +233,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       prose-p:my-0.5 prose-p:leading-snug prose-headings:text-green-400 prose-headings:my-1
                       prose-code:text-green-300 prose-code:bg-green-900/30 prose-code:px-1 prose-code:rounded prose-code:text-xs prose-code:break-all
                       prose-pre:bg-green-900/20 prose-pre:border prose-pre:border-green-800 prose-pre:my-1 prose-pre:p-2 prose-pre:overflow-x-auto prose-pre:max-w-full
+                      [&_pre_code]:break-normal [&_pre_code]:whitespace-pre [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-green-500 [&_pre_code]:text-[10px] [&_pre_code]:leading-tight [&_pre_code]:font-mono
                       prose-strong:text-green-300 prose-em:text-green-400
                       prose-ul:my-0.5 prose-ol:my-0.5 prose-li:my-0 prose-li:leading-snug
                       [&_ol]:list-decimal [&_ol]:list-inside [&_ol]:pl-2

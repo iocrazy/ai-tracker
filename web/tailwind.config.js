@@ -7,7 +7,7 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        'mono': ['VT323', 'monospace'],
+        'mono': ['VT323', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', 'Courier New', 'monospace'],
         'tech': ['Share Tech Mono', 'monospace'],
       },
     },

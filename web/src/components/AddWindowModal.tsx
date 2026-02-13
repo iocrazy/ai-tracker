@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { X, Layers, Layout, Grid3X3, FolderGit2, ChevronDown, RefreshCw, GitBranch, RotateCcw, FolderOpen, Trash2 } from 'lucide-react';
-import { LayoutType, fetchGitBranches, BranchInfo, fetchClosedWindows, ClosedWindow, deleteClosedWindow, resumeClosedWindow } from '../services/api';
+import { LayoutType, fetchGitBranches, BranchInfo, fetchClosedWindows, ClosedWindow, deleteClosedWindow, resumeClosedWindow, fetchConfig, AgentDef } from '../services/api';
 
 export type WindowType = 'simple' | 'worktree-3pane' | 'worktree-5pane';
 export type ModalMode = 'create' | 'resume';
@@ -10,7 +10,7 @@ interface AddWindowModalProps {
   gitDir?: string;
   openWindows?: string[];  // List of currently open window names
   onClose: () => void;
-  onConfirm: (type: WindowType, branchName: string, baseBranch?: string) => void;
+  onConfirm: (type: WindowType, branchName: string, baseBranch?: string, agent?: string) => void;
   onResume?: (branchName: string, layout: LayoutType) => void;
 }
 
@@ -44,7 +44,7 @@ const WINDOW_TYPES: { type: WindowType; label: string; description: string; icon
   {
     type: 'worktree-5pane',
     label: '5-PANE',
-    description: 'Workspace: Yazi + Claude + Git + Backend + Frontend',
+    description: 'Workspace: Yazi + AI-CLI + Git + BE + FE',
     icon: Grid3X3,
     layout: 'workspace',
   },
@@ -71,6 +71,8 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
   const [showDropdown, setShowDropdown] = useState(false);
   const [closedWindows, setClosedWindows] = useState<ClosedWindow[]>([]);
   const [loadingClosedWindows, setLoadingClosedWindows] = useState(false);
+  const [agents, setAgents] = useState<Record<string, AgentDef>>({});
+  const [selectedAgent, setSelectedAgent] = useState<string>('');
 
   // Unified selection state
   const [selectedItem, setSelectedItem] = useState<ResumeItem | null>(null);
@@ -121,12 +123,16 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
     return items;
   }, [branches, closedWindows, openWindows]);
 
-  // Fetch branches and closed windows when modal opens
+  // Fetch branches, closed windows, and config when modal opens
   useEffect(() => {
     if (branches.length === 0) {
       loadBranches();
     }
     loadClosedWindows();
+    fetchConfig().then(cfg => {
+      setAgents(cfg.agents);
+      setSelectedAgent(cfg.defaults.agent);
+    }).catch(err => console.error('Failed to load config:', err));
   }, []);
 
   const loadClosedWindows = async () => {
@@ -180,7 +186,7 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
       setError('Branch name is required for worktree layouts');
       return;
     }
-    onConfirm(selectedType, newBranchName.trim(), baseBranch || undefined);
+    onConfirm(selectedType, newBranchName.trim(), baseBranch || undefined, needsBranch ? selectedAgent : undefined);
   };
 
   const handleResume = async () => {
@@ -318,6 +324,36 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
                   ))}
                 </div>
               </div>
+
+              {/* Agent Selector (only for non-simple layouts) */}
+              {needsBranch && Object.keys(agents).length > 0 && (
+                <div className="space-y-2">
+                  <label className="text-sm text-green-600 tracking-widest font-bold">AI CLI:</label>
+                  <div className="flex gap-2">
+                    {Object.entries(agents).map(([name, agent]) => {
+                      const isSelected = selectedAgent === name;
+                      const color = agent.color || '#22c55e';
+                      return (
+                        <button
+                          key={name}
+                          onClick={() => setSelectedAgent(name)}
+                          className={`
+                            flex items-center gap-2 px-4 py-2 border transition-all
+                            ${isSelected
+                              ? 'bg-green-900/30'
+                              : 'border-green-900 text-green-700 hover:border-green-600 hover:text-green-500'
+                            }
+                          `}
+                          style={isSelected ? { borderColor: color, color, boxShadow: `0 0 15px ${color}33` } : undefined}
+                        >
+                          <span className="text-lg">{agent.icon || '🤖'}</span>
+                          <span className="text-sm font-bold tracking-wider uppercase">{name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -558,13 +594,13 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
                   <div className="border border-green-700 flex-1 flex items-center justify-center text-green-500 text-xs font-bold">Yazi</div>
                   <div className="border border-green-700 flex-1 flex items-center justify-center text-green-500 text-xs font-bold">Lazygit</div>
                 </div>
-                <div className="border border-green-700 flex-1 flex items-center justify-center text-green-500 text-sm font-bold">AI-CLI</div>
+                <div className="border border-green-700 flex-1 flex items-center justify-center text-sm font-bold" style={selectedAgent && agents[selectedAgent]?.color ? { color: agents[selectedAgent].color } : { color: '#22c55e' }}>{selectedAgent ? `${agents[selectedAgent]?.icon || '🤖'} ${selectedAgent}` : 'AI-CLI'}</div>
               </div>
             )}
             {selectedType === 'worktree-5pane' && (
               <div className="grid grid-cols-3 grid-rows-2 gap-1 h-16">
                 <div className="border border-green-700 flex items-center justify-center text-green-500 text-xs font-bold">Yazi</div>
-                <div className="border border-green-700 col-span-2 flex items-center justify-center text-green-500 text-xs font-bold">Claude</div>
+                <div className="border border-green-700 col-span-2 flex items-center justify-center text-green-500 text-xs font-bold">{selectedAgent ? `${agents[selectedAgent]?.icon || '🤖'} ${selectedAgent}` : 'AI-CLI'}</div>
                 <div className="border border-green-700 flex items-center justify-center text-green-500 text-xs font-bold">Git</div>
                 <div className="border border-green-700 flex items-center justify-center text-green-500 text-xs font-bold">BE</div>
                 <div className="border border-green-700 flex items-center justify-center text-green-500 text-xs font-bold">FE</div>

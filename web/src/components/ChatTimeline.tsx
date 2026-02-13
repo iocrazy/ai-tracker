@@ -229,7 +229,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
 
                 case 'text':
                   return (
-                    <div key={blockKey} className="prose prose-invert prose-green prose-xs sm:prose-sm max-w-none break-words
+                    <div key={blockKey} className="prose prose-invert prose-green prose-xs sm:prose-sm max-w-none break-words overflow-hidden
                       prose-p:my-0.5 prose-p:leading-snug prose-headings:text-green-400 prose-headings:my-1
                       prose-code:text-green-300 prose-code:bg-green-900/30 prose-code:px-1 prose-code:rounded prose-code:text-xs prose-code:break-all
                       prose-pre:bg-green-900/20 prose-pre:border prose-pre:border-green-800 prose-pre:my-1 prose-pre:p-2 prose-pre:overflow-x-auto prose-pre:max-w-full
@@ -237,7 +237,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       prose-strong:text-green-300 prose-em:text-green-400
                       prose-ul:my-0.5 prose-ol:my-0.5 prose-li:my-0 prose-li:leading-snug
                       [&_ol]:list-decimal [&_ol]:list-inside [&_ol]:pl-2
-                      [&_ul]:list-disc [&_ul]:list-inside [&_ul]:pl-2">
+                      [&_ul]:list-disc [&_ul]:list-inside [&_ul]:pl-2
+                      [&_table]:block [&_table]:overflow-x-auto [&_table]:max-w-full [&_table]:text-xs
+                      [&_td]:break-all [&_th]:break-all">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content || ''}</ReactMarkdown>
                     </div>
                   );

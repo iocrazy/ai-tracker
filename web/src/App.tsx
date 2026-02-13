@@ -14,7 +14,7 @@ import { LoginView } from './components/LoginView';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, List, Terminal as TerminalIcon, Settings } from 'lucide-react';
-import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType } from './services/api';
+import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 // Helper to generate mock chat history
@@ -39,9 +39,10 @@ const generateMockChat = (context: string): ChatMessage[] => {
 };
 
 const App: React.FC = () => {
-  // Auth State (disabled for debugging - set to true to skip login)
-  const [isAuthenticated, setIsAuthenticated] = useState(true);
-  const [currentUser, setCurrentUser] = useState<string>('heygo');
+  // Auth State: null = checking, true = authenticated, false = needs login
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [authError, setAuthError] = useState<string>('');
+  const [currentUser, setCurrentUser] = useState<string>('operator');
 
   const [activeTab, setActiveTab] = useState<AppTab>('WORKSTATIONS');
   const [sessions, setSessions] = useState<AgentSession[]>([]);
@@ -52,6 +53,23 @@ const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [streamOutput, setStreamOutput] = useState<StreamChunk[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Check existing token on mount
+  useEffect(() => {
+    const token = getAuthToken();
+    if (!token) {
+      setIsAuthenticated(false);
+      return;
+    }
+    verifyToken(token).then(valid => {
+      if (valid) {
+        setIsAuthenticated(true);
+      } else {
+        clearAuthToken();
+        setIsAuthenticated(false);
+      }
+    });
+  }, []);
 
   // Keep sessionsRef in sync with sessions state
   useEffect(() => {
@@ -172,8 +190,10 @@ const App: React.FC = () => {
   // Store latest state for polling
   const latestStateRef = useRef<BackendState | null>(null);
 
-  // Connect to backend on mount
+  // Connect to backend when authenticated
   useEffect(() => {
+    if (!isAuthenticated) return;
+
     // Initial fetch (fallback if WebSocket is slow to connect)
     Promise.all([fetchState(), fetchTmuxWindows()])
       .then(([state, tmuxWindows]) => {
@@ -200,7 +220,7 @@ const App: React.FC = () => {
         wsRef.current.close();
       }
     };
-  }, [handleRealtimeUpdate, handleStreamChunk, handleChatMessage]);
+  }, [isAuthenticated, handleRealtimeUpdate, handleStreamChunk, handleChatMessage]);
   
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -257,9 +277,16 @@ const App: React.FC = () => {
     localStorage.setItem('agent-tracker-settings', JSON.stringify(settings));
   }, [settings]);
 
-  const handleLogin = (username: string) => {
-      setCurrentUser(username);
-      setIsAuthenticated(true);
+  const handleTokenSubmit = async (token: string) => {
+      const valid = await verifyToken(token);
+      if (valid) {
+        setAuthToken(token);
+        setAuthError('');
+        setIsAuthenticated(true);
+      } else {
+        setAuthError('INVALID_TOKEN // ACCESS_DENIED');
+        setIsAuthenticated(false);
+      }
   };
 
   const updateSetting = (key: keyof AppSettings, value: any) => {
@@ -273,7 +300,7 @@ const App: React.FC = () => {
       }
   };
 
-  const handleConfirmAddWindow = async (type: WindowType, branchName: string, baseBranch?: string) => {
+  const handleConfirmAddWindow = async (type: WindowType, branchName: string, baseBranch?: string, agent?: string) => {
     if (!addWindowModal) return;
 
     const { sessionName, gitDir } = addWindowModal;
@@ -294,6 +321,7 @@ const App: React.FC = () => {
           branch: branchName,
           base_branch: baseBranch,  // Base branch to create from
           session: sessionName,
+          agent,
           layout,
           auto_open_browser: type === 'worktree-5pane',
         });
@@ -476,12 +504,12 @@ const App: React.FC = () => {
   };
 
   // Fetch messages for the modal - extracted for reuse in auto-refresh
-  const fetchModalMessages = useCallback(async (sessionName: string, windowName: string) => {
+  const fetchModalMessages = useCallback(async (sessionName: string, windowName: string, claudePane?: string) => {
     const session = sessions.find(s => s.name === sessionName);
     const win = session?.windows.find(w => w.name === windowName);
     const isActive = win?.status === 'BUSY' || win?.status === 'PAUSED';
 
-    const data = await fetchClaudeMessages(50, { session: sessionName, window: windowName });
+    const data = await fetchClaudeMessages(50, { session: sessionName, window: windowName, pane: claudePane || win?.claudePane });
     const messages: ChatMessage[] = data.messages.map(m => ({
       sender: m.role === 'user' ? 'USER' : 'AGENT',
       text: m.text,
@@ -501,8 +529,8 @@ const App: React.FC = () => {
     const interval = setInterval(async () => {
       if (!modalTargetRef.current) return;
       try {
-        const { session, window } = modalTargetRef.current;
-        const { messages, isActive } = await fetchModalMessages(session, window);
+        const { session, window, claudePane } = modalTargetRef.current;
+        const { messages, isActive } = await fetchModalMessages(session, window, claudePane);
         setModalSubtitle(`SOURCE: ${session} // ${isActive ? 'LIVE' : 'ARCHIVE'}`);
         setModalMessages(messages.length > 0 ? messages : [
           { sender: 'SYSTEM', text: 'No conversation history available', timestamp: '' }
@@ -523,7 +551,7 @@ const App: React.FC = () => {
       setIsModalOpen(true);
 
       try {
-        const { messages, isActive, sessionFile } = await fetchModalMessages(sessionName, windowName);
+        const { messages, isActive, sessionFile } = await fetchModalMessages(sessionName, windowName, claudePane);
         activeSessionFileRef.current = sessionFile || '';
         setModalSubtitle(`SOURCE: ${sessionName} // ${isActive ? 'LIVE' : 'ARCHIVE'}`);
         setModalMessages(messages.length > 0 ? messages : [
@@ -577,9 +605,13 @@ const App: React.FC = () => {
 
   return (
     <CRTWrapper settings={settings}>
-      {/* If not authenticated, show LoginView. Otherwise show Main App */}
-      {!isAuthenticated ? (
-          <LoginView onLogin={handleLogin} />
+      {/* Auth states: null = checking, false = login, true = app */}
+      {isAuthenticated === null ? (
+          <div className="flex items-center justify-center min-h-[100dvh]">
+            <div className="text-green-500 font-mono text-lg animate-pulse tracking-widest">AUTHENTICATING...</div>
+          </div>
+      ) : !isAuthenticated ? (
+          <LoginView onTokenSubmit={handleTokenSubmit} error={authError} />
       ) : (
           <div className="flex flex-col h-[100dvh] max-w-[1600px] mx-auto overflow-hidden">
 

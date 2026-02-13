@@ -2,7 +2,52 @@
 
 const API_BASE = '/api';
 // Use relative WebSocket URL - works with both dev proxy (port 5173) and production (port 3099)
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+const WS_BASE = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+
+// ============================================================================
+// Auth Token Management
+// ============================================================================
+
+const AUTH_TOKEN_KEY = 'agent-tracker-auth-token';
+
+export function getAuthToken(): string | null {
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+export function setAuthToken(token: string): void {
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+export function clearAuthToken(): void {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+/** Authenticated fetch wrapper — injects Bearer token, handles 401 */
+export async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const token = getAuthToken();
+  const headers = new Headers(init?.headers);
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  const response = await fetch(input, { ...init, headers });
+  if (response.status === 401) {
+    clearAuthToken();
+    window.location.reload();
+  }
+  return response;
+}
+
+/** Verify a token against the server */
+export async function verifyToken(token: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}/auth/verify`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
 
 // Backend types (from tracker-server)
 export interface BackendTask {
@@ -68,7 +113,7 @@ export interface BackendState {
 
 // Fetch current state
 export async function fetchState(): Promise<BackendState> {
-  const response = await fetch(`${API_BASE}/state`);
+  const response = await authFetch(`${API_BASE}/state`);
   if (!response.ok) {
     throw new Error(`Failed to fetch state: ${response.status}`);
   }
@@ -77,7 +122,7 @@ export async function fetchState(): Promise<BackendState> {
 
 // Send a command
 export async function sendCommand(command: string, params: Record<string, string> = {}): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/command`, {
+  const response = await authFetch(`${API_BASE}/command`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ command, ...params }),
@@ -117,7 +162,9 @@ interface WebSocketCallbacks {
 export function connectWebSocket(
   callbacksOrOnMessage: WebSocketCallbacks | ((msg: RealtimeMessage) => void)
 ): WebSocket {
-  const ws = new WebSocket(WS_URL);
+  const token = getAuthToken();
+  const wsUrl = token ? `${WS_BASE}?token=${encodeURIComponent(token)}` : WS_BASE;
+  const ws = new WebSocket(wsUrl);
 
   // Support both old and new callback formats
   const callbacks: WebSocketCallbacks = typeof callbacksOrOnMessage === 'function'
@@ -177,7 +224,7 @@ export async function startStream(
   window: string,
   pane: string
 ): Promise<{ success: boolean; target: string; message: string }> {
-  const response = await fetch(`${API_BASE}/stream/start`, {
+  const response = await authFetch(`${API_BASE}/stream/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session, window, pane }),
@@ -186,7 +233,7 @@ export async function startStream(
 }
 
 export async function stopStream(pane: string): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/stream/stop`, {
+  const response = await authFetch(`${API_BASE}/stream/stop`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pane }),
@@ -200,7 +247,7 @@ export interface StreamEntry {
 }
 
 export async function listStreams(): Promise<StreamEntry[]> {
-  const response = await fetch(`${API_BASE}/stream/list`);
+  const response = await authFetch(`${API_BASE}/stream/list`);
   const data = await response.json();
   return data.streams || [];
 }
@@ -218,7 +265,7 @@ export interface TmuxWindowInfo {
 
 // Fetch all tmux windows with full details
 export async function fetchTmuxWindows(): Promise<TmuxWindowInfo[]> {
-  const response = await fetch(`${API_BASE}/tmux/windows`);
+  const response = await authFetch(`${API_BASE}/tmux/windows`);
   if (!response.ok) {
     throw new Error(`Failed to fetch tmux windows: ${response.status}`);
   }
@@ -235,7 +282,7 @@ export async function tmuxSendKeys(
   keys: string,
   suffixKey: string = 'Enter'
 ): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/tmux/send-keys`, {
+  const response = await authFetch(`${API_BASE}/tmux/send-keys`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session, window, pane, keys, suffix_key: suffixKey }),
@@ -251,7 +298,7 @@ export async function sendImage(
   imageBase64: string,
   message?: string
 ): Promise<{ success: boolean; message: string; image_path?: string }> {
-  const response = await fetch(`${API_BASE}/tmux/send-image`, {
+  const response = await authFetch(`${API_BASE}/tmux/send-image`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -273,7 +320,7 @@ export async function sendImages(
   imagesBase64: string[],
   message?: string
 ): Promise<{ success: boolean; message: string; image_paths?: string[] }> {
-  const response = await fetch(`${API_BASE}/tmux/send-image`, {
+  const response = await authFetch(`${API_BASE}/tmux/send-image`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -311,7 +358,7 @@ export async function executeTmuxCommand(command: string): Promise<{ success: bo
 
 // Kill a tmux session
 export async function tmuxKillSession(session: string): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/tmux/kill-session`, {
+  const response = await authFetch(`${API_BASE}/tmux/kill-session`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session }),
@@ -324,7 +371,7 @@ export async function tmuxKillSession(session: string): Promise<{ success: boole
 
 // Kill a tmux window
 export async function tmuxKillWindow(session: string, window: string): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/tmux/kill-window`, {
+  const response = await authFetch(`${API_BASE}/tmux/kill-window`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session, window }),
@@ -337,7 +384,7 @@ export async function tmuxKillWindow(session: string, window: string): Promise<{
 
 // Create a new tmux window
 export async function tmuxNewWindow(session: string, name: string): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/tmux/new-window`, {
+  const response = await authFetch(`${API_BASE}/tmux/new-window`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session, name }),
@@ -361,7 +408,7 @@ export interface ClosedWindow {
 
 // Get closed windows for a session (for resume without worktree)
 export async function fetchClosedWindows(sessionName: string): Promise<ClosedWindow[]> {
-  const response = await fetch(`${API_BASE}/tmux/closed-windows/${encodeURIComponent(sessionName)}`);
+  const response = await authFetch(`${API_BASE}/tmux/closed-windows/${encodeURIComponent(sessionName)}`);
   if (!response.ok) {
     return [];
   }
@@ -370,7 +417,7 @@ export async function fetchClosedWindows(sessionName: string): Promise<ClosedWin
 
 // Delete a closed window record
 export async function deleteClosedWindow(id: number): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/tmux/closed-windows`, {
+  const response = await authFetch(`${API_BASE}/tmux/closed-windows`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
@@ -389,7 +436,7 @@ export async function resumeClosedWindow(
   layout?: 'simple' | 'default' | 'workspace',
   closedWindowId?: number
 ): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/tmux/resume-window`, {
+  const response = await authFetch(`${API_BASE}/tmux/resume-window`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -409,7 +456,7 @@ export async function resumeClosedWindow(
 // Select (switch to) a tmux window
 // windowId is optional - use it for precise targeting when windows have duplicate names
 export async function tmuxSelectWindow(session: string, window: string, windowId?: string): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/tmux/select-window`, {
+  const response = await authFetch(`${API_BASE}/tmux/select-window`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session, window, window_id: windowId }),
@@ -507,7 +554,7 @@ export interface ProjectInfo {
 
 // Fetch registered projects
 export async function fetchProjects(): Promise<ProjectInfo[]> {
-  const response = await fetch(`${API_BASE}/projects`);
+  const response = await authFetch(`${API_BASE}/projects`);
   if (!response.ok) return [];
   return response.json();
 }
@@ -521,7 +568,7 @@ export async function fetchProjectHistory(params: HistoryQueryParams = {}): Prom
   if (params.page) searchParams.set('page', String(params.page));
   if (params.per_page) searchParams.set('per_page', String(params.per_page));
 
-  const response = await fetch(`${API_BASE}/projects/history?${searchParams}`);
+  const response = await authFetch(`${API_BASE}/projects/history?${searchParams}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -573,7 +620,7 @@ export async function fetchHistory(params: HistoryQueryParams = {}): Promise<His
   if (params.page) searchParams.set('page', String(params.page));
   if (params.per_page) searchParams.set('per_page', String(params.per_page));
 
-  const response = await fetch(`${API_BASE}/history?${searchParams}`);
+  const response = await authFetch(`${API_BASE}/history?${searchParams}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -582,7 +629,7 @@ export async function fetchHistory(params: HistoryQueryParams = {}): Promise<His
 
 // Fetch history detail
 export async function fetchHistoryDetail(id: number): Promise<HistoryDetail> {
-  const response = await fetch(`${API_BASE}/history/${id}`);
+  const response = await authFetch(`${API_BASE}/history/${id}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -601,7 +648,7 @@ export async function exportHistory(
   if (params.search) searchParams.set('search', params.search);
   searchParams.set('format', format);
 
-  const response = await fetch(`${API_BASE}/history/export?${searchParams}`);
+  const response = await authFetch(`${API_BASE}/history/export?${searchParams}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -616,7 +663,7 @@ export async function fetchSessions(params: HistoryQueryParams = {}): Promise<Hi
   if (params.page) searchParams.set('page', String(params.page));
   if (params.per_page) searchParams.set('per_page', String(params.per_page));
 
-  const response = await fetch(`${API_BASE}/sessions?${searchParams}`);
+  const response = await authFetch(`${API_BASE}/sessions?${searchParams}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -626,7 +673,7 @@ export async function fetchSessions(params: HistoryQueryParams = {}): Promise<Hi
 // Fetch session detail (parsed on demand from JSONL file)
 export async function fetchSessionDetail(filePath: string): Promise<HistoryDetail> {
   const searchParams = new URLSearchParams({ file_path: filePath });
-  const response = await fetch(`${API_BASE}/sessions/detail?${searchParams}`);
+  const response = await authFetch(`${API_BASE}/sessions/detail?${searchParams}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -689,7 +736,7 @@ export interface ClaudeMessagesResponse {
 
 export async function fetchClaudeMessages(
   count: number = 1,
-  options?: { project?: string; session?: string; window?: string }
+  options?: { project?: string; session?: string; window?: string; pane?: string }
 ): Promise<ClaudeMessagesResponse> {
   const params = new URLSearchParams({ count: String(count) });
   if (options?.project) {
@@ -701,9 +748,12 @@ export async function fetchClaudeMessages(
   if (options?.window) {
     params.append('window', options.window);
   }
+  if (options?.pane) {
+    params.append('pane', options.pane);
+  }
   // Add cache-busting timestamp to prevent browser caching
   params.append('_t', String(Date.now()));
-  const response = await fetch(`${API_BASE}/claude/messages?${params}`);
+  const response = await authFetch(`${API_BASE}/claude/messages?${params}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -733,7 +783,7 @@ export async function fetchClaudeStatus(
   window: string
 ): Promise<ClaudeStatusResponse> {
   const params = new URLSearchParams({ session, window });
-  const response = await fetch(`${API_BASE}/tmux/claude-status?${params}`);
+  const response = await authFetch(`${API_BASE}/tmux/claude-status?${params}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -757,7 +807,7 @@ export async function fetchTmuxCapture(
   if (lines) {
     params.append('lines', String(lines));
   }
-  const response = await fetch(`${API_BASE}/tmux/capture?${params}`);
+  const response = await authFetch(`${API_BASE}/tmux/capture?${params}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -814,7 +864,7 @@ export interface ResumeWorkspaceRequest {
 
 // Start a new workspace with worktree
 export async function startWorkspace(req: StartWorkspaceRequest): Promise<StartWorkspaceResponse> {
-  const response = await fetch(`${API_BASE}/workspace/start`, {
+  const response = await authFetch(`${API_BASE}/workspace/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
@@ -824,7 +874,7 @@ export async function startWorkspace(req: StartWorkspaceRequest): Promise<StartW
 
 // Destroy a workspace (delete worktree + tmux window)
 export async function destroyWorkspace(req: DestroyWorkspaceRequest): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/workspace/destroy`, {
+  const response = await authFetch(`${API_BASE}/workspace/destroy`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
@@ -834,7 +884,7 @@ export async function destroyWorkspace(req: DestroyWorkspaceRequest): Promise<{ 
 
 // Resume a workspace (reopen existing worktree)
 export async function resumeWorkspace(req: ResumeWorkspaceRequest): Promise<StartWorkspaceResponse> {
-  const response = await fetch(`${API_BASE}/workspace/resume`, {
+  const response = await authFetch(`${API_BASE}/workspace/resume`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
@@ -865,10 +915,36 @@ export interface GitBranchesResponse {
   branches_with_status?: BranchInfo[];
 }
 
+// Config types (from /api/config)
+export interface AgentDef {
+  command: string;
+  color?: string;
+  icon?: string;
+}
+
+export interface ConfigDefaults {
+  layout: string;
+  agent: string;
+}
+
+export interface ConfigResponse {
+  agents: Record<string, AgentDef>;
+  defaults: ConfigDefaults;
+}
+
+// Fetch server config (agents, defaults)
+export async function fetchConfig(): Promise<ConfigResponse> {
+  const response = await authFetch(`${API_BASE}/config`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch config: ${response.status}`);
+  }
+  return response.json();
+}
+
 // Fetch git branches for a repository
 export async function fetchGitBranches(gitDir?: string): Promise<GitBranchesResponse> {
   const params = gitDir ? `?git_dir=${encodeURIComponent(gitDir)}` : '';
-  const response = await fetch(`${API_BASE}/git/branches${params}`);
+  const response = await authFetch(`${API_BASE}/git/branches${params}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch branches: ${response.status}`);
   }

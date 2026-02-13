@@ -26,6 +26,10 @@ pub struct AgentConfig {
     /// Default settings
     #[serde(default)]
     pub defaults: Defaults,
+
+    /// Authentication settings
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 /// Workspace (project) configuration
@@ -188,6 +192,27 @@ pub struct PaneConfig {
     pub size: Option<String>,
 }
 
+/// Authentication configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// Bearer token for API authentication
+    #[serde(default)]
+    pub token: String,
+
+    /// Allowed CORS origins (empty = mirror request, token is the real gate)
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            allowed_origins: Vec::new(),
+        }
+    }
+}
+
 /// Default settings
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Defaults {
@@ -205,7 +230,7 @@ fn default_layout() -> String {
 }
 
 fn default_agent() -> String {
-    "claude --dangerously-skip-permissions".to_string()
+    "claude".to_string()
 }
 
 impl AgentConfig {
@@ -292,6 +317,20 @@ impl AgentConfig {
         );
 
         config
+    }
+
+    /// Save config to default path
+    pub fn save(&self) -> Result<()> {
+        let path = Self::default_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config dir {:?}", parent))?;
+        }
+        let content = serde_json::to_string_pretty(self)
+            .with_context(|| "Failed to serialize config")?;
+        std::fs::write(&path, content)
+            .with_context(|| format!("Failed to write config to {:?}", path))?;
+        Ok(())
     }
 
     /// Get workspace config by name

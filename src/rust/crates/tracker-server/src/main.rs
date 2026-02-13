@@ -26,7 +26,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Path as AxumPath, Query, State,
     },
-    http::StatusCode,
+    http::{header, Method, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Json},
     routing::{delete, get, post},
     Router,
@@ -36,7 +37,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -142,10 +143,14 @@ struct AppState {
     project_dbs: project_db::ProjectDbManager,
     /// Chat watcher for JSONL file monitoring → WS push
     chat_watcher: chat_watcher::ChatWatcher,
+    /// Bearer token for API authentication
+    auth_token: String,
+    /// Allowed CORS origins
+    allowed_origins: Vec<String>,
 }
 
 impl AppState {
-    fn new(db: Database) -> Result<Self> {
+    fn new(db: Database, auth_token: String, allowed_origins: Vec<String>) -> Result<Self> {
         let (broadcast_tx, _) = broadcast::channel(16);
         let mut state = ServerState::new(db);
         state.load_from_db()?;
@@ -156,6 +161,8 @@ impl AppState {
             stream_manager: stream::StreamManager::new(),
             project_dbs: project_db::ProjectDbManager::new(),
             chat_watcher: chat_watcher::ChatWatcher::new(),
+            auth_token,
+            allowed_origins,
         })
     }
 
@@ -2351,8 +2358,57 @@ struct SessionDetailParams {
     file_path: String,
 }
 
+/// Validate that a file path is safe (no path traversal, only allowed directories)
+fn validate_file_path(file_path: &str) -> Result<(), String> {
+    // Reject null bytes
+    if file_path.contains('\0') {
+        return Err("Path contains null bytes".to_string());
+    }
+    // Reject relative paths
+    if !file_path.starts_with('/') {
+        return Err("Path must be absolute".to_string());
+    }
+    // Reject .. components
+    if file_path.contains("..") {
+        return Err("Path traversal not allowed".to_string());
+    }
+
+    // Canonicalize to resolve symlinks
+    let canonical = std::fs::canonicalize(file_path)
+        .map_err(|_| "Path does not exist or cannot be resolved".to_string())?;
+    let canonical_str = canonical.to_string_lossy();
+
+    // Only allow paths under known safe directories
+    let home = dirs::home_dir().unwrap_or_default();
+    let claude_dir = home.join(".claude");
+    let tracker_dir = home.join(".config").join("agent-tracker");
+
+    let allowed = canonical_str.starts_with(&claude_dir.to_string_lossy().to_string())
+        || canonical_str.starts_with(&tracker_dir.to_string_lossy().to_string())
+        || canonical_str.contains("/.aitracker/");
+
+    if !allowed {
+        return Err("Path not in allowed directory".to_string());
+    }
+
+    // Only allow .jsonl files
+    if !canonical_str.ends_with(".jsonl") {
+        return Err("Only .jsonl files are allowed".to_string());
+    }
+
+    Ok(())
+}
+
 /// Get session detail by parsing the JSONL file on demand
-async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> Json<HistoryDetailResponse> {
+async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> impl IntoResponse {
+    // Validate file path to prevent path traversal
+    if let Err(msg) = validate_file_path(&params.file_path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid file path", "message": msg})),
+        ).into_response();
+    }
+
     let empty_response = || Json(HistoryDetailResponse {
         id: 0,
         session: String::new(),
@@ -2372,7 +2428,7 @@ async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> Json<H
 
     let path = std::path::Path::new(&params.file_path);
     if !path.exists() {
-        return empty_response();
+        return empty_response().into_response();
     }
 
     // Parse transcript using existing infrastructure
@@ -2380,7 +2436,7 @@ async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> Json<H
         Ok(r) => r,
         Err(e) => {
             error!("Failed to parse session file {}: {}", params.file_path, e);
-            return empty_response();
+            return empty_response().into_response();
         }
     };
 
@@ -2483,7 +2539,7 @@ async fn get_session_detail(Query(params): Query<SessionDetailParams>) -> Json<H
         commits,
         stats,
         timeline,
-    })
+    }).into_response()
 }
 
 /// Resume a conversation
@@ -2734,6 +2790,8 @@ struct ClaudeMessagesParams {
     session: Option<String>,
     /// Tmux window name (optional) - used with session to get pane's working directory
     window: Option<String>,
+    /// Tmux pane ID (e.g. "%42") - used for lsof-based JSONL file discovery
+    pane: Option<String>,
 }
 
 /// Background scanner: index Claude session JSONL files into session_index table
@@ -3134,7 +3192,7 @@ fn parse_single_jsonl_entry(line: &str) -> Option<ClaudeMessage> {
                 let is_error = item.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
                 let content_val = item.get("content");
                 let content_str = match content_val {
-                    Some(serde_json::Value::String(s)) => truncate_str(s, 500),
+                    Some(serde_json::Value::String(s)) => truncate_str(s, 2000),
                     Some(serde_json::Value::Array(arr)) => {
                         // Extract text from content array
                         let texts: Vec<&str> = arr.iter()
@@ -3146,9 +3204,9 @@ fn parse_single_jsonl_entry(line: &str) -> Option<ClaudeMessage> {
                                 }
                             })
                             .collect();
-                        truncate_str(&texts.join("\n"), 500)
+                        truncate_str(&texts.join("\n"), 2000)
                     }
-                    Some(other) => truncate_str(&serde_json::to_string(other).unwrap_or_default(), 500),
+                    Some(other) => truncate_str(&serde_json::to_string(other).unwrap_or_default(), 2000),
                     None => String::new(),
                 };
                 tool_results.push(ToolResultInfo {
@@ -3216,6 +3274,24 @@ fn parse_claude_messages(session_file: &std::path::Path, _count: usize) -> Vec<C
             continue;
         }
         if let Some(msg) = parse_single_jsonl_entry(line) {
+            // Merge tool-result-only user messages into the preceding assistant message.
+            // These are automatic tool responses (not real user input) and should not
+            // appear as separate USER bubbles in the chat timeline.
+            if msg.role == "user"
+                && msg.text.trim().is_empty()
+                && msg.interaction.is_none()
+                && !msg.tool_results.is_empty()
+            {
+                // Merge tool_results into the last assistant message
+                if let Some(last) = all_messages.last_mut() {
+                    if last.role == "assistant" {
+                        last.tool_results.extend(msg.tool_results);
+                        continue;
+                    }
+                }
+                // No preceding assistant message — skip this entry
+                continue;
+            }
             all_messages.push(msg);
         }
     }
@@ -3228,8 +3304,8 @@ async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json
     let count = params.count.or(params.limit).unwrap_or(1);
 
     // Determine project filter: either from explicit project param or from tmux pane's working directory
-    // Returns a list of candidate filters (original path + parent paths) to try matching
-    let project_filters: Vec<String> = if let (Some(session), Some(window)) = (&params.session, &params.window) {
+    // Two-tier: exact path filters first, parent path filters only as fallback
+    let (project_filters, parent_filters): (Vec<String>, Vec<String>) = if let (Some(session), Some(window)) = (&params.session, &params.window) {
         // Try all panes in the window to find one that matches a Claude project directory
         // This handles cases where the active pane is lazygit but Claude runs in another pane
         let list_output = std::process::Command::new("tmux")
@@ -3265,28 +3341,37 @@ async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json
             }
         }
 
-        // Convert each path to Claude project directory format and also add parent paths
+        // Convert each path to Claude project directory format
         // Claude Code replaces '/', '.', and '_' with '-' in project directory names
-        let mut filters: Vec<String> = Vec::new();
+        // Use two-tier matching: exact paths first, parent paths only as fallback
+        let mut exact_filters: Vec<String> = Vec::new();
+        let mut parent_filters: Vec<String> = Vec::new();
         for path in &paths {
+            let converted = path.replace('/', "-").replace('.', "-").replace('_', "-");
+            if !exact_filters.contains(&converted) {
+                exact_filters.push(converted);
+            }
+            // Also generate parent path filters as fallback
             let mut current = path.as_str();
             loop {
-                let converted = current.replace('/', "-").replace('.', "-").replace('_', "-");
-                if !filters.contains(&converted) {
-                    filters.push(converted);
-                }
-                // Try parent directory
                 match current.rfind('/') {
-                    Some(pos) if pos > 0 => current = &current[..pos],
+                    Some(pos) if pos > 0 => {
+                        current = &current[..pos];
+                        let parent = current.replace('/', "-").replace('.', "-").replace('_', "-");
+                        if !exact_filters.contains(&parent) && !parent_filters.contains(&parent) {
+                            parent_filters.push(parent);
+                        }
+                    }
                     _ => break,
                 }
             }
         }
-        filters
+        // Return exact filters; parent_filters used below as fallback
+        (exact_filters, parent_filters)
     } else if let Some(ref project) = params.project {
-        vec![project.clone()]
+        (vec![project.clone()], vec![])
     } else {
-        vec![]
+        (vec![], vec![])
     };
 
     // Find session files
@@ -3302,31 +3387,29 @@ async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json
         });
     }
 
-    // Find all .jsonl files sorted by modification time (newest first)
-    let mut candidate_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(&claude_projects) {
-        for entry in entries.flatten() {
-            let project_dir = entry.path();
-            if project_dir.is_dir() {
-                // Apply project filter if specified
-                // Try each candidate filter (exact path, parent paths) against directory name
-                if !project_filters.is_empty() {
-                    let dir_name = project_dir.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if !project_filters.iter().any(|f| dir_name == *f) {
-                        continue;
+    // Collect JSONL files matching exact filters first, then parent filters as fallback
+    let collect_candidates = |filters: &[String]| -> Vec<(std::path::PathBuf, std::time::SystemTime)> {
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&claude_projects) {
+            for entry in entries.flatten() {
+                let project_dir = entry.path();
+                if project_dir.is_dir() {
+                    if !filters.is_empty() {
+                        let dir_name = project_dir.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if !filters.iter().any(|f| dir_name == *f) {
+                            continue;
+                        }
                     }
-                }
-
-                if let Ok(files) = std::fs::read_dir(&project_dir) {
-                    for file in files.flatten() {
-                        let path = file.path();
-                        if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                            if let Ok(meta) = path.metadata() {
-                                if let Ok(modified) = meta.modified() {
-                                    candidate_files.push((path, modified));
+                    if let Ok(dir_files) = std::fs::read_dir(&project_dir) {
+                        for file in dir_files.flatten() {
+                            let path = file.path();
+                            if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                                if let Ok(meta) = path.metadata() {
+                                    if let Ok(modified) = meta.modified() {
+                                        files.push((path, modified));
+                                    }
                                 }
                             }
                         }
@@ -3334,12 +3417,23 @@ async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json
                 }
             }
         }
+        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files
+    };
+
+    // Try exact filters first; fall back to parent filters if no files found
+    let mut candidate_files = collect_candidates(&project_filters);
+    if candidate_files.is_empty() && !parent_filters.is_empty() {
+        debug!("No JSONL files for exact filters {:?}, trying parent filters {:?}", project_filters, parent_filters);
+        candidate_files = collect_candidates(&parent_filters);
     }
 
-    // Sort by modification time, newest first
-    candidate_files.sort_by(|a, b| b.1.cmp(&a.1));
+    // Legacy path: if no filters at all, scan everything
+    if project_filters.is_empty() && parent_filters.is_empty() {
+        candidate_files = collect_candidates(&[]);
+    }
 
-    debug!("Claude messages: Found {} candidate session files for filter {:?}", candidate_files.len(), project_filters);
+    debug!("Claude messages: Found {} candidate session files for exact filters {:?}", candidate_files.len(), project_filters);
 
     // Helper function to check if a file has real conversation content
     // Uses BufReader for efficient streaming without loading entire file
@@ -4860,6 +4954,68 @@ async fn stream_list(State(state): State<Arc<AppState>>) -> Json<ListStreamsResp
 }
 
 // ============================================================================
+// Authentication
+// ============================================================================
+
+/// Auth middleware: validates Bearer token for /api/* and /ws paths
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> impl IntoResponse {
+    let path = req.uri().path().to_string();
+
+    // Skip auth for non-API paths (static files) and /health
+    if !path.starts_with("/api/") && !path.starts_with("/ws") {
+        return next.run(req).await;
+    }
+    if path == "/health" {
+        return next.run(req).await;
+    }
+
+    let token_valid = if path.starts_with("/ws") {
+        // WebSocket: extract token from query string
+        req.uri()
+            .query()
+            .and_then(|q| {
+                q.split('&')
+                    .find_map(|pair| {
+                        let mut parts = pair.splitn(2, '=');
+                        match (parts.next(), parts.next()) {
+                            (Some("token"), Some(v)) => Some(v.to_string()),
+                            _ => None,
+                        }
+                    })
+            })
+            .map(|t| t == state.auth_token)
+            .unwrap_or(false)
+    } else {
+        // API: extract Bearer token from Authorization header
+        req.headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|t| t == state.auth_token)
+            .unwrap_or(false)
+    };
+
+    if token_valid {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Unauthorized", "message": "Invalid or missing auth token"})),
+        )
+            .into_response()
+    }
+}
+
+/// Verify auth token (if middleware passes, token is valid)
+async fn verify_auth() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"authenticated": true}))
+}
+
+// ============================================================================
 // WebSocket Handler
 // ============================================================================
 
@@ -5132,11 +5288,11 @@ fn discover_active_jsonl_files(state: &AppState) -> Vec<(String, std::path::Path
         _ => return vec![],
     };
 
-    // Get active tasks with their session/window info
+    // Get active tasks with their session/window/pane info
     let server_state = state.state.lock().unwrap();
-    let active_windows: Vec<(String, String)> = server_state.tasks.values()
+    let active_windows: Vec<(String, String, String)> = server_state.tasks.values()
         .filter(|t| matches!(t.status, TaskStatus::InProgress | TaskStatus::AwaitingInput))
-        .map(|t| (t.session.clone(), t.window.clone()))
+        .map(|t| (t.session.clone(), t.window.clone(), t.pane.clone()))
         .collect();
     drop(server_state);
 
@@ -5146,8 +5302,10 @@ fn discover_active_jsonl_files(state: &AppState) -> Vec<(String, std::path::Path
 
     let mut result = Vec::new();
 
-    for (session, window) in &active_windows {
-        // Get working directory from tmux pane
+    for (session, window, _pane) in &active_windows {
+        let key = format!("{}:{}", session, window);
+
+        // Directory-based lookup with two-tier filtering (exact paths first, then parents)
         let list_output = std::process::Command::new("tmux")
             .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
             .output();
@@ -5164,56 +5322,60 @@ fn discover_active_jsonl_files(state: &AppState) -> Vec<(String, std::path::Path
             }
         }
 
-        // Convert paths to Claude project directory names
-        let mut project_dirs: Vec<String> = Vec::new();
+        // Convert paths to Claude project directory names (two-tier: exact then parents)
+        let mut exact_dirs: Vec<String> = Vec::new();
+        let mut parent_dirs: Vec<String> = Vec::new();
         for path in &pane_paths {
+            let converted = path.replace('/', "-").replace('.', "-").replace('_', "-");
+            if !exact_dirs.contains(&converted) {
+                exact_dirs.push(converted);
+            }
             let mut current = path.as_str();
             loop {
-                let converted = current.replace('/', "-").replace('.', "-").replace('_', "-");
-                if !project_dirs.contains(&converted) {
-                    project_dirs.push(converted);
-                }
                 match current.rfind('/') {
-                    Some(pos) if pos > 0 => current = &current[..pos],
+                    Some(pos) if pos > 0 => {
+                        current = &current[..pos];
+                        let parent = current.replace('/', "-").replace('.', "-").replace('_', "-");
+                        if !exact_dirs.contains(&parent) && !parent_dirs.contains(&parent) {
+                            parent_dirs.push(parent);
+                        }
+                    }
                     _ => break,
                 }
             }
         }
 
-        // Find newest JSONL file in matching project directories
-        let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
-
-        if let Ok(entries) = std::fs::read_dir(&claude_projects) {
-            for entry in entries.flatten() {
-                let project_dir = entry.path();
-                if !project_dir.is_dir() { continue; }
-
-                let dir_name = project_dir.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                if !project_dirs.iter().any(|f| dir_name == *f) {
-                    continue;
-                }
-
-                if let Ok(files) = std::fs::read_dir(&project_dir) {
-                    for file in files.flatten() {
-                        let path = file.path();
-                        if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                            if let Ok(meta) = path.metadata() {
-                                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                                if best.as_ref().map_or(true, |(_, t)| mtime > *t) {
-                                    best = Some((path, mtime));
+        // Find newest JSONL file — try exact dirs first, fall back to parent dirs
+        let find_best = |dirs: &[String]| -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+            let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+            if let Ok(entries) = std::fs::read_dir(&claude_projects) {
+                for entry in entries.flatten() {
+                    let project_dir = entry.path();
+                    if !project_dir.is_dir() { continue; }
+                    let dir_name = project_dir.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !dirs.iter().any(|f| dir_name == *f) { continue; }
+                    if let Ok(files) = std::fs::read_dir(&project_dir) {
+                        for file in files.flatten() {
+                            let path = file.path();
+                            if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                                if let Ok(meta) = path.metadata() {
+                                    let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                                    if best.as_ref().map_or(true, |(_, t)| mtime > *t) {
+                                        best = Some((path, mtime));
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
+            best
+        };
 
+        let best = find_best(&exact_dirs).or_else(|| find_best(&parent_dirs));
         if let Some((path, _)) = best {
-            let key = format!("{}:{}", session, window);
             result.push((key, path));
         }
     }
@@ -5231,13 +5393,34 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Load configuration and initialize auth token
+    let mut config = config::AgentConfig::load().unwrap_or_default();
+    if config.auth.token.is_empty() {
+        // Generate a 64-char hex token (256-bit entropy) from two UUIDs
+        let token = format!(
+            "{}{}",
+            Uuid::new_v4().as_simple(),
+            Uuid::new_v4().as_simple()
+        );
+        config.auth.token = token;
+        if let Err(e) = config.save() {
+            error!("Failed to save config with generated auth token: {}", e);
+        } else {
+            info!("Generated new auth token and saved to config");
+        }
+    }
+    info!("Auth token: {}", config.auth.token);
+
+    let auth_token = config.auth.token.clone();
+    let allowed_origins = config.auth.allowed_origins.clone();
+
     // Initialize database
     let db_path = db::default_db_path();
     info!("Opening database at {:?}", db_path);
     let db = Database::open(&db_path)?;
 
     // Create application state
-    let app_state = Arc::new(AppState::new(db)?);
+    let app_state = Arc::new(AppState::new(db, auth_token, allowed_origins)?);
 
     // Start background task for tmux monitoring (real-time updates)
     let tmux_monitor_state = app_state.clone();
@@ -5373,10 +5556,31 @@ async fn main() -> Result<()> {
         .route("/api/stream/start", post(stream_start))
         .route("/api/stream/stop", post(stream_stop))
         .route("/api/stream/list", get(stream_list))
+        // Auth
+        .route("/api/auth/verify", get(verify_auth))
         // WebSocket
         .route("/ws", get(ws_handler))
-        // CORS
-        .layer(CorsLayer::permissive())
+        // Auth middleware (applied before CORS so preflight OPTIONS bypass auth)
+        .layer(middleware::from_fn_with_state(app_state.clone(), auth_middleware))
+        // CORS — configured based on allowed_origins
+        .layer({
+            let origins = app_state.allowed_origins.clone();
+            if origins.is_empty() {
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::mirror_request())
+                    .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                    .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+            } else {
+                let parsed: Vec<_> = origins
+                    .iter()
+                    .filter_map(|o| o.parse().ok())
+                    .collect();
+                CorsLayer::new()
+                    .allow_origin(parsed)
+                    .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                    .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+            }
+        })
         .with_state(app_state);
 
     // Static file serving for web frontend

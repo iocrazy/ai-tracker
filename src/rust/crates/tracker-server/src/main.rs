@@ -4466,7 +4466,37 @@ async fn generate_worktree_env_file(
         warn!("Failed to write .worktree.env at {:?}: {}", env_path, e);
     } else {
         info!("Generated .worktree.env at {:?}", env_path);
+        // Write MEMORY.md pointer (one-time, idempotent)
+        write_memory_md_pointer(worktree_path).await;
     }
+}
+
+/// Write a MEMORY.md pointer so AI agents read .worktree.env
+async fn write_memory_md_pointer(worktree_path: &str) {
+    let encoded = worktree_path.replace('/', "-");
+    let memory_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude").join("projects").join(&encoded).join("memory"),
+        None => return,
+    };
+
+    if let Err(e) = tokio::fs::create_dir_all(&memory_dir).await {
+        warn!("Failed to create memory dir: {}", e);
+        return;
+    }
+
+    let memory_file = memory_dir.join("MEMORY.md");
+    let pointer = "\n## Dev Environment\nWhen starting dev servers or configuring ports, read .worktree.env in the project root for isolated port assignments.\n";
+
+    if let Ok(existing) = tokio::fs::read_to_string(&memory_file).await {
+        if existing.contains(".worktree.env") {
+            return; // Already has pointer
+        }
+        let new_content = format!("{}\n{}", existing.trim(), pointer);
+        let _ = tokio::fs::write(&memory_file, new_content).await;
+    } else {
+        let _ = tokio::fs::write(&memory_file, pointer).await;
+    }
+    info!("Wrote MEMORY.md pointer at {:?}", memory_file);
 }
 
 /// Regenerate .worktree.env for all active slots in a session

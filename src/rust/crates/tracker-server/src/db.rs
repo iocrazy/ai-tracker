@@ -265,6 +265,52 @@ impl Database {
             [],
         )?;
 
+        // Project environment variables table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS project_env_vars (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name TEXT NOT NULL,
+                key          TEXT NOT NULL,
+                value        TEXT NOT NULL DEFAULT '',
+                is_secret    INTEGER NOT NULL DEFAULT 0,
+                sort_order   INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(session_name, key)
+            )",
+            [],
+        )?;
+
+        // Project services table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS project_services (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name TEXT NOT NULL,
+                service_name TEXT NOT NULL,
+                base_value   INTEGER NOT NULL,
+                value_type   TEXT NOT NULL DEFAULT 'port',
+                env_key      TEXT NOT NULL,
+                sort_order   INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(session_name, service_name)
+            )",
+            [],
+        )?;
+
+        // Worktree slots table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS worktree_slots (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name  TEXT NOT NULL,
+                slot          INTEGER NOT NULL,
+                branch        TEXT NOT NULL,
+                worktree_path TEXT,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(session_name, slot),
+                UNIQUE(session_name, branch)
+            )",
+            [],
+        )?;
+
         // Create indices
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_id)",
@@ -1251,6 +1297,343 @@ impl Database {
             Err(e) => Err(e.into()),
         }
     }
+
+    // =========================================================================
+    // Project env vars operations
+    // =========================================================================
+
+    /// List all env vars for a project session
+    pub fn list_project_env_vars(&self, session_name: &str) -> Result<Vec<ProjectEnvVar>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_name, key, value, is_secret, sort_order, created_at, updated_at
+             FROM project_env_vars
+             WHERE session_name = ?1
+             ORDER BY sort_order ASC, id ASC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![session_name], |row| {
+                Ok(ProjectEnvVar {
+                    id: row.get(0)?,
+                    session_name: row.get(1)?,
+                    key: row.get(2)?,
+                    value: row.get(3)?,
+                    is_secret: row.get(4)?,
+                    sort_order: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    /// Create a new env var for a project session
+    pub fn create_project_env_var(
+        &self,
+        session_name: &str,
+        key: &str,
+        value: &str,
+        is_secret: bool,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO project_env_vars (session_name, key, value, is_secret)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_name, key, value, is_secret as i32],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update an env var (returns session_name for sync)
+    pub fn update_project_env_var(
+        &self,
+        id: i64,
+        key: Option<&str>,
+        value: Option<&str>,
+        is_secret: Option<bool>,
+        sort_order: Option<i32>,
+    ) -> Result<String> {
+        let mut set_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(k) = key {
+            set_clauses.push("key = ?");
+            param_values.push(Box::new(k.to_string()));
+        }
+        if let Some(v) = value {
+            set_clauses.push("value = ?");
+            param_values.push(Box::new(v.to_string()));
+        }
+        if let Some(s) = is_secret {
+            set_clauses.push("is_secret = ?");
+            param_values.push(Box::new(s as i32));
+        }
+        if let Some(o) = sort_order {
+            set_clauses.push("sort_order = ?");
+            param_values.push(Box::new(o));
+        }
+
+        if set_clauses.is_empty() {
+            anyhow::bail!("No fields to update");
+        }
+
+        set_clauses.push("updated_at = datetime('now')");
+
+        // Re-number placeholders
+        let numbered: Vec<String> = set_clauses
+            .iter()
+            .enumerate()
+            .map(|(i, clause)| {
+                if clause.contains('?') {
+                    clause.replacen('?', &format!("?{}", i + 1), 1)
+                } else {
+                    clause.to_string()
+                }
+            })
+            .collect();
+
+        let id_param_idx = param_values.len() + 1;
+        let sql = format!(
+            "UPDATE project_env_vars SET {} WHERE id = ?{}",
+            numbered.join(", "),
+            id_param_idx
+        );
+        param_values.push(Box::new(id));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        self.conn.execute(&sql, params_refs.as_slice())?;
+
+        // Return session_name for sync
+        let session_name: String = self.conn.query_row(
+            "SELECT session_name FROM project_env_vars WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(session_name)
+    }
+
+    /// Delete an env var (returns session_name for sync)
+    pub fn delete_project_env_var(&self, id: i64) -> Result<String> {
+        let session_name: String = self.conn.query_row(
+            "SELECT session_name FROM project_env_vars WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "DELETE FROM project_env_vars WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(session_name)
+    }
+
+    // =========================================================================
+    // Project services operations
+    // =========================================================================
+
+    /// List all services for a project session
+    pub fn list_project_services(&self, session_name: &str) -> Result<Vec<ProjectService>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_name, service_name, base_value, value_type, env_key, sort_order
+             FROM project_services
+             WHERE session_name = ?1
+             ORDER BY sort_order ASC, id ASC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![session_name], |row| {
+                Ok(ProjectService {
+                    id: row.get(0)?,
+                    session_name: row.get(1)?,
+                    service_name: row.get(2)?,
+                    base_value: row.get(3)?,
+                    value_type: row.get(4)?,
+                    env_key: row.get(5)?,
+                    sort_order: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    /// Create a new service for a project session
+    pub fn create_project_service(
+        &self,
+        session_name: &str,
+        service_name: &str,
+        base_value: i32,
+        value_type: &str,
+        env_key: &str,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO project_services (session_name, service_name, base_value, value_type, env_key)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_name, service_name, base_value, value_type, env_key],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update a service (returns session_name for sync)
+    pub fn update_project_service(
+        &self,
+        id: i64,
+        service_name: Option<&str>,
+        base_value: Option<i32>,
+        value_type: Option<&str>,
+        env_key: Option<&str>,
+        sort_order: Option<i32>,
+    ) -> Result<String> {
+        let mut set_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(n) = service_name {
+            set_clauses.push("service_name = ?");
+            param_values.push(Box::new(n.to_string()));
+        }
+        if let Some(b) = base_value {
+            set_clauses.push("base_value = ?");
+            param_values.push(Box::new(b));
+        }
+        if let Some(t) = value_type {
+            set_clauses.push("value_type = ?");
+            param_values.push(Box::new(t.to_string()));
+        }
+        if let Some(k) = env_key {
+            set_clauses.push("env_key = ?");
+            param_values.push(Box::new(k.to_string()));
+        }
+        if let Some(o) = sort_order {
+            set_clauses.push("sort_order = ?");
+            param_values.push(Box::new(o));
+        }
+
+        if set_clauses.is_empty() {
+            anyhow::bail!("No fields to update");
+        }
+
+        let numbered: Vec<String> = set_clauses
+            .iter()
+            .enumerate()
+            .map(|(i, clause)| clause.replacen('?', &format!("?{}", i + 1), 1))
+            .collect();
+
+        let id_param_idx = param_values.len() + 1;
+        let sql = format!(
+            "UPDATE project_services SET {} WHERE id = ?{}",
+            numbered.join(", "),
+            id_param_idx
+        );
+        param_values.push(Box::new(id));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        self.conn.execute(&sql, params_refs.as_slice())?;
+
+        let session_name: String = self.conn.query_row(
+            "SELECT session_name FROM project_services WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(session_name)
+    }
+
+    /// Delete a service (returns session_name for sync)
+    pub fn delete_project_service(&self, id: i64) -> Result<String> {
+        let session_name: String = self.conn.query_row(
+            "SELECT session_name FROM project_services WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "DELETE FROM project_services WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(session_name)
+    }
+
+    // =========================================================================
+    // Worktree slots operations
+    // =========================================================================
+
+    /// List all worktree slots for a project session
+    pub fn list_worktree_slots(&self, session_name: &str) -> Result<Vec<WorktreeSlot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_name, slot, branch, worktree_path, created_at
+             FROM worktree_slots
+             WHERE session_name = ?1
+             ORDER BY slot ASC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![session_name], |row| {
+                Ok(WorktreeSlot {
+                    id: row.get(0)?,
+                    session_name: row.get(1)?,
+                    slot: row.get(2)?,
+                    branch: row.get(3)?,
+                    worktree_path: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    /// Find the first unused slot number (1..=15) for a session
+    pub fn next_available_slot(&self, session_name: &str) -> Result<i32> {
+        let mut stmt = self.conn.prepare(
+            "SELECT slot FROM worktree_slots WHERE session_name = ?1 ORDER BY slot ASC",
+        )?;
+
+        let used: Vec<i32> = stmt
+            .query_map(params![session_name], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for slot in 1..=15 {
+            if !used.contains(&slot) {
+                return Ok(slot);
+            }
+        }
+
+        anyhow::bail!("No available worktree slots (all 15 in use)")
+    }
+
+    /// Allocate a worktree slot
+    pub fn allocate_worktree_slot(
+        &self,
+        session_name: &str,
+        slot: i32,
+        branch: &str,
+        worktree_path: &str,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO worktree_slots (session_name, slot, branch, worktree_path)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_name, slot, branch, worktree_path],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Free a worktree slot by branch name
+    pub fn free_worktree_slot_by_branch(&self, session_name: &str, branch: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM worktree_slots WHERE session_name = ?1 AND branch = ?2",
+            params![session_name, branch],
+        )?;
+        Ok(())
+    }
+
+    /// Free a worktree slot by ID
+    pub fn free_worktree_slot_by_id(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM worktree_slots WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
 }
 
 /// Project registry info
@@ -1291,6 +1674,42 @@ pub struct SessionIndexEntry {
     pub duration_seconds: f64,
     pub file_size: i64,
     pub file_mtime: String,
+}
+
+/// Project environment variable
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProjectEnvVar {
+    pub id: i64,
+    pub session_name: String,
+    pub key: String,
+    pub value: String,
+    pub is_secret: i32,
+    pub sort_order: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Project service (port/resource mapping)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProjectService {
+    pub id: i64,
+    pub session_name: String,
+    pub service_name: String,
+    pub base_value: i32,
+    pub value_type: String,
+    pub env_key: String,
+    pub sort_order: i32,
+}
+
+/// Worktree slot allocation
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorktreeSlot {
+    pub id: i64,
+    pub session_name: String,
+    pub slot: i32,
+    pub branch: String,
+    pub worktree_path: Option<String>,
+    pub created_at: String,
 }
 
 /// Get default database path

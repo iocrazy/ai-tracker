@@ -3583,7 +3583,10 @@ async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json
 // ============================================================================
 
 /// Start a new workspace (enhanced with port management, layouts, browser)
-async fn start_workspace(Json(req): Json<StartWorkspaceRequest>) -> Json<StartWorkspaceResponse> {
+async fn start_workspace(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<StartWorkspaceRequest>,
+) -> Json<StartWorkspaceResponse> {
     use std::path::Path;
 
     let git_dir = Path::new(&req.git_dir);
@@ -3764,6 +3767,33 @@ async fn start_workspace(Json(req): Json<StartWorkspaceRequest>) -> Json<StartWo
             let base = req.port_base.unwrap_or(9100);
             allocated_port = Some(port::PortManager::allocate_port(base, window_index));
         }
+    }
+
+    // Auto-allocate worktree slot and generate .worktree.env
+    let slot_allocated = {
+        let server_state = state.state.lock().unwrap();
+        let services = server_state.db.list_project_services(&session_name).unwrap_or_default();
+        if !services.is_empty() {
+            if let Ok(slot) = server_state.db.next_available_slot(&session_name) {
+                let wt_path_str = worktree_path.to_string_lossy().to_string();
+                if server_state.db.allocate_worktree_slot(&session_name, slot, &req.branch, &wt_path_str).is_ok() {
+                    // Override port allocation with slot-based values
+                    for svc in &services {
+                        let val = svc.base_value + slot;
+                        match svc.env_key.as_str() {
+                            "FRONTEND_PORT" => { allocated_frontend_port = Some(val as u16); }
+                            "BACKEND_PORT" => { allocated_backend_port = Some(val as u16); }
+                            _ => {}
+                        }
+                    }
+                    Some((slot, wt_path_str))
+                } else { None }
+            } else { None }
+        } else { None }
+    }; // lock dropped here
+
+    if let Some((slot, wt_path_str)) = slot_allocated {
+        generate_worktree_env_file(&state, &session_name, slot, &req.branch, &wt_path_str).await;
     }
 
     // Store metadata in tmux window options
@@ -3971,7 +4001,10 @@ async fn resume_workspace(Json(req): Json<ResumeWorkspaceRequest>) -> Json<Start
 }
 
 /// Destroy a workspace (enhanced with port cleanup and branch deletion)
-async fn destroy_workspace(Json(req): Json<DestroyWorkspaceRequest>) -> Json<CommandResponse> {
+async fn destroy_workspace(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DestroyWorkspaceRequest>,
+) -> Json<CommandResponse> {
     use std::path::Path;
 
     let git_dir = Path::new(&req.git_dir);
@@ -3989,6 +4022,12 @@ async fn destroy_workspace(Json(req): Json<DestroyWorkspaceRequest>) -> Json<Com
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "default".to_string())
     });
+
+    // Free worktree slot
+    {
+        let server_state = state.state.lock().unwrap();
+        let _ = server_state.db.free_worktree_slot_by_branch(&session_name, &req.branch);
+    }
 
     let window_name = req.branch.replace('/', "-");
     let target = format!("{}:{}", session_name, window_name);

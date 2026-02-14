@@ -951,6 +951,105 @@ export async function fetchGitBranches(gitDir?: string): Promise<GitBranchesResp
   return response.json();
 }
 
+// ============================================================================
+// Project Environment & Worktree Isolation
+// ============================================================================
+
+export interface ProjectEnvVar {
+  id: number;
+  session_name: string;
+  key: string;
+  value: string;
+  is_secret: number;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectService {
+  id: number;
+  session_name: string;
+  service_name: string;
+  base_value: number;
+  value_type: string;
+  env_key: string;
+  sort_order: number;
+}
+
+export interface WorktreeSlot {
+  id: number;
+  session_name: string;
+  slot: number;
+  branch: string;
+  worktree_path: string | null;
+  created_at: string;
+}
+
+// Project Env Vars
+export async function fetchProjectEnvVars(sessionName: string): Promise<ProjectEnvVar[]> {
+  const res = await authFetch(`${API_BASE}/project/env-vars?session_name=${encodeURIComponent(sessionName)}`);
+  return res.ok ? res.json() : [];
+}
+
+export async function createProjectEnvVar(sessionName: string, key: string, value: string, isSecret = false) {
+  return authFetch(`${API_BASE}/project/env-vars`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_name: sessionName, key, value, is_secret: isSecret }),
+  }).then(r => r.json());
+}
+
+export async function updateProjectEnvVar(id: number, updates: { key?: string; value?: string; is_secret?: boolean; sort_order?: number }) {
+  return authFetch(`${API_BASE}/project/env-vars/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  }).then(r => r.json());
+}
+
+export async function deleteProjectEnvVar(id: number) {
+  return authFetch(`${API_BASE}/project/env-vars/${id}`, { method: 'DELETE' }).then(r => r.json());
+}
+
+// Project Services
+export async function fetchProjectServices(sessionName: string): Promise<ProjectService[]> {
+  const res = await authFetch(`${API_BASE}/project/services?session_name=${encodeURIComponent(sessionName)}`);
+  return res.ok ? res.json() : [];
+}
+
+export async function createProjectService(sessionName: string, serviceName: string, baseValue: number, valueType: string, envKey: string) {
+  return authFetch(`${API_BASE}/project/services`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_name: sessionName, service_name: serviceName, base_value: baseValue, value_type: valueType, env_key: envKey }),
+  }).then(r => r.json());
+}
+
+export async function updateProjectService(id: number, updates: { service_name?: string; base_value?: number; value_type?: string; env_key?: string; sort_order?: number }) {
+  return authFetch(`${API_BASE}/project/services/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  }).then(r => r.json());
+}
+
+export async function deleteProjectService(id: number) {
+  return authFetch(`${API_BASE}/project/services/${id}`, { method: 'DELETE' }).then(r => r.json());
+}
+
+// Worktree Slots
+export async function fetchWorktreeSlots(sessionName: string): Promise<WorktreeSlot[]> {
+  const res = await authFetch(`${API_BASE}/project/worktree-slots?session_name=${encodeURIComponent(sessionName)}`);
+  return res.ok ? res.json() : [];
+}
+
+export async function createWorktreeSlot(sessionName: string, branch: string, worktreePath?: string) {
+  return authFetch(`${API_BASE}/project/worktree-slots`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_name: sessionName, branch, worktree_path: worktreePath }),
+  }).then(r => r.json());
+}
+
+export async function deleteWorktreeSlot(id: number) {
+  return authFetch(`${API_BASE}/project/worktree-slots/${id}`, { method: 'DELETE' }).then(r => r.json());
+}
+
 // Helper: Format duration
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.floor(seconds)}s`;

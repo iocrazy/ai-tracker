@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { AgentSession, AgentWindow } from '../types';
-import { Plus, Terminal, Trash2, History, MessageSquare, XCircle, Pause, Check, Activity, PowerOff, ExternalLink } from 'lucide-react';
+import { Plus, Terminal, Trash2, History, MessageSquare, XCircle, Pause, Check, Activity, PowerOff, ExternalLink, Settings } from 'lucide-react';
+import { ProjectSettings } from './ProjectSettings';
 
 interface WorkstationsViewProps {
   sessions: AgentSession[];
@@ -74,6 +75,9 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
   // Track which card is expanded (for mobile tap to show options)
   const [expandedCard, setExpandedCard] = useState<string | null>(null);
 
+  // Project settings modal
+  const [settingsSession, setSettingsSession] = useState<string | null>(null);
+
   // Click timer for distinguishing single/double click
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -130,15 +134,25 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
                     </div>
                     <div className="h-px flex-grow bg-gradient-to-r from-green-900/50 to-transparent hidden sm:block"></div>
 
-                    {/* Terminate Session Button - on mobile, show at left to avoid avatar overlap */}
-                    <button
-                        onClick={() => onRequestDeleteSession(session.id, session.name)}
-                        className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1 border border-red-900/50 text-red-900 hover:bg-red-900/20 hover:text-red-500 hover:border-red-500 transition-all text-[10px] sm:text-xs font-bold tracking-widest uppercase opacity-60 group-hover/session:opacity-100 self-start sm:self-auto"
-                    >
-                        <XCircle className="w-3 sm:w-4 h-3 sm:h-4" />
-                        <span className="hidden sm:inline">TERMINATE_SESSION</span>
-                        <span className="sm:hidden">TERMINATE</span>
-                    </button>
+                    {/* Session Action Buttons */}
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setSettingsSession(session.name)}
+                            className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1 border border-green-900/50 text-green-800 hover:bg-green-900/20 hover:text-green-400 hover:border-green-500 transition-all text-[10px] sm:text-xs font-bold tracking-widest uppercase opacity-60 group-hover/session:opacity-100 self-start sm:self-auto"
+                        >
+                            <Settings className="w-3 sm:w-4 h-3 sm:h-4" />
+                            <span className="hidden sm:inline">PROJECT_SETTINGS</span>
+                            <span className="sm:hidden">CONFIG</span>
+                        </button>
+                        <button
+                            onClick={() => onRequestDeleteSession(session.id, session.name)}
+                            className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1 border border-red-900/50 text-red-900 hover:bg-red-900/20 hover:text-red-500 hover:border-red-500 transition-all text-[10px] sm:text-xs font-bold tracking-widest uppercase opacity-60 group-hover/session:opacity-100 self-start sm:self-auto"
+                        >
+                            <XCircle className="w-3 sm:w-4 h-3 sm:h-4" />
+                            <span className="hidden sm:inline">TERMINATE_SESSION</span>
+                            <span className="sm:hidden">TERMINATE</span>
+                        </button>
+                    </div>
                 </div>
 
                 {/* Windows Grid */}
@@ -320,6 +334,8 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
             </div>
           ))}
        </div>
+
+       {settingsSession && <ProjectSettings sessionName={settingsSession} onClose={() => setSettingsSession(null)} />}
     </div>
   );
 };

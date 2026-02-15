@@ -132,6 +132,11 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
       .reduce((sum, s) => sum + s.windows.length, 0);
   }, [sessions]);
 
+  // Derive physical worktrees for selected project from projects list
+  const physicalWorktrees = selectedProject
+    ? projects.filter(p => p.git_dir.startsWith(selectedProject.git_dir + '/.worktrees/'))
+    : [];
+
   // Filter projects by search
   // Filter out worktree paths (they belong to parent projects, not standalone)
   const topLevelProjects = projects.filter(p => !p.git_dir.includes('/.worktrees/'));
@@ -721,13 +726,8 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
             <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-[2] min-w-0">PATH</span>
             <span className="w-[40px]" />
           </div>
-          {worktreeSlots.length === 0 ? (
-            <div className="flex flex-col items-center py-8">
-              <GitBranch className="w-8 h-8 text-green-900 mb-2" />
-              <div className="text-green-600 text-sm font-mono mb-1">No worktree slots allocated</div>
-              <div className="text-green-800 text-xs font-mono">Worktrees are created when starting isolated workspaces.</div>
-            </div>
-          ) : worktreeSlots.map(s => (
+          {/* Registered worktree slots */}
+          {worktreeSlots.map(s => (
             <div key={s.id} className="flex items-center px-3 py-2 border-b border-green-900/30 hover:bg-green-900/5">
               <span className="text-green-400 font-mono text-sm font-bold w-[60px] shrink-0">{s.slot}</span>
               <span className="text-green-300 font-mono text-sm flex-1 min-w-0 truncate">{s.branch}</span>
@@ -742,6 +742,25 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
               </div>
             </div>
           ))}
+          {/* Physical worktrees detected from projects */}
+          {physicalWorktrees.map(wt => {
+            const branchName = wt.git_dir.split('/.worktrees/').pop() || wt.name;
+            return (
+              <div key={wt.git_dir} className="flex items-center px-3 py-2 border-b border-green-900/30 hover:bg-green-900/5">
+                <span className="text-green-700 font-mono text-sm w-[60px] shrink-0">--</span>
+                <span className="text-green-300 font-mono text-sm flex-1 min-w-0 truncate">{branchName}</span>
+                <span className="text-green-700 font-mono text-xs flex-[2] min-w-0 truncate">{wt.git_dir}</span>
+                <div className="w-[40px]" />
+              </div>
+            );
+          })}
+          {worktreeSlots.length === 0 && physicalWorktrees.length === 0 && (
+            <div className="flex flex-col items-center py-8">
+              <GitBranch className="w-8 h-8 text-green-900 mb-2" />
+              <div className="text-green-600 text-sm font-mono mb-1">No worktree slots allocated</div>
+              <div className="text-green-800 text-xs font-mono">Worktrees are created when starting isolated workspaces.</div>
+            </div>
+          )}
         </div>
       )}
     </div>

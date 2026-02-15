@@ -7,6 +7,7 @@ import {
 import { AppTab, AgentSession } from '../types';
 import {
   ProjectInfo, fetchProjects, deleteProject, createNewSession,
+  createProjectService, createProjectEnvVar as createProjEnvVarApi,
   // Global env vars
   GlobalEnvVar, fetchGlobalEnvVars, createGlobalEnvVar, updateGlobalEnvVar, deleteGlobalEnvVar,
   // Project env vars
@@ -21,6 +22,52 @@ import {
   GitInfoResponse, fetchGitInfo,
   ProjectStatistics, fetchProjectStatistics,
 } from '../services/api';
+
+// Project templates
+interface ProjectTemplate {
+  id: string;
+  name: string;
+  services: { name: string; baseValue: number; valueType: string; envKey: string }[];
+  envVars: { key: string; value: string }[];
+}
+
+const PROJECT_TEMPLATES: ProjectTemplate[] = [
+  {
+    id: 'nextjs',
+    name: 'Next.js',
+    services: [
+      { name: 'frontend', baseValue: 3000, valueType: 'port', envKey: 'PORT' },
+      { name: 'api', baseValue: 3001, valueType: 'port', envKey: 'API_PORT' },
+    ],
+    envVars: [
+      { key: 'NODE_ENV', value: 'development' },
+    ],
+  },
+  {
+    id: 'rust-react',
+    name: 'Rust + React (Vite)',
+    services: [
+      { name: 'frontend', baseValue: 5173, valueType: 'port', envKey: 'FRONTEND_PORT' },
+      { name: 'backend', baseValue: 8080, valueType: 'port', envKey: 'BACKEND_PORT' },
+    ],
+    envVars: [
+      { key: 'RUST_LOG', value: 'info' },
+    ],
+  },
+  {
+    id: 'fullstack-supabase',
+    name: 'Full Stack (Supabase)',
+    services: [
+      { name: 'frontend', baseValue: 5173, valueType: 'port', envKey: 'FRONTEND_PORT' },
+      { name: 'backend', baseValue: 8080, valueType: 'port', envKey: 'BACKEND_PORT' },
+      { name: 'supabase', baseValue: 54321, valueType: 'port', envKey: 'SUPABASE_PORT' },
+      { name: 'redis', baseValue: 6379, valueType: 'port', envKey: 'REDIS_PORT' },
+    ],
+    envVars: [
+      { key: 'SUPABASE_URL', value: 'http://127.0.0.1:54321' },
+    ],
+  },
+];
 
 interface ProjectsViewProps {
   sessions: AgentSession[];
@@ -46,6 +93,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const [showAddModal, setShowAddModal] = useState(false);
   const [addPath, setAddPath] = useState('');
   const [addName, setAddName] = useState('');
+  const [addTemplate, setAddTemplate] = useState('');
 
   // Session creation
   const [creatingSession, setCreatingSession] = useState<string | null>(null);
@@ -273,12 +321,26 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const handleAddProject = async () => {
     if (!addPath.trim()) return;
     const name = addName.trim() || addPath.split('/').filter(Boolean).pop() || 'project';
-    // Use the createNewSession to register
-    // Actually, just register via a lightweight approach — the session create also registers
-    // For now, use the session API to at least register the project
-    await createNewSession(name, addPath.trim());
+    const result = await createNewSession(name, addPath.trim());
+    const sessionName = result?.session_name || name;
+
+    // Apply template if selected
+    if (addTemplate) {
+      const template = PROJECT_TEMPLATES.find(t => t.id === addTemplate);
+      if (template) {
+        await Promise.all([
+          ...template.services.map(s =>
+            createProjectService(sessionName, s.name, s.baseValue, s.valueType, s.envKey)
+          ),
+          ...template.envVars.map(v =>
+            createProjEnvVarApi(sessionName, v.key, v.value)
+          ),
+        ]);
+      }
+    }
+
     setShowAddModal(false);
-    setAddPath(''); setAddName('');
+    setAddPath(''); setAddName(''); setAddTemplate('');
     await loadProjects();
   };
 
@@ -471,6 +533,31 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                     onKeyDown={e => e.key === 'Enter' && handleAddProject()}
                     className="w-full bg-black/60 border border-green-900 text-green-300 px-3 py-2 text-sm font-mono focus:border-green-500 outline-none placeholder:text-green-900"
                   />
+                </div>
+                <div>
+                  <label className="block text-green-700 text-[10px] tracking-widest uppercase mb-1">TEMPLATE (OPTIONAL)</label>
+                  <div className="relative">
+                    <select
+                      value={addTemplate}
+                      onChange={e => setAddTemplate(e.target.value)}
+                      className="w-full bg-black/60 border border-green-900 text-green-300 px-3 py-2 text-sm font-mono focus:border-green-500 outline-none appearance-none pr-8"
+                    >
+                      <option value="">No template</option>
+                      {PROJECT_TEMPLATES.map(t => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-green-700 pointer-events-none" />
+                  </div>
+                  {addTemplate && (() => {
+                    const tmpl = PROJECT_TEMPLATES.find(t => t.id === addTemplate);
+                    if (!tmpl) return null;
+                    return (
+                      <div className="mt-1.5 text-green-800 text-[10px] font-mono tracking-wider">
+                        {tmpl.services.length} service{tmpl.services.length !== 1 ? 's' : ''}, {tmpl.envVars.length} env var{tmpl.envVars.length !== 1 ? 's' : ''} will be added
+                      </div>
+                    );
+                  })()}
                 </div>
                 <button
                   onClick={handleAddProject}

@@ -13,10 +13,11 @@ import { AddWindowModal, WindowType } from './components/AddWindowModal';
 import { CloseWindowModal, CloseAction } from './components/CloseWindowModal';
 import { LoginView } from './components/LoginView';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { CommandPalette } from './components/CommandPalette';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2 } from 'lucide-react';
-import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken } from './services/api';
+import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 const App: React.FC = () => {
@@ -34,6 +35,10 @@ const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [streamOutput, setStreamOutput] = useState<StreamChunk[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Command Palette state
+  const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
+  const [allProjects, setAllProjects] = useState<ProjectInfo[]>([]);
 
   // Check existing token on mount
   useEffect(() => {
@@ -183,7 +188,9 @@ const App: React.FC = () => {
         setTimeline(mapHistoryToTimeline(state.history));
         setConsoleLogs(generateConsoleLogs(state));
         setIsConnected(true);
-      })
+      });
+    // Fetch projects for Command Palette
+    fetchProjects().then(p => setAllProjects(p))
       .catch(err => {
         console.error('Failed to fetch initial state:', err);
         setConsoleLogs(prev => [...prev, { id: `err-${Date.now()}`, type: 'system', text: `> ERROR: ${err.message}` }]);
@@ -558,6 +565,35 @@ const App: React.FC = () => {
       }
   };
 
+  // Global keyboard shortcuts: Cmd+K (palette), Cmd+1-5 (tabs)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setCmdPaletteOpen(prev => !prev);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key >= '1' && e.key <= '5') {
+        e.preventDefault();
+        const tabMap: AppTab[] = ['WORKSTATIONS', 'PROJECTS', 'TIMELINE', 'CONSOLE', 'SETTINGS'];
+        const idx = parseInt(e.key) - 1;
+        if (tabMap[idx]) setActiveTab(tabMap[idx]);
+        return;
+      }
+    };
+    document.addEventListener('keydown', handleGlobalKeyDown);
+    return () => document.removeEventListener('keydown', handleGlobalKeyDown);
+  }, []);
+
+  // Command Palette handlers
+  const handlePaletteOpenProject = useCallback((project: ProjectInfo) => {
+    setActiveTab('PROJECTS');
+  }, []);
+
+  const handlePaletteStartSession = useCallback(async (project: ProjectInfo) => {
+    await createNewSession(project.name, project.git_dir);
+  }, []);
+
   const renderContent = () => {
       switch (activeTab) {
           case 'WORKSTATIONS': 
@@ -682,6 +718,18 @@ const App: React.FC = () => {
                 </div>
             </nav>
             
+            {/* Command Palette */}
+            <CommandPalette
+              isOpen={cmdPaletteOpen}
+              onClose={() => setCmdPaletteOpen(false)}
+              projects={allProjects}
+              sessions={sessions}
+              activeTab={activeTab}
+              onSwitchTab={setActiveTab}
+              onOpenProject={handlePaletteOpenProject}
+              onStartSession={handlePaletteStartSession}
+            />
+
             {/* Chat Modal Layer */}
             <ChatHistoryModal
                 isOpen={isModalOpen}

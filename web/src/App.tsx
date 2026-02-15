@@ -12,32 +12,12 @@ import { ConfirmationModal } from './components/ConfirmationModal';
 import { AddWindowModal, WindowType } from './components/AddWindowModal';
 import { CloseWindowModal, CloseAction } from './components/CloseWindowModal';
 import { LoginView } from './components/LoginView';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2 } from 'lucide-react';
 import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
-
-// Helper to generate mock chat history
-const generateMockChat = (context: string): ChatMessage[] => {
-    const messages: ChatMessage[] = [];
-    const count = Math.floor(Math.random() * 5) + 3; // 3-8 messages
-    const topics = ["system resource allocation", "deployment sequence", "error log analysis", "network latency check", "security protocol handshake"];
-    const topic = topics[Math.floor(Math.random() * topics.length)];
-
-    messages.push({ sender: 'SYSTEM', text: `Connection established to ${context}. Topic: ${topic}`, timestamp: '00:00:01' });
-    
-    for(let i=0; i<count; i++) {
-        messages.push({
-            sender: i % 2 === 0 ? 'USER' : 'AGENT',
-            text: i % 2 === 0 
-                ? `Initiating ${topic} check on sector ${Math.floor(Math.random()*9)}.` 
-                : `Acknowledged. Sector ${Math.floor(Math.random()*9)} is reporting nominal status. Efficiency at ${Math.floor(Math.random()*20)+80}%.`,
-            timestamp: `00:0${i+1}:4${Math.floor(Math.random()*9)}`
-        });
-    }
-    return messages;
-};
 
 const App: React.FC = () => {
   // Auth State: null = checking, true = authenticated, false = needs login
@@ -671,7 +651,7 @@ const App: React.FC = () => {
 
             {/* Main Content Area - Add bottom padding for fixed nav on mobile */}
             <main className="flex-1 overflow-y-auto min-h-0 animate-[fadeIn_0.3s_ease-out] pb-24 xl:pb-10 px-2 md:px-4">
-                {renderContent()}
+                <ErrorBoundary>{renderContent()}</ErrorBoundary>
             </main>
 
             {/* Mobile/Tablet Bottom Navigation - Fixed at bottom, shown below 1280px */}

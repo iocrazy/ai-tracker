@@ -137,9 +137,16 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
     ? projects.filter(p => p.git_dir.startsWith(selectedProject.git_dir + '/.worktrees/'))
     : [];
 
+  // Get worktree count for any project
+  const getWorktreeCount = useCallback((project: ProjectInfo) => {
+    return projects.filter(p => p.git_dir.startsWith(project.git_dir + '/.worktrees/')).length;
+  }, [projects]);
+
   // Filter projects by search
-  // Filter out worktree paths (they belong to parent projects, not standalone)
-  const topLevelProjects = projects.filter(p => !p.git_dir.includes('/.worktrees/'));
+  // Filter out worktree paths and invalid entries (like "..")
+  const topLevelProjects = projects.filter(p =>
+    !p.git_dir.includes('/.worktrees/') && p.git_dir.startsWith('/')
+  );
   const filteredProjects = topLevelProjects
     .filter(p => {
       if (!searchQuery) return true;
@@ -341,6 +348,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
               const active = isProjectActive(project);
               const sessionCount = getProjectSessionCount(project);
               const windowCount = getProjectWindowCount(project);
+              const wtCount = getWorktreeCount(project);
               return (
                 <div
                   key={project.git_dir}
@@ -365,6 +373,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                         {sessionCount > 0 && <span>{sessionCount} session{sessionCount > 1 ? 's' : ''}</span>}
                         {windowCount > 0 && <span>{windowCount} window{windowCount > 1 ? 's' : ''}</span>}
                         {project.history_count > 0 && <span>{project.history_count} tasks</span>}
+                        {wtCount > 0 && <span>{wtCount} worktree{wtCount > 1 ? 's' : ''}</span>}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
@@ -517,7 +526,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
         <div className="flex">
           {([
             { id: 'env-vars' as DetailTab, label: 'ENV VARS', icon: Key },
-            { id: 'worktrees' as DetailTab, label: 'WORKTREES', icon: GitBranch },
+            { id: 'worktrees' as DetailTab, label: `WORKTREES${physicalWorktrees.length + worktreeSlots.length > 0 ? ` (${physicalWorktrees.length + worktreeSlots.length})` : ''}`, icon: GitBranch },
           ]).map(tab => (
             <button
               key={tab.id}
@@ -719,20 +728,16 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
 
       {/* WORKTREES Tab */}
       {detailTab === 'worktrees' && (
-        <div className="border border-green-900/50">
-          <div className="flex items-center px-3 py-2 border-b border-green-900/50 bg-green-900/10">
-            <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold w-[60px] shrink-0">SLOT</span>
-            <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-1 min-w-0">BRANCH</span>
-            <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-[2] min-w-0">PATH</span>
-            <span className="w-[40px]" />
-          </div>
+        <div className="space-y-2">
           {/* Registered worktree slots */}
           {worktreeSlots.map(s => (
-            <div key={s.id} className="flex items-center px-3 py-2 border-b border-green-900/30 hover:bg-green-900/5">
-              <span className="text-green-400 font-mono text-sm font-bold w-[60px] shrink-0">{s.slot}</span>
-              <span className="text-green-300 font-mono text-sm flex-1 min-w-0 truncate">{s.branch}</span>
-              <span className="text-green-700 font-mono text-xs flex-[2] min-w-0 truncate">{s.worktree_path || '--'}</span>
-              <div className="w-[40px] flex items-center justify-end">
+            <div key={s.id} className="retro-border bg-black/40 hover:bg-green-900/10 transition-all px-4 py-3">
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2">
+                  <GitBranch className="w-3.5 h-3.5 text-green-600" />
+                  <span className="text-green-300 font-mono text-sm font-bold">{s.branch}</span>
+                  <span className="text-[9px] tracking-widest uppercase px-1.5 py-0.5 border text-blue-500 border-blue-800 bg-blue-900/20">SLOT {s.slot}</span>
+                </div>
                 <button
                   onClick={() => { deleteWorktreeSlot(s.id).then(() => loadWorktreeSlots()); }}
                   className="text-red-900 hover:text-red-500" title="Delete slot"
@@ -740,24 +745,33 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
+              <div className="text-green-700 font-mono text-xs truncate">{s.worktree_path || '--'}</div>
             </div>
           ))}
           {/* Physical worktrees detected from projects */}
           {physicalWorktrees.map(wt => {
             const branchName = wt.git_dir.split('/.worktrees/').pop() || wt.name;
+            const relativePath = '.worktrees/' + branchName;
             return (
-              <div key={wt.git_dir} className="flex items-center px-3 py-2 border-b border-green-900/30 hover:bg-green-900/5">
-                <span className="text-green-700 font-mono text-sm w-[60px] shrink-0">--</span>
-                <span className="text-green-300 font-mono text-sm flex-1 min-w-0 truncate">{branchName}</span>
-                <span className="text-green-700 font-mono text-xs flex-[2] min-w-0 truncate">{wt.git_dir}</span>
-                <div className="w-[40px]" />
+              <div key={wt.git_dir} className="retro-border bg-black/40 hover:bg-green-900/10 transition-all px-4 py-3">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <GitBranch className="w-3.5 h-3.5 text-green-600" />
+                    <span className="text-green-300 font-mono text-sm font-bold">{branchName}</span>
+                  </div>
+                </div>
+                <div className="text-green-700 font-mono text-xs truncate mb-1.5">{relativePath}</div>
+                <div className="flex items-center gap-3 text-green-800 text-[10px] font-mono tracking-wider">
+                  <span>Last active: {timeAgo(wt.last_active_at)}</span>
+                  {wt.history_count > 0 && <span>{wt.history_count} tasks</span>}
+                </div>
               </div>
             );
           })}
           {worktreeSlots.length === 0 && physicalWorktrees.length === 0 && (
-            <div className="flex flex-col items-center py-8">
+            <div className="flex flex-col items-center py-8 retro-border bg-black/40">
               <GitBranch className="w-8 h-8 text-green-900 mb-2" />
-              <div className="text-green-600 text-sm font-mono mb-1">No worktree slots allocated</div>
+              <div className="text-green-600 text-sm font-mono mb-1">No worktrees found</div>
               <div className="text-green-800 text-xs font-mono">Worktrees are created when starting isolated workspaces.</div>
             </div>
           )}

@@ -17,7 +17,7 @@ use crate::project_db;
 
 /// Database wrapper with SQLite change tracking
 pub struct Database {
-    conn: Connection,
+    pub(crate) conn: Connection,
     /// Tables that changed since last broadcast (populated by SQLite update_hook)
     pub changed_tables: Arc<Mutex<HashSet<String>>>,
 }
@@ -363,6 +363,10 @@ impl Database {
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(session_name, slot, key)
             )"),
+            (3, "ALTER TABLE projects ADD COLUMN description TEXT DEFAULT ''"),
+            (4, "ALTER TABLE projects ADD COLUMN status TEXT DEFAULT 'active'"),
+            (5, "ALTER TABLE projects ADD COLUMN tags TEXT DEFAULT ''"),
+            (6, "ALTER TABLE projects ADD COLUMN created_at TEXT DEFAULT ''"),
         ];
 
         for (version, sql) in migrations {
@@ -1294,7 +1298,9 @@ impl Database {
     pub fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT git_dir, name, last_session, last_window, last_active_at,
-                    notes_count, goals_count, history_count
+                    notes_count, goals_count, history_count,
+                    COALESCE(description, ''), COALESCE(status, 'active'),
+                    COALESCE(tags, ''), COALESCE(created_at, '')
              FROM projects
              ORDER BY last_active_at DESC",
         )?;
@@ -1310,6 +1316,10 @@ impl Database {
                     notes_count: row.get(5)?,
                     goals_count: row.get(6)?,
                     history_count: row.get(7)?,
+                    description: row.get(8)?,
+                    status: row.get(9)?,
+                    tags: row.get(10)?,
+                    created_at: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1321,7 +1331,9 @@ impl Database {
     pub fn get_project(&self, git_dir: &str) -> Result<Option<ProjectInfo>> {
         let result = self.conn.query_row(
             "SELECT git_dir, name, last_session, last_window, last_active_at,
-                    notes_count, goals_count, history_count
+                    notes_count, goals_count, history_count,
+                    COALESCE(description, ''), COALESCE(status, 'active'),
+                    COALESCE(tags, ''), COALESCE(created_at, '')
              FROM projects WHERE git_dir = ?1",
             params![git_dir],
             |row| {
@@ -1334,6 +1346,10 @@ impl Database {
                     notes_count: row.get(5)?,
                     goals_count: row.get(6)?,
                     history_count: row.get(7)?,
+                    description: row.get(8)?,
+                    status: row.get(9)?,
+                    tags: row.get(10)?,
+                    created_at: row.get(11)?,
                 })
             },
         );
@@ -1343,6 +1359,20 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Update project metadata (description, status, tags)
+    pub fn update_project(&self, git_dir: &str, description: Option<&str>, status: Option<&str>, tags: Option<&str>) -> Result<()> {
+        let mut sets = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+        if let Some(v) = description { sets.push(format!("description = ?{}", params_vec.len() + 1)); params_vec.push(Box::new(v.to_string())); }
+        if let Some(v) = status { sets.push(format!("status = ?{}", params_vec.len() + 1)); params_vec.push(Box::new(v.to_string())); }
+        if let Some(v) = tags { sets.push(format!("tags = ?{}", params_vec.len() + 1)); params_vec.push(Box::new(v.to_string())); }
+        if sets.is_empty() { return Ok(()); }
+        params_vec.push(Box::new(git_dir.to_string()));
+        let sql = format!("UPDATE projects SET {} WHERE git_dir = ?{}", sets.join(", "), params_vec.len());
+        self.conn.execute(&sql, rusqlite::params_from_iter(params_vec.iter().map(|p| p.as_ref())))?;
+        Ok(())
     }
 
     // =========================================================================
@@ -1967,6 +1997,10 @@ pub struct ProjectInfo {
     pub notes_count: i32,
     pub goals_count: i32,
     pub history_count: i32,
+    pub description: String,
+    pub status: String,
+    pub tags: String,
+    pub created_at: String,
 }
 
 /// Closed window record

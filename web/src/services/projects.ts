@@ -13,6 +13,10 @@ export interface ProjectInfo {
   notes_count: number;
   goals_count: number;
   history_count: number;
+  description: string;
+  status: string;
+  tags: string;
+  created_at: string;
 }
 
 // Fetch registered projects
@@ -227,4 +231,89 @@ export async function createNewSession(projectName: string, gitDir: string, sess
 // Delete project
 export async function deleteProject(gitDir: string) {
   return authFetch(`${API_BASE}/projects/${encodeURIComponent(gitDir)}`, { method: 'DELETE' }).then(r => r.json());
+}
+
+// Update project metadata
+export async function updateProject(gitDir: string, updates: { description?: string; status?: string; tags?: string }) {
+  return authFetch(`${API_BASE}/projects/${encodeURIComponent(gitDir)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  }).then(r => r.json());
+}
+
+// Git info
+export interface GitBranchInfo {
+  name: string;
+  is_current: boolean;
+  last_commit: string;
+  message: string;
+  ahead: number;
+  behind: number;
+}
+
+export interface GitStatus {
+  modified: number;
+  untracked: number;
+  staged: number;
+  conflicts: number;
+  is_clean: boolean;
+}
+
+export interface GitInfoResponse {
+  current_branch: string;
+  branches: GitBranchInfo[];
+  status: GitStatus;
+}
+
+export async function fetchGitInfo(gitDir: string): Promise<GitInfoResponse | null> {
+  const res = await authFetch(`${API_BASE}/projects/git-info?git_dir=${encodeURIComponent(gitDir)}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (data.error) return null;
+  return data;
+}
+
+// Project statistics
+export interface TaskStats {
+  completed: number;
+  in_progress: number;
+  failed: number;
+  total: number;
+  completion_rate: number;
+}
+
+export interface AgentTimeStats {
+  total_seconds: number;
+  busy_seconds: number;
+  idle_seconds: number;
+}
+
+export interface ToolUsage {
+  tool: string;
+  count: number;
+}
+
+export interface HourlyActivity {
+  hour: string;
+  count: number;
+}
+
+export interface ProjectStatistics {
+  tasks: TaskStats;
+  agent_time: AgentTimeStats;
+  top_tools: ToolUsage[];
+  activity: HourlyActivity[];
+}
+
+export async function fetchProjectStatistics(sessionName: string, range = '24h'): Promise<ProjectStatistics> {
+  const res = await authFetch(`${API_BASE}/projects/statistics?session_name=${encodeURIComponent(sessionName)}&range=${range}`);
+  if (!res.ok) {
+    return {
+      tasks: { completed: 0, in_progress: 0, failed: 0, total: 0, completion_rate: 0 },
+      agent_time: { total_seconds: 0, busy_seconds: 0, idle_seconds: 0 },
+      top_tools: [],
+      activity: [],
+    };
+  }
+  return res.json();
 }

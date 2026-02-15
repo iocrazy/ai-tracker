@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FolderGit2, ArrowLeft, Search, Plus, Trash2, Eye, EyeOff, Save, Edit3,
   Key, GitBranch, Play, ExternalLink, X, Loader, Globe, Layers, ChevronDown,
+  BarChart3, Activity, Clock, Wrench,
 } from 'lucide-react';
 import { AppTab, AgentSession } from '../types';
 import {
@@ -16,6 +17,9 @@ import {
   EffectiveEnvVar, fetchEffectiveEnvVars,
   // Worktree slots
   WorktreeSlot, fetchWorktreeSlots, deleteWorktreeSlot,
+  // Git info + Statistics
+  GitInfoResponse, fetchGitInfo,
+  ProjectStatistics, fetchProjectStatistics,
 } from '../services/api';
 
 interface ProjectsViewProps {
@@ -24,7 +28,7 @@ interface ProjectsViewProps {
 }
 
 type EnvScope = 'effective' | 'global' | 'project' | 'worktree';
-type DetailTab = 'env-vars' | 'worktrees';
+type DetailTab = 'overview' | 'env-vars' | 'worktrees' | 'statistics';
 
 export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTab }) => {
   // Project list state
@@ -35,7 +39,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
 
   // Detail view state
   const [selectedProject, setSelectedProject] = useState<ProjectInfo | null>(null);
-  const [detailTab, setDetailTab] = useState<DetailTab>('env-vars');
+  const [detailTab, setDetailTab] = useState<DetailTab>('overview');
   const [envScope, setEnvScope] = useState<EnvScope>('effective');
 
   // Add project modal
@@ -68,6 +72,13 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const [editVarSecret, setEditVarSecret] = useState(false);
   const [revealedSecrets, setRevealedSecrets] = useState<Set<number>>(new Set());
   const [flashVarId, setFlashVarId] = useState<number | null>(null);
+
+  // Git info + Statistics state
+  const [gitInfo, setGitInfo] = useState<GitInfoResponse | null>(null);
+  const [gitLoading, setGitLoading] = useState(false);
+  const [statistics, setStatistics] = useState<ProjectStatistics | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsRange, setStatsRange] = useState('24h');
 
   // Fetch projects
   const loadProjects = useCallback(async () => {
@@ -116,6 +127,29 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   useEffect(() => {
     if (selectedProject) loadWorktreeSlots();
   }, [selectedProject, loadWorktreeSlots]);
+
+  // Load git info when overview tab is selected
+  useEffect(() => {
+    if (selectedProject && detailTab === 'overview') {
+      setGitLoading(true);
+      fetchGitInfo(selectedProject.git_dir).then(info => {
+        setGitInfo(info);
+        setGitLoading(false);
+      });
+    }
+  }, [selectedProject, detailTab]);
+
+  // Load statistics when statistics tab is selected
+  useEffect(() => {
+    if (selectedProject && detailTab === 'statistics') {
+      setStatsLoading(true);
+      const sessionName = getSessionName(selectedProject);
+      fetchProjectStatistics(sessionName, statsRange).then(stats => {
+        setStatistics(stats);
+        setStatsLoading(false);
+      });
+    }
+  }, [selectedProject, detailTab, statsRange, getSessionName]);
 
   // Check if a project has active sessions
   const isProjectActive = useCallback((project: ProjectInfo) => {
@@ -525,8 +559,10 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
       <div className="border-b border-green-900">
         <div className="flex">
           {([
+            { id: 'overview' as DetailTab, label: 'OVERVIEW', icon: Activity },
             { id: 'env-vars' as DetailTab, label: 'ENV VARS', icon: Key },
             { id: 'worktrees' as DetailTab, label: `WORKTREES${physicalWorktrees.length + worktreeSlots.length > 0 ? ` (${physicalWorktrees.length + worktreeSlots.length})` : ''}`, icon: GitBranch },
+            { id: 'statistics' as DetailTab, label: 'STATISTICS', icon: BarChart3 },
           ]).map(tab => (
             <button
               key={tab.id}
@@ -542,6 +578,79 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
           ))}
         </div>
       </div>
+
+      {/* OVERVIEW Tab */}
+      {detailTab === 'overview' && (
+        <div className="space-y-4">
+          {gitLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader className="w-5 h-5 text-green-700 animate-spin mr-2" />
+              <span className="text-green-700 text-sm font-mono tracking-widest">LOADING GIT INFO...</span>
+            </div>
+          ) : gitInfo ? (
+            <>
+              {/* Current Branch + Status */}
+              <div className="retro-border bg-black/40 px-4 py-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <GitBranch className="w-4 h-4 text-green-500" />
+                  <span className="text-green-400 font-bold font-mono text-sm">{gitInfo.current_branch}</span>
+                  <span className="text-green-800 text-[10px] tracking-widest uppercase">CURRENT BRANCH</span>
+                </div>
+                <div className="flex items-center gap-4 text-[10px] font-mono tracking-wider">
+                  {gitInfo.status.is_clean ? (
+                    <span className="text-green-600">CLEAN</span>
+                  ) : (
+                    <>
+                      {gitInfo.status.modified > 0 && <span className="text-yellow-600">{gitInfo.status.modified} modified</span>}
+                      {gitInfo.status.staged > 0 && <span className="text-green-500">{gitInfo.status.staged} staged</span>}
+                      {gitInfo.status.untracked > 0 && <span className="text-green-700">{gitInfo.status.untracked} untracked</span>}
+                      {gitInfo.status.conflicts > 0 && <span className="text-red-500">{gitInfo.status.conflicts} conflicts</span>}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Branches */}
+              {gitInfo.branches.length > 0 && (
+                <div className="border border-green-900/50">
+                  <div className="flex items-center px-3 py-2 border-b border-green-900/50 bg-green-900/10">
+                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-1">BRANCH</span>
+                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold w-[100px] text-center">AHEAD/BEHIND</span>
+                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-[2] text-right">LAST COMMIT</span>
+                  </div>
+                  {gitInfo.branches.map(b => (
+                    <div key={b.name} className={`flex items-center px-3 py-2 border-b border-green-900/30 hover:bg-green-900/5 ${b.is_current ? 'bg-green-900/10' : ''}`}>
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <GitBranch className={`w-3 h-3 shrink-0 ${b.is_current ? 'text-green-400' : 'text-green-800'}`} />
+                        <span className={`font-mono text-sm truncate ${b.is_current ? 'text-green-300 font-bold' : 'text-green-600'}`}>{b.name}</span>
+                      </div>
+                      <div className="w-[100px] text-center flex items-center justify-center gap-1.5">
+                        {(b.ahead > 0 || b.behind > 0) ? (
+                          <>
+                            {b.ahead > 0 && <span className="text-green-500 text-[10px] font-mono">+{b.ahead}</span>}
+                            {b.behind > 0 && <span className="text-red-600 text-[10px] font-mono">-{b.behind}</span>}
+                          </>
+                        ) : (
+                          <span className="text-green-800 text-[10px] font-mono">--</span>
+                        )}
+                      </div>
+                      <div className="flex-[2] text-right">
+                        <span className="text-green-700 font-mono text-xs truncate">{b.message}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="flex flex-col items-center py-8 retro-border bg-black/40">
+              <GitBranch className="w-8 h-8 text-green-900 mb-2" />
+              <div className="text-green-600 text-sm font-mono mb-1">Git info unavailable</div>
+              <div className="text-green-800 text-xs font-mono">Could not read git repository information.</div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ENV VARS Tab */}
       {detailTab === 'env-vars' && (
@@ -773,6 +882,170 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
               <GitBranch className="w-8 h-8 text-green-900 mb-2" />
               <div className="text-green-600 text-sm font-mono mb-1">No worktrees found</div>
               <div className="text-green-800 text-xs font-mono">Worktrees are created when starting isolated workspaces.</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* STATISTICS Tab */}
+      {detailTab === 'statistics' && (
+        <div className="space-y-4">
+          {/* Time range selector */}
+          <div className="flex items-center gap-1">
+            {['24h', '7d', '30d', 'all'].map(r => (
+              <button
+                key={r}
+                onClick={() => setStatsRange(r)}
+                className={`px-3 py-1.5 text-[10px] font-bold tracking-widest uppercase transition-all border
+                  ${statsRange === r
+                    ? 'text-green-300 border-green-500 bg-green-900/30'
+                    : 'text-green-700 border-green-900 hover:border-green-700 hover:text-green-500'}`}
+              >
+                {r.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          {statsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader className="w-5 h-5 text-green-700 animate-spin mr-2" />
+              <span className="text-green-700 text-sm font-mono tracking-widest">LOADING STATISTICS...</span>
+            </div>
+          ) : statistics ? (
+            <>
+              {/* Stats Cards */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {/* Tasks */}
+                <div className="retro-border bg-black/40 px-4 py-3">
+                  <div className="text-green-700 text-[10px] tracking-widest uppercase font-bold mb-2">TASKS</div>
+                  <div className="text-green-300 font-mono text-2xl font-bold">{statistics.tasks.total}</div>
+                  <div className="flex items-center gap-2 mt-1 text-[10px] font-mono tracking-wider flex-wrap">
+                    <span className="text-green-500">{statistics.tasks.completed} done</span>
+                    {statistics.tasks.in_progress > 0 && <span className="text-yellow-600">{statistics.tasks.in_progress} active</span>}
+                    {statistics.tasks.failed > 0 && <span className="text-red-500">{statistics.tasks.failed} failed</span>}
+                  </div>
+                  {statistics.tasks.total > 0 && (
+                    <div className="mt-2 h-1.5 bg-green-900/30 overflow-hidden">
+                      <div
+                        className="h-full bg-green-500 transition-all"
+                        style={{ width: `${statistics.tasks.completion_rate}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Agent Time */}
+                <div className="retro-border bg-black/40 px-4 py-3">
+                  <div className="text-green-700 text-[10px] tracking-widest uppercase font-bold mb-2">AGENT TIME</div>
+                  <div className="text-green-300 font-mono text-2xl font-bold">
+                    {statistics.agent_time.total_seconds >= 3600
+                      ? `${(statistics.agent_time.total_seconds / 3600).toFixed(1)}h`
+                      : `${Math.floor(statistics.agent_time.total_seconds / 60)}m`}
+                  </div>
+                  <div className="flex items-center gap-2 mt-1 text-[10px] font-mono tracking-wider flex-wrap">
+                    <span className="text-green-500">
+                      {statistics.agent_time.busy_seconds >= 3600
+                        ? `${(statistics.agent_time.busy_seconds / 3600).toFixed(1)}h`
+                        : `${Math.floor(statistics.agent_time.busy_seconds / 60)}m`} busy
+                    </span>
+                    <span className="text-green-700">
+                      {statistics.agent_time.idle_seconds >= 3600
+                        ? `${(statistics.agent_time.idle_seconds / 3600).toFixed(1)}h`
+                        : `${Math.floor(statistics.agent_time.idle_seconds / 60)}m`} idle
+                    </span>
+                  </div>
+                </div>
+
+                {/* Completion Rate */}
+                <div className="retro-border bg-black/40 px-4 py-3">
+                  <div className="text-green-700 text-[10px] tracking-widest uppercase font-bold mb-2">COMPLETION</div>
+                  <div className="text-green-300 font-mono text-2xl font-bold">{statistics.tasks.completion_rate.toFixed(0)}%</div>
+                  <div className="text-green-700 text-[10px] font-mono tracking-wider mt-1">
+                    {statistics.tasks.completed} of {statistics.tasks.total} tasks
+                  </div>
+                </div>
+
+                {/* Activity */}
+                <div className="retro-border bg-black/40 px-4 py-3">
+                  <div className="text-green-700 text-[10px] tracking-widest uppercase font-bold mb-2">ACTIVITY</div>
+                  <div className="text-green-300 font-mono text-2xl font-bold">
+                    {statistics.activity.reduce((sum, a) => sum + a.count, 0)}
+                  </div>
+                  <div className="text-green-700 text-[10px] font-mono tracking-wider mt-1">
+                    events in {statsRange}
+                  </div>
+                </div>
+              </div>
+
+              {/* Top Tools */}
+              {statistics.top_tools.length > 0 && (
+                <div className="retro-border bg-black/40 px-4 py-3">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Wrench className="w-4 h-4 text-green-600" />
+                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold">TOP TOOLS</span>
+                  </div>
+                  <div className="space-y-2">
+                    {statistics.top_tools.map(t => {
+                      const maxCount = statistics.top_tools[0]?.count || 1;
+                      return (
+                        <div key={t.tool} className="flex items-center gap-3">
+                          <span className="text-green-600 font-mono text-xs w-[140px] truncate">{t.tool}</span>
+                          <div className="flex-1 h-3 bg-green-900/20 overflow-hidden">
+                            <div
+                              className="h-full bg-green-700/60 transition-all"
+                              style={{ width: `${(t.count / maxCount) * 100}%` }}
+                            />
+                          </div>
+                          <span className="text-green-500 font-mono text-xs w-[40px] text-right">{t.count}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Hourly Activity */}
+              {statistics.activity.length > 0 && (
+                <div className="retro-border bg-black/40 px-4 py-3">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Activity className="w-4 h-4 text-green-600" />
+                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold">ACTIVITY TIMELINE</span>
+                  </div>
+                  <div className="flex items-end gap-[2px] h-[80px]">
+                    {statistics.activity.map((a, i) => {
+                      const maxCount = Math.max(...statistics.activity.map(x => x.count), 1);
+                      const height = maxCount > 0 ? (a.count / maxCount) * 100 : 0;
+                      return (
+                        <div key={i} className="flex-1 flex flex-col items-center justify-end h-full" title={`${a.hour}: ${a.count} events`}>
+                          <div
+                            className="w-full bg-green-700/50 hover:bg-green-500/60 transition-all min-h-[1px]"
+                            style={{ height: `${Math.max(height, 2)}%` }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex justify-between mt-1">
+                    <span className="text-green-900 text-[8px] font-mono">{statistics.activity[0]?.hour}</span>
+                    <span className="text-green-900 text-[8px] font-mono">{statistics.activity[statistics.activity.length - 1]?.hour}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Empty state */}
+              {statistics.tasks.total === 0 && statistics.activity.length === 0 && (
+                <div className="flex flex-col items-center py-8 retro-border bg-black/40">
+                  <BarChart3 className="w-8 h-8 text-green-900 mb-2" />
+                  <div className="text-green-600 text-sm font-mono mb-1">No statistics available</div>
+                  <div className="text-green-800 text-xs font-mono">Run some tasks to see statistics here.</div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="flex flex-col items-center py-8 retro-border bg-black/40">
+              <BarChart3 className="w-8 h-8 text-green-900 mb-2" />
+              <div className="text-green-600 text-sm font-mono mb-1">Statistics unavailable</div>
+              <div className="text-green-800 text-xs font-mono">Could not load project statistics.</div>
             </div>
           )}
         </div>

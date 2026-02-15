@@ -1834,7 +1834,9 @@ async fn main() -> Result<()> {
         .route("/api/project/effective-env-vars", get(routes_projects::get_effective_env_vars))
         // Session creation + project delete
         .route("/api/sessions/create", post(routes_projects::create_session))
-        .route("/api/projects/:git_dir", delete(routes_projects::delete_project))
+        .route("/api/projects/:git_dir", delete(routes_projects::delete_project).put(routes_projects::update_project))
+        .route("/api/projects/git-info", get(routes_projects::get_git_info))
+        .route("/api/projects/statistics", get(routes_projects::get_project_statistics))
         // Project environment & worktree isolation
         .route("/api/project/env-vars", get(routes_projects::list_project_env_vars).post(routes_projects::create_project_env_var))
         .route("/api/project/env-vars/:id", put(routes_projects::update_project_env_var).delete(routes_projects::delete_project_env_var))

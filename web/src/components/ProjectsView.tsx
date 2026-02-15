@@ -133,11 +133,14 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   }, [sessions]);
 
   // Filter projects by search
-  const filteredProjects = projects.filter(p => {
-    if (!searchQuery) return true;
-    const q = searchQuery.toLowerCase();
-    return p.name.toLowerCase().includes(q) || p.git_dir.toLowerCase().includes(q);
-  });
+  // Filter out worktree paths (they belong to parent projects, not standalone)
+  const topLevelProjects = projects.filter(p => !p.git_dir.includes('/.worktrees/'));
+  const filteredProjects = topLevelProjects
+    .filter(p => {
+      if (!searchQuery) return true;
+      const q = searchQuery.toLowerCase();
+      return p.name.toLowerCase().includes(q) || p.git_dir.toLowerCase().includes(q);
+    });
 
   // Flash helper
   const flashVar = (id: number) => {
@@ -288,7 +291,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
             <FolderGit2 className="w-5 h-5 text-green-500" />
             <span className="text-green-400 font-bold tracking-widest uppercase text-sm font-pixel">PROJECTS</span>
             {!loading && (
-              <span className="text-green-700 text-xs font-mono">({projects.length})</span>
+              <span className="text-green-700 text-xs font-mono">({topLevelProjects.length})</span>
             )}
           </div>
           <div className="flex items-center gap-2">

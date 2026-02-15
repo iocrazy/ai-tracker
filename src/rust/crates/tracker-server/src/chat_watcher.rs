@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
-use crate::ClaudeMessage;
+use crate::routes_history::ClaudeMessage;
 
 /// Event broadcast to WebSocket clients when new chat messages arrive
 #[derive(Debug, Clone, serde::Serialize)]
@@ -143,7 +143,7 @@ impl ChatWatcher {
                 if line.is_empty() {
                     continue;
                 }
-                if let Some(msg) = crate::parse_single_jsonl_entry(line) {
+                if let Some(msg) = crate::routes_history::parse_single_jsonl_entry(line) {
                     new_messages.push(msg);
                 }
             }

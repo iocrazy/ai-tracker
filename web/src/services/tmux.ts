@@ -1,0 +1,272 @@
+// Tmux operations API
+
+import { API_BASE, authFetch } from './auth';
+
+// Tmux window info (from /api/tmux/windows)
+export interface TmuxWindowInfo {
+  session_id: string;
+  session_name: string;
+  window_id: string;
+  window_name: string;
+  pane_count: number;
+  active: boolean;
+  git_dir?: string;  // Git directory for the session
+}
+
+// Fetch all tmux windows with full details
+export async function fetchTmuxWindows(): Promise<TmuxWindowInfo[]> {
+  const response = await authFetch(`${API_BASE}/tmux/windows`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch tmux windows: ${response.status}`);
+  }
+  const data = await response.json();
+  return data.windows || [];
+}
+
+// Execute tmux send-keys command
+// suffixKey: key to send after the text (e.g., "Enter", "C-m", "C-s", or empty for none)
+export async function tmuxSendKeys(
+  session: string,
+  window: string,
+  pane: string,
+  keys: string,
+  suffixKey: string = 'Enter'
+): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/send-keys`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, window, pane, keys, suffix_key: suffixKey }),
+  });
+  return response.json();
+}
+
+// Send image(s) to a tmux pane (saves to temp file, sends path via send-keys)
+export async function sendImage(
+  session: string,
+  windowId: string,
+  pane: string,
+  imageBase64: string,
+  message?: string
+): Promise<{ success: boolean; message: string; image_path?: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/send-image`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session,
+      window_id: windowId,
+      pane,
+      image_base64: imageBase64,
+      message,
+    }),
+  });
+  return response.json();
+}
+
+// Send multiple images to a tmux pane
+export async function sendImages(
+  session: string,
+  windowId: string,
+  pane: string,
+  imagesBase64: string[],
+  message?: string
+): Promise<{ success: boolean; message: string; image_paths?: string[] }> {
+  const response = await authFetch(`${API_BASE}/tmux/send-image`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session,
+      window_id: windowId,
+      pane,
+      images: imagesBase64,
+      message,
+    }),
+  });
+  return response.json();
+}
+
+// Execute arbitrary tmux command (parse and route to appropriate API)
+export async function executeTmuxCommand(command: string): Promise<{ success: boolean; message: string }> {
+  // Parse tmux send-keys command with quoted keys
+  // Format: tmux send-keys -t session:window "keys" [suffix_key]
+  // Or: tmux send-keys -t session:window.pane "keys" [suffix_key]
+  // suffix_key can be: C-m, C-s, Enter, etc.
+  const sendKeysMatch = command.match(/^tmux\s+send-keys\s+-t\s+([^:]+):([^.\s"]+)(?:\.([^\s"]+))?\s+"([^"]+)"\s*(C-[a-z]|Enter)?$/);
+  if (sendKeysMatch) {
+    const [, session, window, pane = '', keys, suffixKey = ''] = sendKeysMatch;
+    return tmuxSendKeys(session, window, pane, keys, suffixKey);
+  }
+
+  // Parse tmux send-keys without quotes
+  const sendKeysMatch2 = command.match(/^tmux\s+send-keys\s+-t\s+([^:]+):([^.\s]+)(?:\.([^\s]+))?\s+([^\s].+?)\s*(C-[a-z]|Enter)?$/);
+  if (sendKeysMatch2) {
+    const [, session, window, pane = '', keys, suffixKey = ''] = sendKeysMatch2;
+    return tmuxSendKeys(session, window, pane, keys, suffixKey);
+  }
+
+  return { success: false, message: `Unknown command format: ${command}` };
+}
+
+// Kill a tmux session
+export async function tmuxKillSession(session: string): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/kill-session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
+// Kill a tmux window
+export async function tmuxKillWindow(session: string, window: string): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/kill-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, window }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
+// Create a new tmux window
+export async function tmuxNewWindow(session: string, name: string): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/new-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, name }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
+// Closed window info
+export interface ClosedWindow {
+  id: number;
+  session_name: string;
+  window_name: string;
+  working_dir: string;
+  git_branch: string;
+  pane_count: number;
+  closed_at: string | null;
+}
+
+// Get closed windows for a session (for resume without worktree)
+export async function fetchClosedWindows(sessionName: string): Promise<ClosedWindow[]> {
+  const response = await authFetch(`${API_BASE}/tmux/closed-windows/${encodeURIComponent(sessionName)}`);
+  if (!response.ok) {
+    return [];
+  }
+  return response.json();
+}
+
+// Delete a closed window record
+export async function deleteClosedWindow(id: number): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/closed-windows`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
+// Resume a closed window with optional layout
+export async function resumeClosedWindow(
+  session: string,
+  windowName: string,
+  workingDir: string,
+  layout?: 'simple' | 'default' | 'workspace',
+  closedWindowId?: number
+): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/resume-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session,
+      window_name: windowName,
+      working_dir: workingDir,
+      layout: layout || 'simple',
+      closed_window_id: closedWindowId,
+    }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
+// Select (switch to) a tmux window
+// windowId is optional - use it for precise targeting when windows have duplicate names
+export async function tmuxSelectWindow(session: string, window: string, windowId?: string): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/select-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, window, window_id: windowId }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
+// Claude status API
+export interface ClaudeStatus {
+  agent_type: 'claude' | 'opencode' | null;  // Detected AI agent type
+  action: string | null;
+  current_tool: string | null;
+  model: string | null;
+  context_percent: number | null;
+  tokens: number | null;
+  cost: number | null;
+  session_duration: string | null;
+  pane: string | null;  // Detected pane where Claude runs
+}
+
+export interface ClaudeStatusResponse {
+  success: boolean;
+  status: ClaudeStatus;
+}
+
+export async function fetchClaudeStatus(
+  session: string,
+  window: string
+): Promise<ClaudeStatusResponse> {
+  const params = new URLSearchParams({ session, window });
+  const response = await authFetch(`${API_BASE}/tmux/claude-status?${params}`);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+// Tmux capture API
+export interface TmuxCaptureResponse {
+  content: string;
+  cursor_x: number;
+  cursor_y: number;
+}
+
+export async function fetchTmuxCapture(
+  session: string,
+  window: string,
+  pane: string = '',
+  lines?: number
+): Promise<TmuxCaptureResponse> {
+  const params = new URLSearchParams({ session, window, pane });
+  if (lines) {
+    params.append('lines', String(lines));
+  }
+  const response = await authFetch(`${API_BASE}/tmux/capture?${params}`);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
+}

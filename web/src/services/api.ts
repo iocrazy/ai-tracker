@@ -1050,6 +1050,102 @@ export async function deleteWorktreeSlot(id: number) {
   return authFetch(`${API_BASE}/project/worktree-slots/${id}`, { method: 'DELETE' }).then(r => r.json());
 }
 
+// Global Env Vars
+export interface GlobalEnvVar {
+  id: number;
+  key: string;
+  value: string;
+  is_secret: number;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchGlobalEnvVars(): Promise<GlobalEnvVar[]> {
+  const res = await authFetch(`${API_BASE}/global/env-vars`);
+  return res.ok ? res.json() : [];
+}
+
+export async function createGlobalEnvVar(key: string, value: string, isSecret = false) {
+  return authFetch(`${API_BASE}/global/env-vars`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value, is_secret: isSecret }),
+  }).then(r => r.json());
+}
+
+export async function updateGlobalEnvVar(id: number, updates: { key?: string; value?: string; is_secret?: boolean; sort_order?: number }) {
+  return authFetch(`${API_BASE}/global/env-vars/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  }).then(r => r.json());
+}
+
+export async function deleteGlobalEnvVar(id: number) {
+  return authFetch(`${API_BASE}/global/env-vars/${id}`, { method: 'DELETE' }).then(r => r.json());
+}
+
+// Worktree Env Vars
+export interface WorktreeEnvVar {
+  id: number;
+  session_name: string;
+  slot: number;
+  key: string;
+  value: string;
+  is_secret: number;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchWorktreeEnvVars(sessionName: string, slot: number): Promise<WorktreeEnvVar[]> {
+  const res = await authFetch(`${API_BASE}/project/worktree-env-vars?session_name=${encodeURIComponent(sessionName)}&slot=${slot}`);
+  return res.ok ? res.json() : [];
+}
+
+export async function createWorktreeEnvVar(sessionName: string, slot: number, key: string, value: string, isSecret = false) {
+  return authFetch(`${API_BASE}/project/worktree-env-vars`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_name: sessionName, slot, key, value, is_secret: isSecret }),
+  }).then(r => r.json());
+}
+
+export async function updateWorktreeEnvVar(id: number, updates: { key?: string; value?: string; is_secret?: boolean; sort_order?: number }) {
+  return authFetch(`${API_BASE}/project/worktree-env-vars/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  }).then(r => r.json());
+}
+
+export async function deleteWorktreeEnvVar(id: number) {
+  return authFetch(`${API_BASE}/project/worktree-env-vars/${id}`, { method: 'DELETE' }).then(r => r.json());
+}
+
+// Effective (merged) Env Vars
+export interface EffectiveEnvVar {
+  key: string;
+  value: string;
+  is_secret: number;
+  source: string;
+}
+
+export async function fetchEffectiveEnvVars(sessionName: string, slot: number): Promise<EffectiveEnvVar[]> {
+  const res = await authFetch(`${API_BASE}/project/effective-env-vars?session_name=${encodeURIComponent(sessionName)}&slot=${slot}`);
+  return res.ok ? res.json() : [];
+}
+
+// Session creation
+export async function createNewSession(projectName: string, gitDir: string, sessionName?: string) {
+  return authFetch(`${API_BASE}/sessions/create`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_name: projectName, git_dir: gitDir, session_name: sessionName }),
+  }).then(r => r.json());
+}
+
+// Delete project
+export async function deleteProject(gitDir: string) {
+  return authFetch(`${API_BASE}/projects/${encodeURIComponent(gitDir)}`, { method: 'DELETE' }).then(r => r.json());
+}
+
 // Helper: Format duration
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.floor(seconds)}s`;

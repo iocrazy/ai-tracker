@@ -329,6 +329,53 @@ impl Database {
             [],
         )?;
 
+        // === Schema migrations ===
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            )", [],
+        )?;
+
+        let current_version: i32 = self.conn
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        let migrations: &[(i32, &str)] = &[
+            (1, "CREATE TABLE IF NOT EXISTS global_env_vars (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                value TEXT NOT NULL DEFAULT '',
+                is_secret INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"),
+            (2, "CREATE TABLE IF NOT EXISTS worktree_env_vars (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name TEXT NOT NULL,
+                slot INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                is_secret INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(session_name, slot, key)
+            )"),
+        ];
+
+        for (version, sql) in migrations {
+            if *version > current_version {
+                self.conn.execute(sql, [])?;
+                self.conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?1)",
+                    params![version],
+                )?;
+                info!("Applied migration v{}", version);
+            }
+        }
+
         info!("Database schema initialized");
         Ok(())
     }
@@ -1634,6 +1681,279 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // =========================================================================
+    // Global env vars operations
+    // =========================================================================
+
+    pub fn list_global_env_vars(&self) -> Result<Vec<GlobalEnvVar>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, key, value, is_secret, sort_order, created_at, updated_at
+             FROM global_env_vars
+             ORDER BY sort_order ASC, id ASC",
+        )?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(GlobalEnvVar {
+                    id: row.get(0)?,
+                    key: row.get(1)?,
+                    value: row.get(2)?,
+                    is_secret: row.get(3)?,
+                    sort_order: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    pub fn create_global_env_var(&self, key: &str, value: &str, is_secret: bool) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO global_env_vars (key, value, is_secret)
+             VALUES (?1, ?2, ?3)",
+            params![key, value, is_secret as i32],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_global_env_var(
+        &self,
+        id: i64,
+        key: Option<&str>,
+        value: Option<&str>,
+        is_secret: Option<bool>,
+        sort_order: Option<i32>,
+    ) -> Result<()> {
+        let mut set_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(k) = key {
+            set_clauses.push("key = ?");
+            param_values.push(Box::new(k.to_string()));
+        }
+        if let Some(v) = value {
+            set_clauses.push("value = ?");
+            param_values.push(Box::new(v.to_string()));
+        }
+        if let Some(s) = is_secret {
+            set_clauses.push("is_secret = ?");
+            param_values.push(Box::new(s as i32));
+        }
+        if let Some(o) = sort_order {
+            set_clauses.push("sort_order = ?");
+            param_values.push(Box::new(o));
+        }
+
+        if set_clauses.is_empty() {
+            anyhow::bail!("No fields to update");
+        }
+
+        set_clauses.push("updated_at = datetime('now')");
+
+        let numbered: Vec<String> = set_clauses
+            .iter()
+            .enumerate()
+            .map(|(i, clause)| {
+                if clause.contains('?') {
+                    clause.replacen('?', &format!("?{}", i + 1), 1)
+                } else {
+                    clause.to_string()
+                }
+            })
+            .collect();
+
+        let id_param_idx = param_values.len() + 1;
+        let sql = format!(
+            "UPDATE global_env_vars SET {} WHERE id = ?{}",
+            numbered.join(", "),
+            id_param_idx
+        );
+        param_values.push(Box::new(id));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        self.conn.execute(&sql, params_refs.as_slice())?;
+        Ok(())
+    }
+
+    pub fn delete_global_env_var(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM global_env_vars WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Worktree env vars operations
+    // =========================================================================
+
+    pub fn list_worktree_env_vars(&self, session_name: &str, slot: i32) -> Result<Vec<WorktreeEnvVar>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_name, slot, key, value, is_secret, sort_order, created_at, updated_at
+             FROM worktree_env_vars
+             WHERE session_name = ?1 AND slot = ?2
+             ORDER BY sort_order ASC, id ASC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![session_name, slot], |row| {
+                Ok(WorktreeEnvVar {
+                    id: row.get(0)?,
+                    session_name: row.get(1)?,
+                    slot: row.get(2)?,
+                    key: row.get(3)?,
+                    value: row.get(4)?,
+                    is_secret: row.get(5)?,
+                    sort_order: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    pub fn create_worktree_env_var(
+        &self,
+        session_name: &str,
+        slot: i32,
+        key: &str,
+        value: &str,
+        is_secret: bool,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO worktree_env_vars (session_name, slot, key, value, is_secret)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_name, slot, key, value, is_secret as i32],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_worktree_env_var(
+        &self,
+        id: i64,
+        key: Option<&str>,
+        value: Option<&str>,
+        is_secret: Option<bool>,
+        sort_order: Option<i32>,
+    ) -> Result<()> {
+        let mut set_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(k) = key {
+            set_clauses.push("key = ?");
+            param_values.push(Box::new(k.to_string()));
+        }
+        if let Some(v) = value {
+            set_clauses.push("value = ?");
+            param_values.push(Box::new(v.to_string()));
+        }
+        if let Some(s) = is_secret {
+            set_clauses.push("is_secret = ?");
+            param_values.push(Box::new(s as i32));
+        }
+        if let Some(o) = sort_order {
+            set_clauses.push("sort_order = ?");
+            param_values.push(Box::new(o));
+        }
+
+        if set_clauses.is_empty() {
+            anyhow::bail!("No fields to update");
+        }
+
+        set_clauses.push("updated_at = datetime('now')");
+
+        let numbered: Vec<String> = set_clauses
+            .iter()
+            .enumerate()
+            .map(|(i, clause)| {
+                if clause.contains('?') {
+                    clause.replacen('?', &format!("?{}", i + 1), 1)
+                } else {
+                    clause.to_string()
+                }
+            })
+            .collect();
+
+        let id_param_idx = param_values.len() + 1;
+        let sql = format!(
+            "UPDATE worktree_env_vars SET {} WHERE id = ?{}",
+            numbered.join(", "),
+            id_param_idx
+        );
+        param_values.push(Box::new(id));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        self.conn.execute(&sql, params_refs.as_slice())?;
+        Ok(())
+    }
+
+    pub fn delete_worktree_env_var(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM worktree_env_vars WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Get effective (merged) env vars: global → project → worktree
+    pub fn get_effective_env_vars(&self, session_name: &str, slot: i32) -> Result<Vec<EffectiveEnvVar>> {
+        use std::collections::HashMap;
+
+        let mut merged: HashMap<String, EffectiveEnvVar> = HashMap::new();
+
+        // Layer 1: Global
+        for var in self.list_global_env_vars()? {
+            merged.insert(var.key.clone(), EffectiveEnvVar {
+                key: var.key,
+                value: var.value,
+                is_secret: var.is_secret,
+                source: "global".to_string(),
+            });
+        }
+
+        // Layer 2: Project
+        for var in self.list_project_env_vars(session_name)? {
+            merged.insert(var.key.clone(), EffectiveEnvVar {
+                key: var.key,
+                value: var.value,
+                is_secret: var.is_secret,
+                source: "project".to_string(),
+            });
+        }
+
+        // Layer 3: Worktree
+        for var in self.list_worktree_env_vars(session_name, slot)? {
+            merged.insert(var.key.clone(), EffectiveEnvVar {
+                key: var.key,
+                value: var.value,
+                is_secret: var.is_secret,
+                source: "worktree".to_string(),
+            });
+        }
+
+        let mut result: Vec<EffectiveEnvVar> = merged.into_values().collect();
+        result.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(result)
+    }
+
+    // =========================================================================
+    // Delete project
+    // =========================================================================
+
+    pub fn delete_project(&self, git_dir: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM projects WHERE git_dir = ?1",
+            params![git_dir],
+        )?;
+        Ok(())
+    }
 }
 
 /// Project registry info
@@ -1687,6 +2007,41 @@ pub struct ProjectEnvVar {
     pub sort_order: i32,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Global environment variable
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GlobalEnvVar {
+    pub id: i64,
+    pub key: String,
+    pub value: String,
+    pub is_secret: i32,
+    pub sort_order: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Worktree-scoped environment variable
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorktreeEnvVar {
+    pub id: i64,
+    pub session_name: String,
+    pub slot: i32,
+    pub key: String,
+    pub value: String,
+    pub is_secret: i32,
+    pub sort_order: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Merged env var with source annotation
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EffectiveEnvVar {
+    pub key: String,
+    pub value: String,
+    pub is_secret: i32,
+    pub source: String,
 }
 
 /// Project service (port/resource mapping)

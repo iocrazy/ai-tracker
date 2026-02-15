@@ -924,6 +924,75 @@ struct UpdateProjectEnvVarRequest {
     sort_order: Option<i32>,
 }
 
+// === Global Env Vars ===
+
+#[derive(Deserialize)]
+struct CreateGlobalEnvVarRequest {
+    key: String,
+    value: String,
+    #[serde(default)]
+    is_secret: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateGlobalEnvVarRequest {
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    is_secret: Option<bool>,
+    #[serde(default)]
+    sort_order: Option<i32>,
+}
+
+// === Worktree Env Vars ===
+
+#[derive(Deserialize)]
+struct WorktreeEnvVarQuery {
+    session_name: String,
+    slot: i32,
+}
+
+#[derive(Deserialize)]
+struct CreateWorktreeEnvVarRequest {
+    session_name: String,
+    slot: i32,
+    key: String,
+    value: String,
+    #[serde(default)]
+    is_secret: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateWorktreeEnvVarRequest {
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    is_secret: Option<bool>,
+    #[serde(default)]
+    sort_order: Option<i32>,
+}
+
+// === Session creation ===
+
+#[derive(Deserialize)]
+struct CreateSessionRequest {
+    project_name: String,
+    git_dir: String,
+    #[serde(default)]
+    session_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CreateSessionResponse {
+    success: bool,
+    session_name: String,
+    message: String,
+}
+
 // === Project Services ===
 
 #[derive(Deserialize)]
@@ -4588,6 +4657,208 @@ async fn delete_project_env_var(
     }
 }
 
+// --- Global Env Vars ---
+
+async fn list_global_env_vars(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<db::GlobalEnvVar>> {
+    let server_state = state.state.lock().unwrap();
+    Json(server_state.db.list_global_env_vars().unwrap_or_default())
+}
+
+async fn create_global_env_var(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateGlobalEnvVarRequest>,
+) -> Json<serde_json::Value> {
+    let result = {
+        let server_state = state.state.lock().unwrap();
+        server_state.db.create_global_env_var(&req.key, &req.value, req.is_secret)
+    };
+    match result {
+        Ok(id) => Json(serde_json::json!({ "success": true, "id": id })),
+        Err(e) => Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+    }
+}
+
+async fn update_global_env_var(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+    Json(req): Json<UpdateGlobalEnvVarRequest>,
+) -> Json<serde_json::Value> {
+    let result = {
+        let server_state = state.state.lock().unwrap();
+        server_state.db.update_global_env_var(
+            id,
+            req.key.as_deref(),
+            req.value.as_deref(),
+            req.is_secret,
+            req.sort_order,
+        )
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+    }
+}
+
+async fn delete_global_env_var(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+) -> Json<serde_json::Value> {
+    let result = {
+        let server_state = state.state.lock().unwrap();
+        server_state.db.delete_global_env_var(id)
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+    }
+}
+
+// --- Worktree Env Vars ---
+
+async fn list_worktree_env_vars(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<WorktreeEnvVarQuery>,
+) -> Json<Vec<db::WorktreeEnvVar>> {
+    let server_state = state.state.lock().unwrap();
+    Json(server_state.db.list_worktree_env_vars(&params.session_name, params.slot).unwrap_or_default())
+}
+
+async fn create_worktree_env_var(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateWorktreeEnvVarRequest>,
+) -> Json<serde_json::Value> {
+    let result = {
+        let server_state = state.state.lock().unwrap();
+        server_state.db.create_worktree_env_var(&req.session_name, req.slot, &req.key, &req.value, req.is_secret)
+    };
+    match result {
+        Ok(id) => Json(serde_json::json!({ "success": true, "id": id })),
+        Err(e) => Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+    }
+}
+
+async fn update_worktree_env_var(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+    Json(req): Json<UpdateWorktreeEnvVarRequest>,
+) -> Json<serde_json::Value> {
+    let result = {
+        let server_state = state.state.lock().unwrap();
+        server_state.db.update_worktree_env_var(
+            id,
+            req.key.as_deref(),
+            req.value.as_deref(),
+            req.is_secret,
+            req.sort_order,
+        )
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+    }
+}
+
+async fn delete_worktree_env_var(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+) -> Json<serde_json::Value> {
+    let result = {
+        let server_state = state.state.lock().unwrap();
+        server_state.db.delete_worktree_env_var(id)
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+    }
+}
+
+// --- Effective Env Vars ---
+
+async fn get_effective_env_vars(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<WorktreeEnvVarQuery>,
+) -> Json<Vec<db::EffectiveEnvVar>> {
+    let server_state = state.state.lock().unwrap();
+    Json(server_state.db.get_effective_env_vars(&params.session_name, params.slot).unwrap_or_default())
+}
+
+// --- Session creation ---
+
+async fn create_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Json<CreateSessionResponse> {
+    use crate::agent::TMUX_BIN;
+
+    // Generate session name if not provided
+    let session_name = if let Some(name) = req.session_name {
+        name
+    } else {
+        // Count existing tmux sessions to generate prefix
+        let output = std::process::Command::new(TMUX_BIN)
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output();
+        let count = match output {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).lines().count(),
+            Err(_) => 0,
+        };
+        format!("{}-{}", count + 1, req.project_name.replace(' ', "-").to_lowercase())
+    };
+
+    // Create tmux session
+    let result = std::process::Command::new(TMUX_BIN)
+        .args(["new-session", "-d", "-s", &session_name, "-c", &req.git_dir])
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            // Register the project
+            let _ = {
+                let server_state = state.state.lock().unwrap();
+                server_state.db.register_project(&req.git_dir, &req.project_name)
+            };
+            Json(CreateSessionResponse {
+                success: true,
+                session_name: session_name.clone(),
+                message: format!("Session '{}' created", session_name),
+            })
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            Json(CreateSessionResponse {
+                success: false,
+                session_name: String::new(),
+                message: format!("tmux error: {}", stderr.trim()),
+            })
+        }
+        Err(e) => {
+            Json(CreateSessionResponse {
+                success: false,
+                session_name: String::new(),
+                message: format!("Failed to run tmux: {}", e),
+            })
+        }
+    }
+}
+
+// --- Delete project ---
+
+async fn delete_project(
+    State(state): State<Arc<AppState>>,
+    AxumPath(git_dir): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    let result = {
+        let server_state = state.state.lock().unwrap();
+        server_state.db.delete_project(&git_dir)
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+    }
+}
+
 // --- Project Services ---
 
 /// List project services
@@ -5974,6 +6245,16 @@ async fn main() -> Result<()> {
         .route("/api/port/check/:port", get(check_port))
         .route("/api/port/kill", post(kill_port))
         .route("/api/port/allocate", get(allocate_port))
+        // Global env vars
+        .route("/api/global/env-vars", get(list_global_env_vars).post(create_global_env_var))
+        .route("/api/global/env-vars/:id", put(update_global_env_var).delete(delete_global_env_var))
+        // Worktree env vars + effective
+        .route("/api/project/worktree-env-vars", get(list_worktree_env_vars).post(create_worktree_env_var))
+        .route("/api/project/worktree-env-vars/:id", put(update_worktree_env_var).delete(delete_worktree_env_var))
+        .route("/api/project/effective-env-vars", get(get_effective_env_vars))
+        // Session creation + project delete
+        .route("/api/sessions/create", post(create_session))
+        .route("/api/projects/:git_dir", delete(delete_project))
         // Project environment & worktree isolation
         .route("/api/project/env-vars", get(list_project_env_vars).post(create_project_env_var))
         .route("/api/project/env-vars/:id", put(update_project_env_var).delete(delete_project_env_var))

@@ -4,6 +4,7 @@ import { WorkstationsView } from './components/WorkstationsView';
 import { TimelineView } from './components/TimelineView';
 import { ConsoleView } from './components/ConsoleView';
 import { SettingsView } from './components/SettingsView';
+import { ProjectsView } from './components/ProjectsView';
 import { ChatHistoryModal, ChatMessage } from './components/ChatHistoryModal';
 import { HistoryDetailModal } from './components/HistoryDetailModal';
 import { InputModal } from './components/InputModal';
@@ -13,7 +14,7 @@ import { CloseWindowModal, CloseAction } from './components/CloseWindowModal';
 import { LoginView } from './components/LoginView';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
-import { Monitor, List, Terminal as TerminalIcon, Settings } from 'lucide-react';
+import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2 } from 'lucide-react';
 import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
@@ -589,6 +590,8 @@ const App: React.FC = () => {
                         onRequestDeleteWindow={handleRequestDeleteWindow}
                         onViewHistory={handleViewHistory}
                    />;
+          case 'PROJECTS':
+            return <ProjectsView sessions={sessions} onSwitchTab={setActiveTab} />;
           case 'TIMELINE':
             return <TimelineView
                         events={timeline}
@@ -644,6 +647,7 @@ const App: React.FC = () => {
             <nav className="hidden xl:flex flex-row flex-none flex-wrap gap-1 mb-4 border-b-2 border-green-600 shadow-[0_5px_15px_rgba(34,197,94,0.1)]">
                 {[
                     { id: 'WORKSTATIONS', icon: Monitor, label: 'Workstations' },
+                    { id: 'PROJECTS', icon: FolderGit2, label: 'Projects' },
                     { id: 'TIMELINE', icon: List, label: 'Timeline' },
                     { id: 'CONSOLE', icon: TerminalIcon, label: 'Console' },
                     { id: 'SETTINGS', icon: Settings, label: 'Settings' },
@@ -675,7 +679,8 @@ const App: React.FC = () => {
                 <div className="flex justify-around items-stretch max-w-[600px] mx-auto">
                     {[
                         { id: 'WORKSTATIONS', icon: Monitor, label: 'WORK' },
-                        { id: 'TIMELINE', icon: List, label: 'TIMELINE' },
+                        { id: 'PROJECTS', icon: FolderGit2, label: 'PROJ' },
+                        { id: 'TIMELINE', icon: List, label: 'TIME' },
                         { id: 'CONSOLE', icon: TerminalIcon, label: 'CONSOLE' },
                         { id: 'SETTINGS', icon: Settings, label: 'SETTINGS' },
                     ].map((tab) => (

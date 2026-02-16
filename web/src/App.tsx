@@ -5,6 +5,7 @@ import { TimelineView } from './components/TimelineView';
 import { ConsoleView } from './components/ConsoleView';
 import { SettingsView } from './components/SettingsView';
 import { ProjectsView } from './components/ProjectsView';
+import { AIAnalystView } from './components/AIAnalystView';
 import { ChatHistoryModal, ChatMessage } from './components/ChatHistoryModal';
 import { HistoryDetailModal } from './components/HistoryDetailModal';
 import { InputModal } from './components/InputModal';
@@ -16,7 +17,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { CommandPalette } from './components/CommandPalette';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
-import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2, Bell } from 'lucide-react';
+import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
 import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
@@ -700,9 +701,11 @@ const App: React.FC = () => {
                         onViewDetails={handleTimelineDetails}
                         isActive={!isModalOpen && !isInputModalOpen && !deleteTarget}
                    />;
+          case 'ANALYTICS':
+            return <AIAnalystView sessions={sessions} timeline={timeline} backendState={latestStateRef.current} />;
           case 'CONSOLE':
             return <ConsoleView logs={consoleLogs} target={consoleTarget} />;
-          case 'SETTINGS': 
+          case 'SETTINGS':
             return <SettingsView settings={settings} onUpdate={updateSetting} />;
           default: return null;
       }
@@ -821,6 +824,7 @@ const App: React.FC = () => {
                     { id: 'WORKSTATIONS', icon: Monitor, label: 'Workstations' },
                     { id: 'PROJECTS', icon: FolderGit2, label: 'Projects' },
                     { id: 'TIMELINE', icon: List, label: 'Timeline' },
+                    { id: 'ANALYTICS', icon: BarChart3, label: 'Analytics' },
                     { id: 'CONSOLE', icon: TerminalIcon, label: 'Console' },
                     { id: 'SETTINGS', icon: Settings, label: 'Settings' },
                 ].map((tab) => (
@@ -861,6 +865,7 @@ const App: React.FC = () => {
                         { id: 'WORKSTATIONS', icon: Monitor, label: 'WORK' },
                         { id: 'PROJECTS', icon: FolderGit2, label: 'PROJ' },
                         { id: 'TIMELINE', icon: List, label: 'TIME' },
+                        { id: 'ANALYTICS', icon: BarChart3, label: 'STATS' },
                         { id: 'CONSOLE', icon: TerminalIcon, label: 'CONSOLE' },
                         { id: 'SETTINGS', icon: Settings, label: 'SETTINGS' },
                     ].map((tab) => (

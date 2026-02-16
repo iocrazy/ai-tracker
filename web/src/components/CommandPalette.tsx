@@ -50,6 +50,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       { id: 'WORKSTATIONS', icon: Monitor, label: 'Workstations' },
       { id: 'PROJECTS', icon: FolderGit2, label: 'Projects' },
       { id: 'TIMELINE', icon: List, label: 'Timeline' },
+      { id: 'ANALYTICS', icon: BarChart3, label: 'Analytics' },
       { id: 'CONSOLE', icon: Terminal, label: 'Console' },
       { id: 'SETTINGS', icon: Settings, label: 'Settings' },
     ];

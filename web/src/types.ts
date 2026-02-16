@@ -1,5 +1,5 @@
 
-export type AppTab = 'WORKSTATIONS' | 'PROJECTS' | 'TIMELINE' | 'CONSOLE' | 'SETTINGS';
+export type AppTab = 'WORKSTATIONS' | 'PROJECTS' | 'TIMELINE' | 'ANALYTICS' | 'CONSOLE' | 'SETTINGS';
 
 export interface ClaudeStatus {
     agent_type: 'claude' | 'opencode' | null;  // Detected AI agent type

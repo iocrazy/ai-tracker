@@ -46,6 +46,25 @@ function loadCache(): { state: BackendState; tmuxWindows: any[] } | null {
   return null;
 }
 
+// Static tab definitions — module-level to avoid recreation on every render
+const DESKTOP_TABS: { id: AppTab; icon: typeof Monitor; label: string }[] = [
+  { id: 'WORKSTATIONS', icon: Monitor, label: 'Workstations' },
+  { id: 'PROJECTS', icon: FolderGit2, label: 'Projects' },
+  { id: 'TIMELINE', icon: List, label: 'Timeline' },
+  { id: 'ANALYTICS', icon: BarChart3, label: 'Analytics' },
+  { id: 'CONSOLE', icon: TerminalIcon, label: 'Console' },
+  { id: 'SETTINGS', icon: Settings, label: 'Settings' },
+];
+
+const MOBILE_TABS: { id: AppTab; icon: typeof Monitor; label: string }[] = [
+  { id: 'WORKSTATIONS', icon: Monitor, label: 'WORK' },
+  { id: 'PROJECTS', icon: FolderGit2, label: 'PROJ' },
+  { id: 'TIMELINE', icon: List, label: 'TIME' },
+  { id: 'ANALYTICS', icon: BarChart3, label: 'STATS' },
+  { id: 'CONSOLE', icon: TerminalIcon, label: 'CONSOLE' },
+  { id: 'SETTINGS', icon: Settings, label: 'SETTINGS' },
+];
+
 const App: React.FC = () => {
   // Auth State: null = checking, true = authenticated, false = needs login
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
@@ -823,14 +842,7 @@ const App: React.FC = () => {
 
             {/* Desktop Navigation Tabs - Hidden on mobile/tablet (below 1280px) */}
             <nav className="hidden xl:flex flex-row flex-none flex-wrap gap-1 mb-4 border-b-2 border-green-600 shadow-[0_5px_15px_rgba(34,197,94,0.1)]">
-                {[
-                    { id: 'WORKSTATIONS', icon: Monitor, label: 'Workstations' },
-                    { id: 'PROJECTS', icon: FolderGit2, label: 'Projects' },
-                    { id: 'TIMELINE', icon: List, label: 'Timeline' },
-                    { id: 'ANALYTICS', icon: BarChart3, label: 'Analytics' },
-                    { id: 'CONSOLE', icon: TerminalIcon, label: 'Console' },
-                    { id: 'SETTINGS', icon: Settings, label: 'Settings' },
-                ].map((tab) => (
+                {DESKTOP_TABS.map((tab) => (
                     <button
                         key={tab.id}
                         onClick={() => setActiveTab(tab.id as AppTab)}
@@ -864,14 +876,7 @@ const App: React.FC = () => {
             {/* Mobile/Tablet Bottom Navigation - Fixed at bottom, shown below 1280px */}
             <nav className="xl:hidden fixed bottom-0 left-0 right-0 z-50 bg-black border-t-2 border-green-600 shadow-[0_-5px_20px_rgba(34,197,94,0.2)]" style={{ paddingBottom: 'max(8px, env(safe-area-inset-bottom, 8px))' }}>
                 <div className="flex justify-around items-stretch max-w-[600px] mx-auto">
-                    {[
-                        { id: 'WORKSTATIONS', icon: Monitor, label: 'WORK' },
-                        { id: 'PROJECTS', icon: FolderGit2, label: 'PROJ' },
-                        { id: 'TIMELINE', icon: List, label: 'TIME' },
-                        { id: 'ANALYTICS', icon: BarChart3, label: 'STATS' },
-                        { id: 'CONSOLE', icon: TerminalIcon, label: 'CONSOLE' },
-                        { id: 'SETTINGS', icon: Settings, label: 'SETTINGS' },
-                    ].map((tab) => (
+                    {MOBILE_TABS.map((tab) => (
                         <button
                             key={tab.id}
                             onClick={() => setActiveTab(tab.id as AppTab)}

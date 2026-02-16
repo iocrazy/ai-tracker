@@ -255,3 +255,97 @@ export async function fetchLogs(params: { limit?: number; level?: string; search
   if (!response.ok) return { entries: [], total: 0 };
   return response.json();
 }
+
+// Notification API
+export interface NotificationEntry {
+  id: number;
+  type: string;
+  session_name: string | null;
+  message: string;
+  read: number;
+  created_at: string;
+}
+
+export async function fetchNotifications(unreadOnly = false, limit = 50): Promise<NotificationEntry[]> {
+  const params = new URLSearchParams();
+  if (unreadOnly) params.set('unread_only', 'true');
+  params.set('limit', String(limit));
+  const res = await authFetch(`${API_BASE}/notifications?${params}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.notifications || [];
+}
+
+export async function fetchUnreadCount(): Promise<number> {
+  const res = await authFetch(`${API_BASE}/notifications/count`);
+  if (!res.ok) return 0;
+  const data = await res.json();
+  return data.count || 0;
+}
+
+export async function markNotificationRead(id: number): Promise<void> {
+  await authFetch(`${API_BASE}/notifications/${id}/read`, { method: 'POST' });
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  await authFetch(`${API_BASE}/notifications/read-all`, { method: 'POST' });
+}
+
+// Alert Rules API
+export interface AlertRule {
+  id: number;
+  name: string;
+  condition_type: string;
+  threshold_seconds: number | null;
+  enabled: number;
+  channels: string;
+  created_at: string;
+}
+
+export async function fetchAlertRules(): Promise<AlertRule[]> {
+  const res = await authFetch(`${API_BASE}/alert-rules`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.rules || [];
+}
+
+export async function createAlertRule(name: string, conditionType: string, thresholdSeconds?: number, channels = 'web'): Promise<{ success: boolean; id?: number }> {
+  const res = await authFetch(`${API_BASE}/alert-rules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, condition_type: conditionType, threshold_seconds: thresholdSeconds, channels }),
+  });
+  return res.json();
+}
+
+export async function updateAlertRule(id: number, updates: { enabled?: boolean; threshold_seconds?: number; channels?: string }): Promise<void> {
+  await authFetch(`${API_BASE}/alert-rules/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+}
+
+export async function deleteAlertRule(id: number): Promise<void> {
+  await authFetch(`${API_BASE}/alert-rules/${id}`, { method: 'DELETE' });
+}
+
+// Backup API
+export interface BackupEntry {
+  name: string;
+  path: string;
+  size: number;
+  created: string;
+}
+
+export async function createBackup(): Promise<{ success: boolean; path?: string }> {
+  const res = await authFetch(`${API_BASE}/backup`, { method: 'POST' });
+  return res.json();
+}
+
+export async function fetchBackups(): Promise<BackupEntry[]> {
+  const res = await authFetch(`${API_BASE}/backup/list`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.backups || [];
+}

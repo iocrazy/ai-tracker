@@ -367,6 +367,23 @@ impl Database {
             (4, "ALTER TABLE projects ADD COLUMN status TEXT DEFAULT 'active'"),
             (5, "ALTER TABLE projects ADD COLUMN tags TEXT DEFAULT ''"),
             (6, "ALTER TABLE projects ADD COLUMN created_at TEXT DEFAULT ''"),
+            (7, "CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL,
+                session_name TEXT,
+                message TEXT NOT NULL,
+                read INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )"),
+            (8, "CREATE TABLE IF NOT EXISTS alert_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                condition_type TEXT NOT NULL,
+                threshold_seconds INTEGER,
+                enabled INTEGER DEFAULT 1,
+                channels TEXT DEFAULT 'web',
+                created_at TEXT DEFAULT (datetime('now'))
+            )"),
         ];
 
         for (version, sql) in migrations {
@@ -1984,6 +2001,178 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // =========================================================================
+    // Notification operations
+    // =========================================================================
+
+    pub fn list_notifications(&self, unread_only: bool, limit: i32) -> Result<Vec<Notification>> {
+        let sql = if unread_only {
+            "SELECT id, type, session_name, message, read, created_at FROM notifications WHERE read = 0 ORDER BY created_at DESC LIMIT ?1"
+        } else {
+            "SELECT id, type, session_name, message, read, created_at FROM notifications ORDER BY created_at DESC LIMIT ?1"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(Notification {
+                id: row.get(0)?,
+                notification_type: row.get(1)?,
+                session_name: row.get(2)?,
+                message: row.get(3)?,
+                read: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn create_notification(&self, notification_type: &str, session_name: Option<&str>, message: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO notifications (type, session_name, message) VALUES (?1, ?2, ?3)",
+            params![notification_type, session_name, message],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn mark_notification_read(&self, id: i64) -> Result<()> {
+        self.conn.execute("UPDATE notifications SET read = 1 WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn mark_all_notifications_read(&self) -> Result<()> {
+        self.conn.execute("UPDATE notifications SET read = 1 WHERE read = 0", [])?;
+        Ok(())
+    }
+
+    pub fn unread_notification_count(&self) -> Result<i32> {
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM notifications WHERE read = 0", [], |row| row.get(0)
+        )?;
+        Ok(count)
+    }
+
+    // =========================================================================
+    // Alert rule operations
+    // =========================================================================
+
+    pub fn list_alert_rules(&self) -> Result<Vec<AlertRule>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, condition_type, threshold_seconds, enabled, channels, created_at FROM alert_rules ORDER BY id"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AlertRule {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                condition_type: row.get(2)?,
+                threshold_seconds: row.get(3)?,
+                enabled: row.get(4)?,
+                channels: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn create_alert_rule(&self, name: &str, condition_type: &str, threshold_seconds: Option<i32>, channels: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO alert_rules (name, condition_type, threshold_seconds, channels) VALUES (?1, ?2, ?3, ?4)",
+            params![name, condition_type, threshold_seconds, channels],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_alert_rule(&self, id: i64, enabled: Option<bool>, threshold_seconds: Option<i32>, channels: Option<&str>) -> Result<()> {
+        if let Some(e) = enabled {
+            self.conn.execute("UPDATE alert_rules SET enabled = ?1 WHERE id = ?2", params![e as i32, id])?;
+        }
+        if let Some(t) = threshold_seconds {
+            self.conn.execute("UPDATE alert_rules SET threshold_seconds = ?1 WHERE id = ?2", params![t, id])?;
+        }
+        if let Some(c) = channels {
+            self.conn.execute("UPDATE alert_rules SET channels = ?1 WHERE id = ?2", params![c, id])?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_alert_rule(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM alert_rules WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Check alert conditions against current tasks and create notifications
+    pub fn check_alerts(&self) -> Result<Vec<Notification>> {
+        let rules = self.list_alert_rules()?;
+        let mut new_notifications = Vec::new();
+
+        for rule in &rules {
+            if rule.enabled == 0 { continue; }
+
+            match rule.condition_type.as_str() {
+                "task_stuck" => {
+                    let threshold = rule.threshold_seconds.unwrap_or(1800); // default 30min
+                    let mut stmt = self.conn.prepare(
+                        "SELECT session, window, summary FROM tasks WHERE status = 'in_progress'
+                         AND started_at IS NOT NULL
+                         AND CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER) > ?1"
+                    )?;
+                    let stuck: Vec<(String, String, String)> = stmt.query_map(params![threshold], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    })?.filter_map(|r| r.ok()).collect();
+
+                    for (session, window, summary) in stuck {
+                        let msg = format!("Task stuck >{}m in {}/{}: {}", threshold / 60, session, window, summary);
+                        // Avoid duplicate notifications (check last hour)
+                        let exists: bool = self.conn.query_row(
+                            "SELECT COUNT(*) > 0 FROM notifications WHERE type = 'task_stuck' AND message = ?1 AND created_at > datetime('now', '-1 hour')",
+                            params![msg], |row| row.get(0)
+                        ).unwrap_or(false);
+                        if !exists {
+                            let id = self.create_notification("task_stuck", Some(&session), &msg)?;
+                            new_notifications.push(Notification {
+                                id, notification_type: "task_stuck".into(), session_name: Some(session),
+                                message: msg, read: 0, created_at: String::new(),
+                            });
+                        }
+                    }
+                },
+                "session_idle" => {
+                    // Sessions with no activity for threshold seconds
+                    let threshold = rule.threshold_seconds.unwrap_or(3600);
+                    let mut stmt = self.conn.prepare(
+                        "SELECT DISTINCT session FROM tasks WHERE status = 'in_progress'
+                         AND started_at IS NOT NULL
+                         AND CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER) > ?1"
+                    )?;
+                    let idle: Vec<String> = stmt.query_map(params![threshold], |row| {
+                        row.get::<_, String>(0)
+                    })?.filter_map(|r| r.ok()).collect();
+
+                    for session in idle {
+                        let msg = format!("Session {} idle for >{}m", session, threshold / 60);
+                        let exists: bool = self.conn.query_row(
+                            "SELECT COUNT(*) > 0 FROM notifications WHERE type = 'session_idle' AND message = ?1 AND created_at > datetime('now', '-1 hour')",
+                            params![msg], |row| row.get(0)
+                        ).unwrap_or(false);
+                        if !exists {
+                            self.create_notification("session_idle", Some(&session), &msg)?;
+                        }
+                    }
+                },
+                _ => {} // Unknown condition types are ignored
+            }
+        }
+
+        Ok(new_notifications)
+    }
+
+    // =========================================================================
+    // Backup operations
+    // =========================================================================
+
+    pub fn backup_to(&self, path: &str) -> Result<()> {
+        self.conn.execute("VACUUM INTO ?1", params![path])?;
+        Ok(())
+    }
 }
 
 /// Project registry info
@@ -2098,6 +2287,30 @@ pub struct WorktreeSlot {
     pub slot: i32,
     pub branch: String,
     pub worktree_path: Option<String>,
+    pub created_at: String,
+}
+
+/// Notification record
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Notification {
+    pub id: i64,
+    #[serde(rename = "type")]
+    pub notification_type: String,
+    pub session_name: Option<String>,
+    pub message: String,
+    pub read: i32,
+    pub created_at: String,
+}
+
+/// Alert rule
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AlertRule {
+    pub id: i64,
+    pub name: String,
+    pub condition_type: String,
+    pub threshold_seconds: Option<i32>,
+    pub enabled: i32,
+    pub channels: String,
     pub created_at: String,
 }
 

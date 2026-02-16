@@ -16,8 +16,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { CommandPalette } from './components/CommandPalette';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
-import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2 } from 'lucide-react';
-import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus } from './services/api';
+import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2, Bell } from 'lucide-react';
+import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 // localStorage cache keys
@@ -71,6 +71,11 @@ const App: React.FC = () => {
   const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const [healthUptime, setHealthUptime] = useState<string>('');
   const [usingCache, setUsingCache] = useState(false);
+
+  // Notification state
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [notifications, setNotifications] = useState<NotificationEntry[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
 
   // Check existing token on mount
   useEffect(() => {
@@ -274,6 +279,17 @@ const App: React.FC = () => {
           setHealthUptime(h.checks?.uptime || '');
         }
       });
+    };
+    poll();
+    const interval = setInterval(poll, 30000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated]);
+
+  // Notification polling (every 30s)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const poll = () => {
+      fetchUnreadCount().then(c => setUnreadCount(c));
     };
     poll();
     const interval = setInterval(poll, 30000);
@@ -742,6 +758,54 @@ const App: React.FC = () => {
                               ? `RETRY #${retryCount}`
                               : 'OFFLINE'}
                         </span>
+                    </div>
+                    {/* Notification bell */}
+                    <div className="relative">
+                      <button
+                        onClick={() => {
+                          setShowNotifications(!showNotifications);
+                          if (!showNotifications) {
+                            fetchNotifications(false, 20).then(n => setNotifications(n));
+                          }
+                        }}
+                        className="p-1 text-green-700 hover:text-green-400 transition-colors relative"
+                        title="Notifications"
+                      >
+                        <Bell className="w-4 h-4" />
+                        {unreadCount > 0 && (
+                          <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-red-500 text-[8px] text-white font-bold rounded-full flex items-center justify-center shadow-[0_0_6px_#ef4444]">
+                            {unreadCount > 9 ? '9+' : unreadCount}
+                          </span>
+                        )}
+                      </button>
+                      {showNotifications && (
+                        <div className="absolute right-0 top-8 w-80 max-h-96 overflow-y-auto bg-black border border-green-700/60 rounded shadow-[0_0_20px_rgba(34,197,94,0.2)] z-50">
+                          <div className="flex items-center justify-between px-3 py-2 border-b border-green-900/50">
+                            <span className="text-green-400 text-xs font-bold tracking-widest">NOTIFICATIONS</span>
+                            {unreadCount > 0 && (
+                              <button
+                                onClick={() => { markAllNotificationsRead().then(() => { setUnreadCount(0); setNotifications(prev => prev.map(n => ({ ...n, read: 1 }))); }); }}
+                                className="text-[10px] text-green-700 hover:text-green-400 tracking-wider"
+                              >MARK ALL READ</button>
+                            )}
+                          </div>
+                          {notifications.length === 0 ? (
+                            <div className="p-4 text-center text-green-800 text-xs">No notifications</div>
+                          ) : (
+                            notifications.map(n => (
+                              <div key={n.id} className={`px-3 py-2 border-b border-green-900/30 ${n.read ? 'opacity-50' : ''}`}>
+                                <div className="flex items-start gap-2">
+                                  <span className={`mt-0.5 w-2 h-2 rounded-full flex-shrink-0 ${n.read ? 'bg-green-900' : 'bg-yellow-500'}`}></span>
+                                  <div className="min-w-0">
+                                    <div className="text-green-400 text-xs leading-relaxed break-words">{n.message}</div>
+                                    <div className="text-green-800 text-[10px] mt-0.5">{n.type} {n.created_at ? `· ${n.created_at}` : ''}</div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
                     </div>
                     {/* Logged in user display - hidden on small screens */}
                     <div className="hidden sm:flex text-green-800 font-mono text-xs tracking-widest items-center gap-2">

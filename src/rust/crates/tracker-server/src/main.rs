@@ -1637,6 +1637,179 @@ async fn get_logs(
 }
 
 // ============================================================================
+// Notification Handlers
+// ============================================================================
+
+#[derive(Deserialize)]
+struct NotificationQuery {
+    #[serde(default)]
+    unread_only: Option<bool>,
+    #[serde(default = "default_notification_limit")]
+    limit: i32,
+}
+
+fn default_notification_limit() -> i32 { 50 }
+
+async fn list_notifications(
+    Query(params): Query<NotificationQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let server = state.state.lock().unwrap();
+    let unread = params.unread_only.unwrap_or(false);
+    match server.db.list_notifications(unread, params.limit) {
+        Ok(notifications) => Json(serde_json::json!({ "notifications": notifications })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+async fn mark_notification_read(
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let server = state.state.lock().unwrap();
+    match server.db.mark_notification_read(id) {
+        Ok(_) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
+async fn mark_all_notifications_read(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let server = state.state.lock().unwrap();
+    match server.db.mark_all_notifications_read() {
+        Ok(_) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
+async fn unread_notification_count(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let server = state.state.lock().unwrap();
+    match server.db.unread_notification_count() {
+        Ok(count) => Json(serde_json::json!({ "count": count })),
+        Err(e) => Json(serde_json::json!({ "count": 0, "error": e.to_string() })),
+    }
+}
+
+// ============================================================================
+// Alert Rule Handlers
+// ============================================================================
+
+#[derive(Deserialize)]
+struct CreateAlertRuleRequest {
+    name: String,
+    condition_type: String,
+    threshold_seconds: Option<i32>,
+    #[serde(default = "default_channels")]
+    channels: String,
+}
+
+fn default_channels() -> String { "web".to_string() }
+
+#[derive(Deserialize)]
+struct UpdateAlertRuleRequest {
+    enabled: Option<bool>,
+    threshold_seconds: Option<i32>,
+    channels: Option<String>,
+}
+
+async fn list_alert_rules(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let server = state.state.lock().unwrap();
+    match server.db.list_alert_rules() {
+        Ok(rules) => Json(serde_json::json!({ "rules": rules })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+async fn create_alert_rule(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateAlertRuleRequest>,
+) -> Json<serde_json::Value> {
+    let server = state.state.lock().unwrap();
+    match server.db.create_alert_rule(&req.name, &req.condition_type, req.threshold_seconds, &req.channels) {
+        Ok(id) => Json(serde_json::json!({ "success": true, "id": id })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
+async fn update_alert_rule(
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateAlertRuleRequest>,
+) -> Json<serde_json::Value> {
+    let server = state.state.lock().unwrap();
+    match server.db.update_alert_rule(id, req.enabled, req.threshold_seconds, req.channels.as_deref()) {
+        Ok(_) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
+async fn delete_alert_rule(
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let server = state.state.lock().unwrap();
+    match server.db.delete_alert_rule(id) {
+        Ok(_) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
+// ============================================================================
+// Backup Handlers
+// ============================================================================
+
+async fn create_backup(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let backup_dir = format!("{}/.config/agent-tracker/backups", home);
+    let _ = std::fs::create_dir_all(&backup_dir);
+
+    let now = chrono::Utc::now().format("%Y-%m-%d_%H%M%S");
+    let backup_path = format!("{}/tracker-{}.db", backup_dir, now);
+
+    let server = state.state.lock().unwrap();
+    match server.db.backup_to(&backup_path) {
+        Ok(_) => Json(serde_json::json!({ "success": true, "path": backup_path })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
+async fn list_backups() -> Json<serde_json::Value> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let backup_dir = format!("{}/.config/agent-tracker/backups", home);
+
+    let entries = match std::fs::read_dir(&backup_dir) {
+        Ok(e) => e,
+        Err(_) => return Json(serde_json::json!({ "backups": [] })),
+    };
+
+    let mut backups: Vec<serde_json::Value> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "db"))
+        .map(|e| {
+            let meta = e.metadata().ok();
+            serde_json::json!({
+                "name": e.file_name().to_string_lossy(),
+                "path": e.path().to_string_lossy(),
+                "size": meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                "created": meta.and_then(|m| m.modified().ok())
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    backups.sort_by(|a, b| b["name"].as_str().cmp(&a["name"].as_str()));
+    Json(serde_json::json!({ "backups": backups }))
+}
+
+// ============================================================================
 // WebSocket Handler
 // ============================================================================
 
@@ -1939,6 +2112,66 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Background task: check alert rules every 60s
+    let alert_state = app_state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let server = alert_state.state.lock().unwrap();
+            match server.db.check_alerts() {
+                Ok(new) if !new.is_empty() => {
+                    info!("Alert check: {} new notifications", new.len());
+                }
+                Err(e) => {
+                    debug!("Alert check error: {}", e);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Background task: daily auto-backup
+    let backup_state = app_state.clone();
+    tokio::spawn(async move {
+        // Check on startup, then every 6 hours
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(6 * 3600));
+        loop {
+            interval.tick().await;
+            let home = std::env::var("HOME").unwrap_or_default();
+            let backup_dir = format!("{}/.config/agent-tracker/backups", home);
+            let _ = std::fs::create_dir_all(&backup_dir);
+
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let today_backup = format!("{}/tracker-{}.db", backup_dir, today);
+
+            if !std::path::Path::new(&today_backup).exists() {
+                let server = backup_state.state.lock().unwrap();
+                match server.db.backup_to(&today_backup) {
+                    Ok(_) => info!("Daily backup created: {}", today_backup),
+                    Err(e) => error!("Backup failed: {}", e),
+                }
+
+                // Clean up backups older than 30 days
+                if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+                    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                let dt: chrono::DateTime<chrono::Utc> = modified.into();
+                                if dt < cutoff {
+                                    let _ = std::fs::remove_file(entry.path());
+                                    info!("Cleaned old backup: {}", entry.path().display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // Background safety net: auto-broadcast if DB changes weren't explicitly broadcast
     let safety_state = app_state.clone();
     let changed_tables = {
@@ -2048,6 +2281,17 @@ async fn main() -> Result<()> {
         // Health check (no auth required — bypassed in auth_middleware)
         .route("/api/health", get(health_check))
         .route("/api/logs", get(get_logs))
+        // Notifications
+        .route("/api/notifications", get(list_notifications))
+        .route("/api/notifications/:id/read", post(mark_notification_read))
+        .route("/api/notifications/read-all", post(mark_all_notifications_read))
+        .route("/api/notifications/count", get(unread_notification_count))
+        // Alert rules
+        .route("/api/alert-rules", get(list_alert_rules).post(create_alert_rule))
+        .route("/api/alert-rules/:id", put(update_alert_rule).delete(delete_alert_rule))
+        // Backup
+        .route("/api/backup", post(create_backup))
+        .route("/api/backup/list", get(list_backups))
         // WebSocket
         .route("/ws", get(ws_handler))
         // Auth middleware (applied before CORS so preflight OPTIONS bypass auth)

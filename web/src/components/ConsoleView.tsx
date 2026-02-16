@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ConsoleLog, ConsoleTarget } from '../types';
-import { Command, ChevronRight, TerminalSquare } from 'lucide-react';
+import { Command, ChevronRight, TerminalSquare, ScrollText, Search, RefreshCw } from 'lucide-react';
 import { executeTmuxCommand } from '../services/api';
+import { fetchLogs, LogEntry } from '../services/state';
 
 interface ConsoleViewProps {
     logs: ConsoleLog[];
@@ -56,16 +57,37 @@ const TMUX_TEMPLATES = [
 export const ConsoleView: React.FC<ConsoleViewProps> = ({ logs: initialLogs, target }) => {
   const [logs, setLogs] = useState<ConsoleLog[]>(initialLogs);
   const [input, setInput] = useState('');
-  
+
   // Template Variable State
   const [sessionInput, setSessionInput] = useState('');
   const [windowInput, setWindowInput] = useState('');      // Display name
   const [windowIdInput, setWindowIdInput] = useState('');  // Actual ID for tmux targeting
   const [paneInput, setPaneInput] = useState('');
   const [keysInput, setKeysInput] = useState('');
-  
+
+  // Console mode: 'tmux' or 'logs'
+  const [consoleMode, setConsoleMode] = useState<'tmux' | 'logs'>('tmux');
+
+  // Server logs state
+  const [serverLogs, setServerLogs] = useState<LogEntry[]>([]);
+  const [logLevel, setLogLevel] = useState<string>('');
+  const [logSearch, setLogSearch] = useState('');
+  const [logLoading, setLogLoading] = useState(false);
+
   const inputRef = useRef<HTMLInputElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Load server logs
+  const loadServerLogs = async () => {
+    setLogLoading(true);
+    const result = await fetchLogs({ limit: 200, level: logLevel || undefined, search: logSearch || undefined });
+    setServerLogs(result.entries);
+    setLogLoading(false);
+  };
+
+  useEffect(() => {
+    if (consoleMode === 'logs') loadServerLogs();
+  }, [consoleMode, logLevel]);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -145,6 +167,70 @@ export const ConsoleView: React.FC<ConsoleViewProps> = ({ logs: initialLogs, tar
 
   return (
     <div className="flex flex-col h-full gap-4 pb-2">
+        {/* Mode Toggle */}
+        <div className="flex items-center gap-1 flex-none">
+          <button onClick={() => setConsoleMode('tmux')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold tracking-widest uppercase transition-all border
+              ${consoleMode === 'tmux' ? 'text-green-300 border-green-500 bg-green-900/30' : 'text-green-700 border-green-900 hover:border-green-700'}`}>
+            <TerminalSquare className="w-3 h-3" /> TMUX CONSOLE
+          </button>
+          <button onClick={() => setConsoleMode('logs')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold tracking-widest uppercase transition-all border
+              ${consoleMode === 'logs' ? 'text-green-300 border-green-500 bg-green-900/30' : 'text-green-700 border-green-900 hover:border-green-700'}`}>
+            <ScrollText className="w-3 h-3" /> SERVER LOGS
+          </button>
+        </div>
+
+        {/* Server Logs Mode */}
+        {consoleMode === 'logs' ? (
+          <div className="flex-grow flex flex-col min-h-0 retro-border bg-black/80 p-4 relative overflow-hidden">
+            {/* Log filters */}
+            <div className="flex items-center gap-2 mb-3 flex-wrap flex-none">
+              <div className="flex items-center gap-1">
+                {['', 'INFO', 'WARN', 'ERROR', 'DEBUG'].map(l => (
+                  <button key={l} onClick={() => setLogLevel(l)}
+                    className={`px-2 py-1 text-[9px] font-bold tracking-widest uppercase transition-all border
+                      ${logLevel === l ? 'text-green-300 border-green-500 bg-green-900/30' : 'text-green-700 border-green-900 hover:border-green-700'}`}>
+                    {l || 'ALL'}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1 flex-1 min-w-[150px]">
+                <Search className="w-3 h-3 text-green-700" />
+                <input value={logSearch} onChange={e => setLogSearch(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && loadServerLogs()}
+                  placeholder="Filter logs..."
+                  className="flex-1 bg-black/60 border border-green-900 text-green-300 px-2 py-1 text-xs font-mono focus:border-green-500 outline-none placeholder:text-green-900" />
+              </div>
+              <button onClick={loadServerLogs}
+                className="flex items-center gap-1 px-2 py-1 border border-green-900 text-green-600 hover:border-green-500 hover:text-green-400 transition-all">
+                <RefreshCw className={`w-3 h-3 ${logLoading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+
+            {/* Log entries */}
+            <div className="flex-grow overflow-y-auto custom-scrollbar font-mono text-xs space-y-0">
+              {serverLogs.length === 0 && !logLoading ? (
+                <div className="flex items-center justify-center py-8 text-green-700 text-sm">No log entries found</div>
+              ) : (
+                serverLogs.map((entry, i) => (
+                  <div key={i} className="flex items-start gap-2 py-0.5 border-b border-green-900/10 hover:bg-green-900/5">
+                    <span className="text-green-800 shrink-0 w-[85px]">{entry.timestamp.slice(11, 23)}</span>
+                    <span className={`shrink-0 w-[42px] font-bold ${
+                      entry.level === 'ERROR' ? 'text-red-500' :
+                      entry.level === 'WARN' ? 'text-yellow-500' :
+                      entry.level === 'DEBUG' ? 'text-blue-500' :
+                      'text-green-600'
+                    }`}>{entry.level}</span>
+                    <span className="text-green-700 shrink-0 max-w-[180px] truncate">{entry.module}</span>
+                    <span className="text-green-400 break-all">{entry.message}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        ) : (
+        <>
         {/* 1. Target Selectors Header */}
         <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-3 sm:gap-4 text-green-500 font-mono uppercase p-3 sm:p-4 border border-green-900/50 bg-black/40 flex-none">
             {/* Title + Status indicator row */}
@@ -289,6 +375,8 @@ export const ConsoleView: React.FC<ConsoleViewProps> = ({ logs: initialLogs, tar
                 </div>
             </div>
         </div>
+        </>
+        )}
     </div>
   );
 };

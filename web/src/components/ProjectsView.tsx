@@ -5,9 +5,12 @@ import {
   BarChart3, Activity, Clock, Wrench,
 } from 'lucide-react';
 import { AppTab, AgentSession } from '../types';
+import { HistoryEntry, HistoryResponse } from '../services/history';
+import { fetchProjectHistory } from '../services/projects';
 import {
   ProjectInfo, fetchProjects, deleteProject, createNewSession,
   createProjectService, createProjectEnvVar as createProjEnvVarApi,
+  fetchProjectServices, ProjectService,
   // Global env vars
   GlobalEnvVar, fetchGlobalEnvVars, createGlobalEnvVar, updateGlobalEnvVar, deleteGlobalEnvVar,
   // Project env vars
@@ -128,6 +131,13 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsRange, setStatsRange] = useState('24h');
 
+  // Activity feed state
+  const [recentActivity, setRecentActivity] = useState<HistoryEntry[]>([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+
+  // Project services (for worktree computed ports)
+  const [projectServices, setProjectServices] = useState<ProjectService[]>([]);
+
   // Fetch projects
   const loadProjects = useCallback(async () => {
     const p = await fetchProjects();
@@ -198,6 +208,28 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
       });
     }
   }, [selectedProject, detailTab, statsRange, getSessionName]);
+
+  // Load recent activity for overview tab
+  useEffect(() => {
+    if (selectedProject && detailTab === 'overview') {
+      setActivityLoading(true);
+      fetchProjectHistory({ project: selectedProject.git_dir, per_page: 10 })
+        .then((res: HistoryResponse) => {
+          const entries = res.groups.flatMap(g => g.records);
+          setRecentActivity(entries.slice(0, 10));
+          setActivityLoading(false);
+        })
+        .catch(() => setActivityLoading(false));
+    }
+  }, [selectedProject, detailTab]);
+
+  // Load project services for worktree port display
+  useEffect(() => {
+    if (selectedProject && (detailTab === 'worktrees' || detailTab === 'overview')) {
+      const sessionName = getSessionName(selectedProject);
+      fetchProjectServices(sessionName).then(setProjectServices);
+    }
+  }, [selectedProject, detailTab, getSessionName]);
 
   // Check if a project has active sessions
   const isProjectActive = useCallback((project: ProjectInfo) => {
@@ -736,6 +768,69 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
               <div className="text-green-800 text-xs font-mono">Could not read git repository information.</div>
             </div>
           )}
+
+          {/* Quick Info */}
+          {selectedProject && (
+            <div className="retro-border bg-black/40 px-4 py-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Activity className="w-4 h-4 text-green-600" />
+                <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold">QUICK INFO</span>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono">
+                <div>
+                  <div className="text-green-800 text-[9px] tracking-wider uppercase">Sessions</div>
+                  <div className="text-green-400">{sessions.filter(s => s.gitDir === selectedProject.git_dir).length} active</div>
+                </div>
+                <div>
+                  <div className="text-green-800 text-[9px] tracking-wider uppercase">Worktrees</div>
+                  <div className="text-green-400">{worktreeSlots.length} slots</div>
+                </div>
+                <div>
+                  <div className="text-green-800 text-[9px] tracking-wider uppercase">Total Tasks</div>
+                  <div className="text-green-400">{selectedProject.history_count}</div>
+                </div>
+                <div>
+                  <div className="text-green-800 text-[9px] tracking-wider uppercase">Last Active</div>
+                  <div className="text-green-400">{timeAgo(selectedProject.last_active_at)}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Recent Activity */}
+          <div className="border border-green-900/50">
+            <div className="flex items-center px-3 py-2 border-b border-green-900/50 bg-green-900/10">
+              <Clock className="w-3.5 h-3.5 text-green-700 mr-2" />
+              <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold">RECENT ACTIVITY</span>
+            </div>
+            {activityLoading ? (
+              <div className="flex items-center justify-center py-6">
+                <Loader className="w-4 h-4 text-green-700 animate-spin mr-2" />
+                <span className="text-green-700 text-xs font-mono">Loading...</span>
+              </div>
+            ) : recentActivity.length > 0 ? (
+              recentActivity.map(entry => (
+                <div key={entry.id} className="flex items-start gap-3 px-3 py-2.5 border-b border-green-900/20 hover:bg-green-900/5">
+                  <div className="mt-0.5 w-5 h-5 rounded-full bg-green-900/30 flex items-center justify-center shrink-0">
+                    <span className="text-green-500 text-[10px]">&#10003;</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-green-400 font-mono text-sm truncate">{entry.summary}</div>
+                    <div className="flex items-center gap-3 mt-0.5 text-[10px] font-mono tracking-wider text-green-700">
+                      <span>{entry.window}</span>
+                      <span>{Math.floor(entry.duration_seconds / 60)}m {Math.floor(entry.duration_seconds % 60)}s</span>
+                    </div>
+                  </div>
+                  <div className="text-green-800 text-[10px] font-mono shrink-0">{timeAgo(entry.started_at)}</div>
+                </div>
+              ))
+            ) : (
+              <div className="flex flex-col items-center py-6">
+                <Clock className="w-6 h-6 text-green-900 mb-1" />
+                <div className="text-green-700 text-xs font-mono">No recent activity</div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -941,6 +1036,17 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
+              {/* Computed ports from services */}
+              {projectServices.length > 0 && (
+                <div className="flex items-center gap-3 mt-1.5 mb-1 flex-wrap">
+                  {projectServices.map(svc => (
+                    <span key={svc.id} className="text-[10px] font-mono tracking-wider">
+                      <span className="text-green-700">{svc.env_key}</span>{' '}
+                      <span className="text-green-400">{svc.base_value + s.slot}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="text-green-700 font-mono text-xs truncate">{s.worktree_path || '--'}</div>
             </div>
           ))}

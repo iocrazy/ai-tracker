@@ -236,3 +236,22 @@ export async function listStreams(): Promise<StreamEntry[]> {
   const data = await response.json();
   return data.streams || [];
 }
+
+// Log viewer API
+export interface LogEntry {
+  timestamp: string;
+  level: string;
+  module: string;
+  message: string;
+}
+
+export async function fetchLogs(params: { limit?: number; level?: string; search?: string } = {}): Promise<{ entries: LogEntry[]; total: number }> {
+  const searchParams = new URLSearchParams();
+  if (params.limit) searchParams.set('limit', String(params.limit));
+  if (params.level) searchParams.set('level', params.level);
+  if (params.search) searchParams.set('search', params.search);
+
+  const response = await authFetch(`${API_BASE}/logs?${searchParams}`);
+  if (!response.ok) return { entries: [], total: 0 };
+  return response.json();
+}

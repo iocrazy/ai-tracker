@@ -29,7 +29,7 @@ use anyhow::Result;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, State,
+        DefaultBodyLimit, Query, State,
     },
     http::{header, Method, Request, StatusCode},
     middleware::{self, Next},
@@ -1544,6 +1544,99 @@ async fn health_check(
 }
 
 // ============================================================================
+// Log Viewer
+// ============================================================================
+
+#[derive(Deserialize)]
+struct LogQuery {
+    #[serde(default = "default_log_limit")]
+    limit: usize,
+    #[serde(default)]
+    level: Option<String>,
+    #[serde(default)]
+    search: Option<String>,
+}
+
+fn default_log_limit() -> usize { 100 }
+
+#[derive(Serialize)]
+struct LogEntry {
+    timestamp: String,
+    level: String,
+    module: String,
+    message: String,
+}
+
+async fn get_logs(
+    Query(params): Query<LogQuery>,
+) -> Json<serde_json::Value> {
+    // Try known log file locations
+    let log_paths = [
+        "/opt/homebrew/var/log/agent-tracker-server.log",
+        &format!("{}/.config/agent-tracker/logs/tracker-server.log", std::env::var("HOME").unwrap_or_default()),
+    ];
+
+    let log_path = log_paths.iter().find(|p| std::path::Path::new(p).exists());
+    let Some(log_path) = log_path else {
+        return Json(serde_json::json!({ "entries": [], "error": "Log file not found" }));
+    };
+
+    // Read last N*3 lines (since we filter, read more than needed)
+    let read_limit = params.limit * 3;
+    let output = std::process::Command::new("tail")
+        .args(["-n", &read_limit.to_string(), log_path])
+        .output();
+
+    let Ok(output) = output else {
+        return Json(serde_json::json!({ "entries": [], "error": "Failed to read log file" }));
+    };
+
+    let content = String::from_utf8_lossy(&output.stdout);
+    // Strip ANSI escape codes
+    let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+
+    let mut entries: Vec<LogEntry> = Vec::new();
+    let level_filter: Option<String> = params.level.as_deref().map(|l: &str| l.to_uppercase());
+    let search_filter: Option<String> = params.search.as_deref().map(|s: &str| s.to_lowercase());
+
+    for line in content.lines() {
+        let clean = ansi_re.replace_all(line, "").to_string();
+        // Parse tracing format: "2026-02-16T01:09:38.608110Z  INFO tracker_server::agent: message"
+        // Use split_whitespace to handle variable spacing
+        let parts: Vec<&str> = clean.splitn(4, |c: char| c.is_whitespace()).filter(|s| !s.is_empty()).collect();
+        if parts.len() < 3 { continue; }
+
+        let timestamp = parts[0].to_string();
+        let level = parts[1].to_string();
+        let rest = if parts.len() >= 3 { parts[2..].join(" ") } else { String::new() };
+        let (module, message) = if let Some(idx) = rest.find(": ") {
+            (rest[..idx].to_string(), rest[idx+2..].to_string())
+        } else {
+            (String::new(), rest)
+        };
+
+        // Apply filters
+        if let Some(ref lf) = level_filter {
+            if &level != lf { continue; }
+        }
+        if let Some(ref sf) = search_filter {
+            if !message.to_lowercase().contains(sf) && !module.to_lowercase().contains(sf) { continue; }
+        }
+
+        entries.push(LogEntry { timestamp, level, module, message });
+    }
+
+    // Take last N entries (most recent)
+    let total = entries.len();
+    let entries: Vec<LogEntry> = entries.into_iter().rev().take(params.limit).collect::<Vec<_>>().into_iter().rev().collect();
+
+    Json(serde_json::json!({
+        "entries": entries,
+        "total": total,
+    }))
+}
+
+// ============================================================================
 // WebSocket Handler
 // ============================================================================
 
@@ -1954,6 +2047,7 @@ async fn main() -> Result<()> {
         .route("/api/auth/verify", get(verify_auth))
         // Health check (no auth required — bypassed in auth_middleware)
         .route("/api/health", get(health_check))
+        .route("/api/logs", get(get_logs))
         // WebSocket
         .route("/ws", get(ws_handler))
         // Auth middleware (applied before CORS so preflight OPTIONS bypass auth)

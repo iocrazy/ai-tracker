@@ -20,6 +20,31 @@ import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2 } from 'l
 import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
+// localStorage cache keys
+const CACHE_KEY_STATE = 'at-cache-state';
+const CACHE_KEY_TMUX = 'at-cache-tmux';
+const CACHE_KEY_TS = 'at-cache-timestamp';
+const CACHE_MAX_AGE = 1000 * 60 * 30; // 30 minutes
+
+function saveCache(state: BackendState, tmuxWindows: any[]) {
+  try {
+    localStorage.setItem(CACHE_KEY_STATE, JSON.stringify(state));
+    localStorage.setItem(CACHE_KEY_TMUX, JSON.stringify(tmuxWindows));
+    localStorage.setItem(CACHE_KEY_TS, String(Date.now()));
+  } catch { /* quota exceeded — ignore */ }
+}
+
+function loadCache(): { state: BackendState; tmuxWindows: any[] } | null {
+  try {
+    const ts = Number(localStorage.getItem(CACHE_KEY_TS) || '0');
+    if (Date.now() - ts > CACHE_MAX_AGE) return null;
+    const state = JSON.parse(localStorage.getItem(CACHE_KEY_STATE) || 'null');
+    const tmux = JSON.parse(localStorage.getItem(CACHE_KEY_TMUX) || 'null');
+    if (state && tmux) return { state, tmuxWindows: tmux };
+  } catch { /* corrupt cache — ignore */ }
+  return null;
+}
+
 const App: React.FC = () => {
   // Auth State: null = checking, true = authenticated, false = needs login
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
@@ -45,6 +70,7 @@ const App: React.FC = () => {
   const [retryCount, setRetryCount] = useState(0);
   const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const [healthUptime, setHealthUptime] = useState<string>('');
+  const [usingCache, setUsingCache] = useState(false);
 
   // Check existing token on mount
   useEffect(() => {
@@ -83,7 +109,11 @@ const App: React.FC = () => {
     }
 
     setIsConnected(true);
+    setUsingCache(false);
     latestStateRef.current = msg.state;
+
+    // Cache for offline use
+    saveCache(msg.state, msg.tmux_windows);
   }, []);
 
   // Fetch Claude status for all windows periodically
@@ -194,13 +224,25 @@ const App: React.FC = () => {
         setTimeline(mapHistoryToTimeline(state.history));
         setConsoleLogs(generateConsoleLogs(state));
         setIsConnected(true);
+        setUsingCache(false);
+        saveCache(state, tmuxWindows);
+      })
+      .catch(err => {
+        console.error('Failed to fetch initial state:', err);
+        // Fallback to cached data when server is unreachable
+        const cached = loadCache();
+        if (cached) {
+          latestStateRef.current = cached.state;
+          setSessions(mapTmuxToSessions(cached.tmuxWindows, cached.state.tasks));
+          setTimeline(mapHistoryToTimeline(cached.state.history));
+          setConsoleLogs(generateConsoleLogs(cached.state));
+          setUsingCache(true);
+        }
+        setConsoleLogs(prev => [...prev, { id: `err-${Date.now()}`, type: 'system', text: `> ERROR: ${err.message}` }]);
       });
     // Fetch projects for Command Palette
     fetchProjects().then(p => setAllProjects(p))
-      .catch(err => {
-        console.error('Failed to fetch initial state:', err);
-        setConsoleLogs(prev => [...prev, { id: `err-${Date.now()}`, type: 'system', text: `> ERROR: ${err.message}` }]);
-      });
+      .catch(() => {});
 
     // WebSocket for real-time updates (state + stream + chat)
     wsRef.current = connectWebSocket({
@@ -734,6 +776,14 @@ const App: React.FC = () => {
                     </button>
                 ))}
             </nav>
+
+            {/* Offline cache banner */}
+            {usingCache && (
+              <div className="mx-2 md:mx-4 mb-2 px-3 py-1.5 rounded border border-yellow-700/60 bg-yellow-900/30 text-yellow-400 text-xs font-mono tracking-wider flex items-center gap-2">
+                <span className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse flex-shrink-0"></span>
+                OFFLINE — showing cached data
+              </div>
+            )}
 
             {/* Main Content Area - Add bottom padding for fixed nav on mobile */}
             <main className="flex-1 overflow-y-auto min-h-0 animate-[fadeIn_0.3s_ease-out] pb-24 xl:pb-10 px-2 md:px-4">

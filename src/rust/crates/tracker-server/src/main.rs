@@ -152,6 +152,8 @@ pub(crate) struct AppState {
     auth_token: String,
     /// Allowed CORS origins
     allowed_origins: Vec<String>,
+    /// Server start time (for uptime)
+    start_time: std::time::Instant,
 }
 
 impl AppState {
@@ -168,6 +170,7 @@ impl AppState {
             chat_watcher: chat_watcher::ChatWatcher::new(),
             auth_token,
             allowed_origins,
+            start_time: std::time::Instant::now(),
         })
     }
 
@@ -1413,7 +1416,7 @@ async fn auth_middleware(
     if !path.starts_with("/api/") && !path.starts_with("/ws") {
         return next.run(req).await;
     }
-    if path == "/health" {
+    if path == "/health" || path == "/api/health" {
         return next.run(req).await;
     }
 
@@ -1457,6 +1460,87 @@ async fn auth_middleware(
 /// Verify auth token (if middleware passes, token is valid)
 async fn verify_auth() -> Json<serde_json::Value> {
     Json(serde_json::json!({"authenticated": true}))
+}
+
+// ============================================================================
+// Health Check
+// ============================================================================
+
+async fn health_check(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let start = std::time::Instant::now();
+    let mut checks = serde_json::Map::new();
+    let mut overall = "healthy";
+
+    // Check tmux server
+    let tmux_ok = std::process::Command::new(agent::TMUX_BIN)
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+        .map(|o| {
+            let count = String::from_utf8_lossy(&o.stdout).lines().count();
+            checks.insert("tmux".into(), serde_json::json!({
+                "status": if o.status.success() { "ok" } else { "error" },
+                "sessions": count,
+            }));
+            o.status.success()
+        })
+        .unwrap_or_else(|_| {
+            checks.insert("tmux".into(), serde_json::json!({"status": "error", "message": "tmux not found"}));
+            false
+        });
+
+    // Check database
+    let db_ok = {
+        let server_state = state.state.lock().unwrap();
+        match server_state.db.conn.query_row("PRAGMA integrity_check", [], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(result) if result == "ok" => {
+                let db_path = db::default_db_path();
+                let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+                let size_str = if size > 1024 * 1024 {
+                    format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
+                } else {
+                    format!("{:.0}KB", size as f64 / 1024.0)
+                };
+                checks.insert("database".into(), serde_json::json!({"status": "ok", "size": size_str}));
+                true
+            }
+            Ok(result) => {
+                checks.insert("database".into(), serde_json::json!({"status": "degraded", "message": result}));
+                false
+            }
+            Err(e) => {
+                checks.insert("database".into(), serde_json::json!({"status": "error", "message": e.to_string()}));
+                false
+            }
+        }
+    };
+
+    // Uptime (from process start)
+    let uptime_secs = state.start_time.elapsed().as_secs();
+    let uptime_str = if uptime_secs >= 86400 {
+        format!("{}d {}h {}m", uptime_secs / 86400, (uptime_secs % 86400) / 3600, (uptime_secs % 3600) / 60)
+    } else if uptime_secs >= 3600 {
+        format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
+    } else {
+        format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
+    };
+    checks.insert("uptime".into(), serde_json::json!(uptime_str));
+
+    // Response time
+    let response_ms = start.elapsed().as_millis();
+
+    if !tmux_ok || !db_ok {
+        overall = if tmux_ok || db_ok { "degraded" } else { "unhealthy" };
+    }
+
+    Json(serde_json::json!({
+        "status": overall,
+        "checks": checks,
+        "response_ms": response_ms,
+    }))
 }
 
 // ============================================================================
@@ -1868,6 +1952,8 @@ async fn main() -> Result<()> {
         .route("/api/stream/list", get(stream_list))
         // Auth
         .route("/api/auth/verify", get(verify_auth))
+        // Health check (no auth required — bypassed in auth_middleware)
+        .route("/api/health", get(health_check))
         // WebSocket
         .route("/ws", get(ws_handler))
         // Auth middleware (applied before CORS so preflight OPTIONS bypass auth)

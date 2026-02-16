@@ -17,7 +17,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2 } from 'lucide-react';
-import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession } from './services/api';
+import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 const App: React.FC = () => {
@@ -39,6 +39,12 @@ const App: React.FC = () => {
   // Command Palette state
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [allProjects, setAllProjects] = useState<ProjectInfo[]>([]);
+
+  // Connection + Health state
+  const [connStatus, setConnStatus] = useState<ConnectionStatus>('connected');
+  const [retryCount, setRetryCount] = useState(0);
+  const [healthStatus, setHealthStatus] = useState<string | null>(null);
+  const [healthUptime, setHealthUptime] = useState<string>('');
 
   // Check existing token on mount
   useEffect(() => {
@@ -201,6 +207,12 @@ const App: React.FC = () => {
       onStateUpdate: handleRealtimeUpdate,
       onStreamChunk: handleStreamChunk,
       onChatMessage: handleChatMessage,
+      onConnectionChange: (status, retry) => {
+        setConnStatus(status);
+        setRetryCount(retry || 0);
+        if (status === 'connected') setIsConnected(true);
+        else setIsConnected(false);
+      },
     });
 
     return () => {
@@ -209,7 +221,23 @@ const App: React.FC = () => {
       }
     };
   }, [isAuthenticated, handleRealtimeUpdate, handleStreamChunk, handleChatMessage]);
-  
+
+  // Health polling (every 30s)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const poll = () => {
+      fetchHealth().then(h => {
+        if (h) {
+          setHealthStatus(h.status);
+          setHealthUptime(h.checks?.uptime || '');
+        }
+      });
+    };
+    poll();
+    const interval = setInterval(poll, 30000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated]);
+
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalTitle, setModalTitle] = useState('');
@@ -646,15 +674,37 @@ const App: React.FC = () => {
 
                 <div className="flex flex-col items-end gap-0.5 md:gap-1">
                     <div className="flex items-center gap-1.5 md:gap-3 bg-black/40 px-2 md:px-4 py-1 md:py-2 border border-green-900 rounded-full">
-                        <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500 shadow-[0_0_8px_#22c55e] animate-pulse' : 'bg-yellow-500 shadow-[0_0_8px_#eab308] animate-pulse'}`}></div>
-                        <span className={`hidden sm:inline font-bold tracking-wider md:tracking-widest text-xs md:text-sm lg:text-lg retro-text-shadow ${isConnected ? 'text-green-400' : 'text-yellow-400'}`}>
-                            {isConnected ? 'ONLINE' : 'CONNECTING...'}
+                        <div className={`w-3 h-3 rounded-full ${
+                          connStatus === 'connected' && healthStatus !== 'degraded'
+                            ? 'bg-green-500 shadow-[0_0_8px_#22c55e] animate-pulse'
+                            : connStatus === 'connected' && healthStatus === 'degraded'
+                            ? 'bg-yellow-500 shadow-[0_0_8px_#eab308] animate-pulse'
+                            : connStatus === 'reconnecting'
+                            ? 'bg-orange-500 shadow-[0_0_8px_#f97316] animate-pulse'
+                            : 'bg-red-500 shadow-[0_0_8px_#ef4444] animate-pulse'
+                        }`}></div>
+                        <span className={`hidden sm:inline font-bold tracking-wider md:tracking-widest text-xs md:text-sm lg:text-lg retro-text-shadow ${
+                          connStatus === 'connected' && healthStatus !== 'degraded'
+                            ? 'text-green-400'
+                            : connStatus === 'connected' && healthStatus === 'degraded'
+                            ? 'text-yellow-400'
+                            : connStatus === 'reconnecting'
+                            ? 'text-orange-400'
+                            : 'text-red-400'
+                        }`}>
+                            {connStatus === 'connected' && healthStatus !== 'degraded'
+                              ? 'ONLINE'
+                              : connStatus === 'connected' && healthStatus === 'degraded'
+                              ? 'DEGRADED'
+                              : connStatus === 'reconnecting'
+                              ? `RETRY #${retryCount}`
+                              : 'OFFLINE'}
                         </span>
                     </div>
                     {/* Logged in user display - hidden on small screens */}
                     <div className="hidden sm:flex text-green-800 font-mono text-xs tracking-widest items-center gap-2">
                         <span className="w-1.5 h-1.5 bg-green-700 rounded-full"></span>
-                        OP: {currentUser.toUpperCase()}
+                        OP: {currentUser.toUpperCase()}{healthUptime ? ` | UP ${healthUptime}` : ''}
                     </div>
                 </div>
             </header>

@@ -107,15 +107,30 @@ export interface StreamMessage {
 }
 
 // WebSocket callbacks
+export type ConnectionStatus = 'connected' | 'reconnecting' | 'offline';
+
 interface WebSocketCallbacks {
   onStateUpdate: (msg: RealtimeMessage) => void;
   onStreamChunk?: (chunk: StreamChunk) => void;
   onChatMessage?: (event: ChatMessageEvent) => void;
+  onConnectionChange?: (status: ConnectionStatus, retryCount?: number) => void;
 }
+
+// Reconnection state (module-level so it persists across calls)
+let _retryCount = 0;
+let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+const BASE_DELAY = 1000;
+const MAX_DELAY = 30000;
 
 export function connectWebSocket(
   callbacksOrOnMessage: WebSocketCallbacks | ((msg: RealtimeMessage) => void)
 ): WebSocket {
+  // Clear any pending reconnect timer
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
+
   const token = getAuthToken();
   const wsUrl = token ? `${WS_BASE}?token=${encodeURIComponent(token)}` : WS_BASE;
   const ws = new WebSocket(wsUrl);
@@ -127,6 +142,8 @@ export function connectWebSocket(
 
   ws.onopen = () => {
     console.log('[WS] Connected to tracker-server');
+    _retryCount = 0;
+    callbacks.onConnectionChange?.('connected');
   };
 
   ws.onmessage = (event) => {
@@ -161,8 +178,11 @@ export function connectWebSocket(
   };
 
   ws.onclose = () => {
-    console.log('[WS] Disconnected, reconnecting in 3s...');
-    setTimeout(() => connectWebSocket(callbacks), 3000);
+    _retryCount++;
+    const delay = Math.min(BASE_DELAY * Math.pow(2, _retryCount - 1), MAX_DELAY) + Math.random() * 1000;
+    console.log(`[WS] Disconnected, reconnecting in ${(delay / 1000).toFixed(1)}s (attempt #${_retryCount})...`);
+    callbacks.onConnectionChange?.('reconnecting', _retryCount);
+    _reconnectTimer = setTimeout(() => connectWebSocket(callbacks), delay);
   };
 
   ws.onerror = (error) => {
@@ -170,6 +190,17 @@ export function connectWebSocket(
   };
 
   return ws;
+}
+
+// Health check API (no auth required)
+export async function fetchHealth(): Promise<{ status: string; checks: Record<string, any>; response_ms: number } | null> {
+  try {
+    const res = await fetch(`${API_BASE}/health`);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
 }
 
 // Stream control APIs

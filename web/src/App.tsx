@@ -113,6 +113,9 @@ const App: React.FC = () => {
     if (hasChange('tasks')) {
       setConsoleLogs(generateConsoleLogs(msg.state));
     }
+    if (hasChange('history')) {
+      setTimeline(mapHistoryToTimeline(msg.state.history));
+    }
 
     setIsConnected(true);
     setUsingCache(false);

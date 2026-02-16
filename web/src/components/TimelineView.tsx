@@ -5,6 +5,82 @@ import { fetchHistory, fetchSessions, fetchProjects, fetchProjectHistory, Histor
 import { SearchHighlight } from './SearchHighlight';
 import { MarkdownText } from './MarkdownText';
 
+// Memoized timeline item — only re-renders when its own props change
+const TimelineItem = React.memo<{
+  event: TimelineEvent;
+  isSelected: boolean;
+  deepQuery: string;
+  onSelect: () => void;
+  itemRef: (el: HTMLDivElement | null) => void;
+}>(({ event, isSelected, deepQuery, onSelect, itemRef }) => (
+  <div
+    ref={itemRef}
+    onClick={onSelect}
+    className={`relative group cursor-pointer transition-all duration-200 ${isSelected ? 'scale-[1.02] translate-x-2' : ''}`}
+  >
+    {isSelected && (
+      <div className="absolute -left-[60px] top-4 text-green-400 animate-pulse font-bold text-xl">
+        ►
+      </div>
+    )}
+    <div className={`
+      absolute -left-[39px] top-1 w-5 h-5 rounded-full flex items-center justify-center border-2 transition-all z-10
+      ${isSelected
+        ? 'bg-green-500 border-green-300 scale-125 shadow-[0_0_15px_rgba(34,197,94,0.8)]'
+        : 'bg-[#050505] border-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.5)]'
+      }
+    `}>
+      <div className={`w-2 h-2 rounded-full ${isSelected ? 'bg-white' : 'bg-cyan-400'}`}></div>
+    </div>
+    <div className={`
+      p-4 rounded border transition-all -ml-4 pl-4
+      ${isSelected
+        ? 'bg-green-900/30 border-green-500 shadow-[inset_0_0_20px_rgba(34,197,94,0.1)]'
+        : 'border-transparent hover:border-green-800/50 hover:bg-green-900/10'
+      }
+    `}>
+      <div className="flex flex-col md:flex-row md:items-start gap-2 md:gap-6">
+        <div className={`font-mono text-lg min-w-[60px] pt-0.5 transition-colors ${isSelected ? 'text-green-300 font-bold' : 'text-green-600'}`}>
+          {event.time}
+        </div>
+        <div className="flex-grow min-w-0">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-2">
+            <span className={`font-bold text-lg sm:text-xl tracking-wider ${isSelected ? 'text-white' : 'text-green-300'}`}>
+              {event.user}
+            </span>
+            <div className={`hidden sm:block h-px w-12 transition-colors ${isSelected ? 'bg-green-400' : 'bg-green-800'}`}></div>
+            <span className={`font-bold tracking-widest uppercase text-xs sm:text-sm border px-2 py-0.5 transition-all
+              ${isSelected
+                ? 'text-green-900 bg-green-400 border-green-400'
+                : 'text-cyan-400 border-cyan-900/50 bg-cyan-900/10'
+              }
+            `}>
+              {event.action}
+            </span>
+            {event.messageCount !== undefined && event.messageCount > 0 && (
+              <span className="flex items-center gap-1 text-xs text-green-700">
+                <MessageSquare className="w-3 h-3" />
+                {event.messageCount}
+              </span>
+            )}
+          </div>
+          <div className={`text-base sm:text-lg font-sans tracking-wide leading-relaxed max-w-3xl transition-colors
+            ${isSelected ? 'text-green-100' : 'text-green-500/80'}
+          `}>
+            <MarkdownText
+              content={event.description}
+              searchQuery={deepQuery}
+              onRegisterMatch={deepQuery ? () => {} : undefined}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+));
+
+TimelineItem.displayName = 'TimelineItem';
+
 interface TimelineViewProps {
   events: TimelineEvent[];
   onViewDetails: (event: TimelineEvent) => void;
@@ -23,6 +99,7 @@ const TIME_RANGE_LABELS: Record<TimeRange, string> = {
 
 export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, onViewDetails, isActive }) => {
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showHelp, setShowHelp] = useState(false);
   const [timeRange, setTimeRange] = useState<TimeRange>('today');
@@ -85,6 +162,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
     setDeepQuery('');
   }, []);
 
+  // Debounce local search filter (150ms)
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 150);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   // Fetch projects on mount
   useEffect(() => {
     fetchProjects().then(setProjects).catch(() => {});
@@ -139,18 +222,19 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
 
   // Filter events based on search query (local filter for already fetched data)
   const filteredEvents = useMemo(() => {
-    if (!search) return events;
+    if (!debouncedSearch) return events;
+    const q = debouncedSearch.toLowerCase();
     return events.filter(e =>
-      e.description.toLowerCase().includes(search.toLowerCase()) ||
-      e.user.toLowerCase().includes(search.toLowerCase()) ||
-      e.action.toLowerCase().includes(search.toLowerCase())
+      e.description.toLowerCase().includes(q) ||
+      e.user.toLowerCase().includes(q) ||
+      e.action.toLowerCase().includes(q)
     );
-  }, [events, search]);
+  }, [events, debouncedSearch]);
 
   // Reset selection when filter changes
   useEffect(() => {
     setSelectedIndex(0);
-  }, [search, timeRange, page]);
+  }, [debouncedSearch, timeRange, page]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -460,90 +544,16 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
                 ) : filteredEvents.length === 0 ? (
                     <div className="text-green-800 font-mono italic p-4">NO_RECORDS_FOUND</div>
                 ) : (
-                    filteredEvents.map((event, index) => {
-                        const isSelected = index === selectedIndex;
-                        return (
-                            <div
-                                key={event.id}
-                                ref={(el) => { itemRefs.current[index] = el; }}
-                                onClick={() => {
-                                    setSelectedIndex(index);
-                                    onViewDetails(event);
-                                }}
-                                className={`relative group cursor-pointer transition-all duration-200 ${isSelected ? 'scale-[1.02] translate-x-2' : ''}`}
-                            >
-                                {/* Selection Indicator (Left Arrow) */}
-                                {isSelected && (
-                                    <div className="absolute -left-[60px] top-4 text-green-400 animate-pulse font-bold text-xl">
-                                        ►
-                                    </div>
-                                )}
-
-                                {/* Time Marker Dot */}
-                                <div className={`
-                                    absolute -left-[39px] top-1 w-5 h-5 rounded-full flex items-center justify-center border-2 transition-all z-10
-                                    ${isSelected
-                                        ? 'bg-green-500 border-green-300 scale-125 shadow-[0_0_15px_rgba(34,197,94,0.8)]'
-                                        : 'bg-[#050505] border-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.5)]'
-                                    }
-                                `}>
-                                    <div className={`w-2 h-2 rounded-full ${isSelected ? 'bg-white' : 'bg-cyan-400'}`}></div>
-                                </div>
-
-                                {/* Interactive Card */}
-                                <div className={`
-                                    p-4 rounded border transition-all -ml-4 pl-4
-                                    ${isSelected
-                                        ? 'bg-green-900/30 border-green-500 shadow-[inset_0_0_20px_rgba(34,197,94,0.1)]'
-                                        : 'border-transparent hover:border-green-800/50 hover:bg-green-900/10'
-                                    }
-                                `}>
-                                    <div className="flex flex-col md:flex-row md:items-start gap-2 md:gap-6">
-                                        {/* Time */}
-                                        <div className={`font-mono text-lg min-w-[60px] pt-0.5 transition-colors ${isSelected ? 'text-green-300 font-bold' : 'text-green-600'}`}>
-                                            {event.time}
-                                        </div>
-
-                                        {/* Content */}
-                                        <div className="flex-grow min-w-0">
-                                            <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-2">
-                                                <span className={`font-bold text-lg sm:text-xl tracking-wider ${isSelected ? 'text-white' : 'text-green-300'}`}>
-                                                    {event.user}
-                                                </span>
-                                                <div className={`hidden sm:block h-px w-12 transition-colors ${isSelected ? 'bg-green-400' : 'bg-green-800'}`}></div>
-                                                <span className={`font-bold tracking-widest uppercase text-xs sm:text-sm border px-2 py-0.5 transition-all
-                                                    ${isSelected
-                                                        ? 'text-green-900 bg-green-400 border-green-400'
-                                                        : 'text-cyan-400 border-cyan-900/50 bg-cyan-900/10'
-                                                    }
-                                                `}>
-                                                    {event.action}
-                                                </span>
-
-                                                {/* Stats badges */}
-                                                {event.messageCount !== undefined && event.messageCount > 0 && (
-                                                  <span className="flex items-center gap-1 text-xs text-green-700">
-                                                    <MessageSquare className="w-3 h-3" />
-                                                    {event.messageCount}
-                                                  </span>
-                                                )}
-                                            </div>
-
-                                            <div className={`text-base sm:text-lg font-sans tracking-wide leading-relaxed max-w-3xl transition-colors
-                                                ${isSelected ? 'text-green-100' : 'text-green-500/80'}
-                                            `}>
-                                                <MarkdownText
-                                                  content={event.description}
-                                                  searchQuery={deepQuery}
-                                                  onRegisterMatch={deepQuery ? () => {} : undefined}
-                                                />
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })
+                    filteredEvents.map((event, index) => (
+                        <TimelineItem
+                          key={event.id}
+                          event={event}
+                          isSelected={index === selectedIndex}
+                          deepQuery={deepQuery}
+                          onSelect={() => { setSelectedIndex(index); onViewDetails(event); }}
+                          itemRef={(el) => { itemRefs.current[index] = el; }}
+                        />
+                    ))
                 )}
 
                 {/* End Marker */}

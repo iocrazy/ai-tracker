@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { TimelineEvent } from '../types';
-import { Search, X, RefreshCw, Download, ChevronDown, ChevronLeft, ChevronRight, MessageSquare, Wrench, FileSearch } from 'lucide-react';
-import { fetchHistory, fetchSessions, fetchProjects, fetchProjectHistory, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory, ProjectInfo } from '../services/api';
-import { SearchHighlight } from './SearchHighlight';
+import { Search, X, RefreshCw, Download, ChevronDown, ChevronLeft, ChevronRight, MessageSquare, FileSearch } from 'lucide-react';
+import { fetchProjectHistory, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory } from '../services/api';
 import { MarkdownText } from './MarkdownText';
+import { HistoryDetailModal } from './HistoryDetailModal';
 
 // Memoized timeline item — only re-renders when its own props change
 const TimelineItem = React.memo<{
@@ -81,9 +81,9 @@ const TimelineItem = React.memo<{
 
 TimelineItem.displayName = 'TimelineItem';
 
-interface TimelineViewProps {
-  events: TimelineEvent[];
-  onViewDetails: (event: TimelineEvent) => void;
+interface ProjectTimelineProps {
+  gitDir: string;
+  projectName: string;
   isActive: boolean;
 }
 
@@ -97,7 +97,7 @@ const TIME_RANGE_LABELS: Record<TimeRange, string> = {
   all: '全部',
 };
 
-export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, onViewDetails, isActive }) => {
+export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projectName, isActive }) => {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -116,12 +116,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
   const [deepSearchInput, setDeepSearchInput] = useState('');
   const [isDeepSearchOpen, setIsDeepSearchOpen] = useState(false);
 
-  // Project filter
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [selectedProject, setSelectedProject] = useState<string>('all');
-
   // Fetched history data
   const [historyData, setHistoryData] = useState<HistoryResponse | null>(null);
+
+  // History detail modal (self-contained)
+  const [detailId, setDetailId] = useState<number | null>(null);
+  const [detailFilePath, setDetailFilePath] = useState<string | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const deepSearchInputRef = useRef<HTMLInputElement>(null);
@@ -132,7 +132,6 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
   // Convert HistoryEntry to TimelineEvent
   const convertToTimelineEvent = useCallback((entry: HistoryEntry): TimelineEvent => {
     const startTime = entry.started_at ? new Date(entry.started_at) : new Date();
-    // Format: session:window (e.g., "1-tracker:main")
     const displayName = entry.session && entry.window
       ? `${entry.session}:${entry.window}`
       : entry.window || entry.session || 'Unknown';
@@ -142,12 +141,23 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
       user: displayName,
       action: 'COMPLETED',
       description: entry.summary || entry.completion_note || 'No description',
-      // Store extra data for detail view
       historyId: entry.id,
       filePath: entry.file_path,
       messageCount: entry.message_count,
       duration: entry.duration_seconds,
     };
+  }, []);
+
+  // View details handler
+  const handleViewDetails = useCallback((event: TimelineEvent) => {
+    if (event.filePath) {
+      setDetailFilePath(event.filePath);
+      setDetailId(null);
+    } else {
+      const id = event.historyId || parseInt(event.id);
+      setDetailId(id);
+      setDetailFilePath(null);
+    }
   }, []);
 
   // Deep search handlers
@@ -168,12 +178,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
     return () => clearTimeout(timer);
   }, [search]);
 
-  // Fetch projects on mount
-  useEffect(() => {
-    fetchProjects().then(setProjects).catch(() => {});
-  }, []);
-
-  // Fetch history data
+  // Fetch history data — always scoped to this project
   const loadHistory = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -181,20 +186,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
         range: timeRange,
         page,
         per_page: perPage,
+        project: gitDir,
       };
       if (deepQuery) {
         params.search = deepQuery;
       }
-
-      let data: HistoryResponse;
-      if (selectedProject !== 'all') {
-        // Fetch from project-specific DB
-        params.project = selectedProject;
-        data = await fetchProjectHistory(params);
-      } else {
-        // Default: fetch from JSONL sessions
-        data = await fetchSessions(params);
-      }
+      const data = await fetchProjectHistory(params);
       setHistoryData(data);
       setTotal(data.total);
     } catch (error) {
@@ -202,25 +199,35 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
     } finally {
       setIsLoading(false);
     }
-  }, [timeRange, page, perPage, deepQuery, selectedProject]);
+  }, [timeRange, page, perPage, deepQuery, gitDir]);
 
   // Initial load and refresh on filter change
   useEffect(() => {
     loadHistory();
   }, [loadHistory]);
 
+  // Reset state when project changes
+  useEffect(() => {
+    setPage(1);
+    setSearch('');
+    setDebouncedSearch('');
+    setDeepQuery('');
+    setDeepSearchInput('');
+    setIsDeepSearchOpen(false);
+    setSelectedIndex(0);
+  }, [gitDir]);
+
   // Convert history data to events
   const events = useMemo(() => {
-    if (!historyData) return propEvents;
-
+    if (!historyData) return [];
     const allEntries: HistoryEntry[] = [];
     for (const group of historyData.groups) {
       allEntries.push(...group.records);
     }
     return allEntries.map(convertToTimelineEvent);
-  }, [historyData, propEvents, convertToTimelineEvent]);
+  }, [historyData, convertToTimelineEvent]);
 
-  // Filter events based on search query (local filter for already fetched data)
+  // Filter events based on search query (local filter)
   const filteredEvents = useMemo(() => {
     if (!debouncedSearch) return events;
     const q = debouncedSearch.toLowerCase();
@@ -250,33 +257,31 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
   // Handle export
   const handleExport = useCallback(async () => {
     try {
-      const params: HistoryQueryParams = { range: timeRange };
+      const params: HistoryQueryParams = { range: timeRange, project: gitDir };
       if (deepQuery) params.search = deepQuery;
       const blob = await exportHistory(params, 'json');
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `history-${timeRange}-${new Date().toISOString().split('T')[0]}.json`;
+      a.download = `${projectName}-history-${timeRange}-${new Date().toISOString().split('T')[0]}.json`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (error) {
       console.error('Export failed:', error);
     }
-  }, [timeRange, deepQuery]);
+  }, [timeRange, deepQuery, gitDir, projectName]);
 
-  // Handle Keyboard Shortcuts
+  // Keyboard Shortcuts
   useEffect(() => {
     if (!isActive) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore navigation keys if typing in search inputs
       const isInFilter = document.activeElement === searchInputRef.current;
       const isInDeepSearch = document.activeElement === deepSearchInputRef.current;
       if ((isInFilter || isInDeepSearch) && e.key !== 'Escape' && e.key !== 'Enter') {
         return;
       }
 
-      // Enter in deep search submits
       if (isInDeepSearch && e.key === 'Enter') {
         e.preventDefault();
         handleDeepSearch();
@@ -284,7 +289,6 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
         return;
       }
 
-      // Shift+? to toggle help
       if (e.shiftKey && e.key === '?') {
         e.preventDefault();
         setShowHelp(prev => !prev);
@@ -315,8 +319,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
         case 'Enter':
           e.preventDefault();
           if (filteredEvents[selectedIndex]) {
-            onViewDetails(filteredEvents[selectedIndex]);
-            searchInputRef.current?.blur();
+            handleViewDetails(filteredEvents[selectedIndex]);
           }
           break;
         case 'r':
@@ -345,7 +348,6 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
             searchInputRef.current?.blur();
           }
           break;
-        // Page navigation
         case 'n':
           if (page < Math.ceil(total / perPage)) {
             setPage(p => p + 1);
@@ -361,7 +363,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isActive, filteredEvents, selectedIndex, onViewDetails, showHelp, showTimeRangeDropdown, isDeepSearchOpen, deepQuery, loadHistory, handleDeepSearch, closeDeepSearch, handleExport, page, total, perPage]);
+  }, [isActive, filteredEvents, selectedIndex, handleViewDetails, showHelp, showTimeRangeDropdown, isDeepSearchOpen, deepQuery, loadHistory, handleDeepSearch, closeDeepSearch, handleExport, page, total, perPage]);
 
   // Auto-scroll to selected item
   useEffect(() => {
@@ -374,138 +376,101 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
   const totalPages = Math.ceil(total / perPage);
 
   return (
-    <div className="retro-border bg-black/40 p-1 flex flex-col relative h-full overflow-hidden">
-        {/* Header - Sticky */}
-        <div className="p-3 sm:p-6 pb-3 sm:pb-4 border-b border-green-900/30 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sticky top-0 bg-black/95 z-40 backdrop-blur-sm flex-shrink-0">
-            {/* Time Range Dropdown */}
-            <div className="relative" ref={dropdownRef}>
-              <button
-                onClick={() => setShowTimeRangeDropdown(!showTimeRangeDropdown)}
-                className="bg-green-500 text-black text-xs sm:text-sm font-bold px-2 sm:px-3 py-1 font-pixel uppercase tracking-widest shadow-[0_0_10px_rgba(34,197,94,0.6)] flex items-center gap-2 hover:bg-green-400 transition-colors"
-              >
-                {TIME_RANGE_LABELS[timeRange]}
-                <ChevronDown className="w-4 h-4" />
-              </button>
+    <>
+      <div className="flex flex-col h-full overflow-hidden">
+        {/* Header */}
+        <div className="p-3 sm:p-4 pb-2 sm:pb-3 border-b border-green-900/30 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-black/95 flex-shrink-0">
+          {/* Time Range Dropdown */}
+          <div className="relative" ref={dropdownRef}>
+            <button
+              onClick={() => setShowTimeRangeDropdown(!showTimeRangeDropdown)}
+              className="bg-green-500 text-black text-xs sm:text-sm font-bold px-2 sm:px-3 py-1 font-pixel uppercase tracking-widest shadow-[0_0_10px_rgba(34,197,94,0.6)] flex items-center gap-2 hover:bg-green-400 transition-colors"
+            >
+              {TIME_RANGE_LABELS[timeRange]}
+              <ChevronDown className="w-4 h-4" />
+            </button>
 
-              {showTimeRangeDropdown && (
-                <div className="absolute top-full left-0 mt-1 bg-black border border-green-500 shadow-lg z-50">
-                  {(Object.keys(TIME_RANGE_LABELS) as TimeRange[]).map((range) => (
-                    <button
-                      key={range}
-                      onClick={() => {
-                        setTimeRange(range);
-                        setPage(1);
-                        setShowTimeRangeDropdown(false);
-                      }}
-                      className={`block w-full text-left px-4 py-2 text-sm font-mono hover:bg-green-900/30 transition-colors ${
-                        timeRange === range ? 'text-green-400 bg-green-900/20' : 'text-green-600'
-                      }`}
-                    >
-                      {TIME_RANGE_LABELS[range]}
-                    </button>
-                  ))}
-                </div>
+            {showTimeRangeDropdown && (
+              <div className="absolute top-full left-0 mt-1 bg-black border border-green-500 shadow-lg z-50">
+                {(Object.keys(TIME_RANGE_LABELS) as TimeRange[]).map((range) => (
+                  <button
+                    key={range}
+                    onClick={() => {
+                      setTimeRange(range);
+                      setPage(1);
+                      setShowTimeRangeDropdown(false);
+                    }}
+                    className={`block w-full text-left px-4 py-2 text-sm font-mono hover:bg-green-900/30 transition-colors ${
+                      timeRange === range ? 'text-green-400 bg-green-900/20' : 'text-green-600'
+                    }`}
+                  >
+                    {TIME_RANGE_LABELS[range]}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 sm:gap-4 w-full sm:w-auto">
+            {/* Search Box */}
+            <div className="flex items-center gap-2 group relative flex-1 sm:flex-initial">
+              <Search className="w-4 sm:w-5 h-4 sm:h-5 text-green-700" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="FILTER [/]"
+                className="bg-black border-b border-green-800 text-green-400 font-mono focus:outline-none focus:border-green-400 placeholder-green-900 w-full sm:w-48 md:w-64 py-1 text-sm sm:text-base"
+              />
+              {search && (
+                <button
+                  onClick={() => setSearch('')}
+                  className="absolute right-0 text-green-700 hover:text-green-400"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               )}
             </div>
 
-            <div className="flex items-center gap-2 sm:gap-4 w-full sm:w-auto">
-              {/* Search Box */}
-              <div className="flex items-center gap-2 group relative flex-1 sm:flex-initial">
-                  <Search className="w-4 sm:w-5 h-4 sm:h-5 text-green-700" />
-                  <input
-                      ref={searchInputRef}
-                      type="text"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      placeholder="FILTER [/]"
-                      className="bg-black border-b border-green-800 text-green-400 font-mono focus:outline-none focus:border-green-400 placeholder-green-900 w-full sm:w-48 md:w-64 py-1 text-sm sm:text-base"
-                  />
-                  {search && (
-                    <button
-                      onClick={() => setSearch('')}
-                      className="absolute right-0 text-green-700 hover:text-green-400"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  )}
-              </div>
-
-              {/* Action Buttons */}
-              <button
-                onClick={loadHistory}
-                disabled={isLoading}
-                className="p-2 text-green-600 hover:text-green-400 hover:bg-green-900/20 rounded transition-colors disabled:opacity-50"
-                title="刷新 [R]"
-              >
-                <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-              </button>
-              <button
-                onClick={handleExport}
-                className="p-2 text-green-600 hover:text-green-400 hover:bg-green-900/20 rounded transition-colors"
-                title="导出 [E]"
-              >
-                <Download className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => {
-                  setIsDeepSearchOpen(o => !o);
-                  if (!isDeepSearchOpen) {
-                    setTimeout(() => deepSearchInputRef.current?.focus(), 0);
-                  }
-                }}
-                className={`p-2 rounded transition-colors ${
-                  deepQuery
-                    ? 'text-yellow-400 bg-yellow-900/20 hover:text-yellow-300'
-                    : 'text-green-600 hover:text-green-400 hover:bg-green-900/20'
-                }`}
-                title="全文搜索 [S]"
-              >
-                <FileSearch className="w-4 h-4" />
-              </button>
-            </div>
-        </div>
-
-        {/* Project Filter Bar */}
-        {projects.length > 0 && (
-          <div className="px-3 sm:px-6 py-1.5 border-b border-green-900/30 bg-black/90 flex items-center gap-1 overflow-x-auto flex-shrink-0 scrollbar-hide">
+            {/* Action Buttons */}
             <button
-              onClick={() => { setSelectedProject('all'); setPage(1); }}
-              className={`px-2 py-0.5 text-xs font-mono whitespace-nowrap transition-colors ${
-                selectedProject === 'all'
-                  ? 'text-black bg-green-500 font-bold'
+              onClick={loadHistory}
+              disabled={isLoading}
+              className="p-2 text-green-600 hover:text-green-400 hover:bg-green-900/20 rounded transition-colors disabled:opacity-50"
+              title="刷新 [R]"
+            >
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={handleExport}
+              className="p-2 text-green-600 hover:text-green-400 hover:bg-green-900/20 rounded transition-colors"
+              title="导出 [E]"
+            >
+              <Download className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => {
+                setIsDeepSearchOpen(o => !o);
+                if (!isDeepSearchOpen) {
+                  setTimeout(() => deepSearchInputRef.current?.focus(), 0);
+                }
+              }}
+              className={`p-2 rounded transition-colors ${
+                deepQuery
+                  ? 'text-yellow-400 bg-yellow-900/20 hover:text-yellow-300'
                   : 'text-green-600 hover:text-green-400 hover:bg-green-900/20'
               }`}
+              title="全文搜索 [S]"
             >
-              ALL
+              <FileSearch className="w-4 h-4" />
             </button>
-            {projects.map((p) => {
-              const name = p.name || p.git_dir.split('/').pop() || p.git_dir;
-              return (
-                <button
-                  key={p.git_dir}
-                  onClick={() => { setSelectedProject(p.git_dir); setPage(1); }}
-                  className={`px-2 py-0.5 text-xs font-mono whitespace-nowrap transition-colors ${
-                    selectedProject === p.git_dir
-                      ? 'text-black bg-cyan-400 font-bold'
-                      : 'text-green-600 hover:text-green-400 hover:bg-green-900/20'
-                  }`}
-                  title={`${p.git_dir} (${p.history_count} tasks)`}
-                >
-                  {name}
-                  {p.history_count > 0 && (
-                    <span className={`ml-1 ${selectedProject === p.git_dir ? 'text-black/60' : 'text-green-800'}`}>
-                      ({p.history_count})
-                    </span>
-                  )}
-                </button>
-              );
-            })}
           </div>
-        )}
+        </div>
 
         {/* Deep Search Bar */}
         {isDeepSearchOpen && (
-          <div className="px-3 sm:px-6 py-2 border-b border-green-900/30 bg-black/90 flex items-center gap-2 flex-shrink-0">
+          <div className="px-3 sm:px-4 py-2 border-b border-green-900/30 bg-black/90 flex items-center gap-2 flex-shrink-0">
             <FileSearch className="w-4 h-4 text-yellow-500 flex-shrink-0" />
             <input
               ref={deepSearchInputRef}
@@ -536,34 +501,34 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
           </div>
         )}
 
-        {/* Full Page List Container */}
-        <div ref={containerRef} className="flex-grow p-3 sm:p-6 pl-6 sm:pl-10 overflow-y-auto">
-            <div className="relative border-l-2 border-green-800/30 pl-8 space-y-8 pb-10">
-                {isLoading && filteredEvents.length === 0 ? (
-                    <div className="text-green-600 font-mono p-4 animate-pulse">LOADING...</div>
-                ) : filteredEvents.length === 0 ? (
-                    <div className="text-green-800 font-mono italic p-4">NO_RECORDS_FOUND</div>
-                ) : (
-                    filteredEvents.map((event, index) => (
-                        <TimelineItem
-                          key={event.id}
-                          event={event}
-                          isSelected={index === selectedIndex}
-                          deepQuery={deepQuery}
-                          onSelect={() => { setSelectedIndex(index); onViewDetails(event); }}
-                          itemRef={(el) => { itemRefs.current[index] = el; }}
-                        />
-                    ))
-                )}
+        {/* Timeline List */}
+        <div ref={containerRef} className="flex-grow p-3 sm:p-4 pl-6 sm:pl-10 overflow-y-auto">
+          <div className="relative border-l-2 border-green-800/30 pl-8 space-y-8 pb-10">
+            {isLoading && filteredEvents.length === 0 ? (
+              <div className="text-green-600 font-mono p-4 animate-pulse">LOADING...</div>
+            ) : filteredEvents.length === 0 ? (
+              <div className="text-green-800 font-mono italic p-4">NO_RECORDS_FOUND</div>
+            ) : (
+              filteredEvents.map((event, index) => (
+                <TimelineItem
+                  key={event.id}
+                  event={event}
+                  isSelected={index === selectedIndex}
+                  deepQuery={deepQuery}
+                  onSelect={() => { setSelectedIndex(index); handleViewDetails(event); }}
+                  itemRef={(el) => { itemRefs.current[index] = el; }}
+                />
+              ))
+            )}
 
-                {/* End Marker */}
-                <div className="absolute bottom-0 left-[-1px] w-0.5 h-full bg-gradient-to-b from-green-800/30 to-transparent pointer-events-none"></div>
-            </div>
+            {/* End Marker */}
+            <div className="absolute bottom-0 left-[-1px] w-0.5 h-full bg-gradient-to-b from-green-800/30 to-transparent pointer-events-none"></div>
+          </div>
         </div>
 
         {/* Pagination Footer */}
         {totalPages > 1 && (
-          <div className="border-t border-green-900/30 px-4 py-2 flex items-center justify-between text-sm font-mono">
+          <div className="border-t border-green-900/30 px-4 py-2 flex items-center justify-between text-sm font-mono flex-shrink-0">
             <span className="text-green-700">
               显示 {(page - 1) * perPage + 1}-{Math.min(page * perPage, total)} / 共 {total} 条
             </span>
@@ -591,11 +556,6 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
           </div>
         )}
 
-        {/* Shortcut hint footer */}
-        <div className="fixed bottom-4 right-4 text-[10px] text-green-800 font-mono bg-black/80 px-2 py-1 border border-green-900 z-50">
-            FILTER: [/] | SEARCH: [S] | HELP: [SHIFT+?]
-        </div>
-
         {/* Help Panel Modal */}
         {showHelp && (
           <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4 overflow-y-auto" onClick={() => setShowHelp(false)}>
@@ -610,39 +570,28 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
               <div className="space-y-4 sm:space-y-6 font-mono overflow-y-auto flex-1">
                 <div className="grid grid-cols-2 gap-2 sm:gap-4 text-base sm:text-xl">
                   <div className="text-green-500 font-bold text-lg sm:text-2xl col-span-2">NAVIGATION</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">J / ↓</div>
                   <div className="text-green-300">下一条</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">K / ↑</div>
                   <div className="text-green-300">上一条</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">N</div>
                   <div className="text-green-300">下一页</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">P</div>
                   <div className="text-green-300">上一页</div>
 
                   <div className="text-green-500 font-bold text-lg sm:text-2xl mt-2 sm:mt-4 col-span-2">ACTIONS</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">L / Enter</div>
                   <div className="text-green-300">查看详情</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">/</div>
                   <div className="text-green-300">筛选</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">S</div>
                   <div className="text-green-300">全文搜索</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">R</div>
                   <div className="text-green-300">刷新</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">E</div>
                   <div className="text-green-300">导出</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">Escape</div>
                   <div className="text-green-300">关闭 / 取消</div>
-
                   <div className="text-green-600 pl-2 sm:pl-4">Shift + ?</div>
                   <div className="text-green-300">显示帮助</div>
                 </div>
@@ -654,6 +603,15 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ events: propEvents, 
             </div>
           </div>
         )}
-    </div>
+      </div>
+
+      {/* History Detail Modal (self-contained) */}
+      <HistoryDetailModal
+        historyId={detailId || 0}
+        filePath={detailFilePath || undefined}
+        isOpen={detailId !== null || detailFilePath !== null}
+        onClose={() => { setDetailId(null); setDetailFilePath(null); }}
+      />
+    </>
   );
 };

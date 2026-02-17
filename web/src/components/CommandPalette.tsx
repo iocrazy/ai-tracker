@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, FolderGit2, Play, ExternalLink, ArrowRight, Command, Monitor, List, Terminal, Settings, BarChart3, X } from 'lucide-react';
+import { Search, FolderGit2, Play, ExternalLink, ArrowRight, Command, Monitor, Terminal, Settings, BarChart3, X } from 'lucide-react';
 import { AppTab, AgentSession } from '../types';
 import { ProjectInfo } from '../services/api';
 
@@ -49,7 +49,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     const tabs: { id: AppTab; icon: React.ElementType; label: string }[] = [
       { id: 'WORKSTATIONS', icon: Monitor, label: 'Workstations' },
       { id: 'PROJECTS', icon: FolderGit2, label: 'Projects' },
-      { id: 'TIMELINE', icon: List, label: 'Timeline' },
       { id: 'ANALYTICS', icon: BarChart3, label: 'Analytics' },
       { id: 'CONSOLE', icon: Terminal, label: 'Console' },
       { id: 'SETTINGS', icon: Settings, label: 'Settings' },

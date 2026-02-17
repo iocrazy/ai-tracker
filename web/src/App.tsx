@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { CRTWrapper } from './components/CRTWrapper';
 import { WorkstationsView } from './components/WorkstationsView';
-import { TimelineView } from './components/TimelineView';
 import { ConsoleView } from './components/ConsoleView';
 import { SettingsView } from './components/SettingsView';
 import { ProjectsView } from './components/ProjectsView';
@@ -17,7 +16,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { CommandPalette } from './components/CommandPalette';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
-import { Monitor, List, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
+import { Monitor, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
 import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
@@ -50,7 +49,6 @@ function loadCache(): { state: BackendState; tmuxWindows: any[] } | null {
 const DESKTOP_TABS: { id: AppTab; icon: typeof Monitor; label: string }[] = [
   { id: 'WORKSTATIONS', icon: Monitor, label: 'Workstations' },
   { id: 'PROJECTS', icon: FolderGit2, label: 'Projects' },
-  { id: 'TIMELINE', icon: List, label: 'Timeline' },
   { id: 'ANALYTICS', icon: BarChart3, label: 'Analytics' },
   { id: 'CONSOLE', icon: TerminalIcon, label: 'Console' },
   { id: 'SETTINGS', icon: Settings, label: 'Settings' },
@@ -59,7 +57,6 @@ const DESKTOP_TABS: { id: AppTab; icon: typeof Monitor; label: string }[] = [
 const MOBILE_TABS: { id: AppTab; icon: typeof Monitor; label: string }[] = [
   { id: 'WORKSTATIONS', icon: Monitor, label: 'WORK' },
   { id: 'PROJECTS', icon: FolderGit2, label: 'PROJ' },
-  { id: 'TIMELINE', icon: List, label: 'TIME' },
   { id: 'ANALYTICS', icon: BarChart3, label: 'STATS' },
   { id: 'CONSOLE', icon: TerminalIcon, label: 'CONSOLE' },
   { id: 'SETTINGS', icon: Settings, label: 'SETTINGS' },
@@ -661,19 +658,6 @@ const App: React.FC = () => {
       }
   };
 
-  const handleTimelineDetails = (event: TimelineEvent) => {
-      if (event.filePath) {
-        // Session-based: use file path for JSONL detail
-        setHistoryDetailFilePath(event.filePath);
-        setHistoryDetailId(null);
-      } else {
-        // Legacy: use history ID
-        const id = event.historyId || parseInt(event.id);
-        setHistoryDetailId(id);
-        setHistoryDetailFilePath(null);
-      }
-  };
-
   // Global keyboard shortcuts: Cmd+K (palette), Cmd+1-5 (tabs)
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -684,7 +668,7 @@ const App: React.FC = () => {
       }
       if ((e.metaKey || e.ctrlKey) && e.key >= '1' && e.key <= '5') {
         e.preventDefault();
-        const tabMap: AppTab[] = ['WORKSTATIONS', 'PROJECTS', 'TIMELINE', 'CONSOLE', 'SETTINGS'];
+        const tabMap: AppTab[] = ['WORKSTATIONS', 'PROJECTS', 'ANALYTICS', 'CONSOLE', 'SETTINGS'];
         const idx = parseInt(e.key) - 1;
         if (tabMap[idx]) setActiveTab(tabMap[idx]);
         return;
@@ -717,12 +701,6 @@ const App: React.FC = () => {
                    />;
           case 'PROJECTS':
             return <ProjectsView sessions={sessions} onSwitchTab={setActiveTab} />;
-          case 'TIMELINE':
-            return <TimelineView
-                        events={timeline}
-                        onViewDetails={handleTimelineDetails}
-                        isActive={!isModalOpen && !isInputModalOpen && !deleteTarget}
-                   />;
           case 'ANALYTICS':
             return <AIAnalystView sessions={sessions} timeline={timeline} backendState={latestStateRef.current} />;
           case 'CONSOLE':

@@ -2,9 +2,10 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FolderGit2, ArrowLeft, Search, Plus, Trash2, Eye, EyeOff, Save, Edit3,
   Key, GitBranch, Play, ExternalLink, X, Loader, Globe, Layers, ChevronDown,
-  BarChart3, Activity, Clock, Wrench,
+  BarChart3, Activity, Clock, Wrench, List,
 } from 'lucide-react';
 import { AppTab, AgentSession } from '../types';
+import { ProjectTimeline } from './ProjectTimeline';
 import { HistoryEntry, HistoryResponse } from '../services/history';
 import { fetchProjectHistory } from '../services/projects';
 import {
@@ -78,7 +79,7 @@ interface ProjectsViewProps {
 }
 
 type EnvScope = 'effective' | 'global' | 'project' | 'worktree';
-type DetailTab = 'overview' | 'env-vars' | 'worktrees' | 'statistics';
+type DetailTab = 'overview' | 'timeline' | 'env-vars' | 'worktrees' | 'statistics';
 
 export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTab }) => {
   // Project list state
@@ -679,6 +680,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
         <div className="flex">
           {([
             { id: 'overview' as DetailTab, label: 'OVERVIEW', icon: Activity },
+            { id: 'timeline' as DetailTab, label: `TIMELINE${selectedProject.history_count > 0 ? ` (${selectedProject.history_count})` : ''}`, icon: List },
             { id: 'env-vars' as DetailTab, label: 'ENV VARS', icon: Key },
             { id: 'worktrees' as DetailTab, label: `WORKTREES${physicalWorktrees.length + worktreeSlots.length > 0 ? ` (${physicalWorktrees.length + worktreeSlots.length})` : ''}`, icon: GitBranch },
             { id: 'statistics' as DetailTab, label: 'STATISTICS', icon: BarChart3 },
@@ -831,6 +833,17 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* TIMELINE Tab */}
+      {detailTab === 'timeline' && selectedProject && (
+        <div className="h-[calc(100vh-280px)] min-h-[400px]">
+          <ProjectTimeline
+            gitDir={selectedProject.git_dir}
+            projectName={selectedProject.name}
+            isActive={detailTab === 'timeline'}
+          />
         </div>
       )}
 

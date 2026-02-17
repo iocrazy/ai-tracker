@@ -58,7 +58,6 @@ describe('CommandPalette', () => {
     render(<CommandPalette {...defaultProps} />);
     // Should show tabs other than current (WORKSTATIONS)
     expect(screen.getByText('Go to Projects')).toBeInTheDocument();
-    expect(screen.getByText('Go to Timeline')).toBeInTheDocument();
     expect(screen.getByText('Go to Analytics')).toBeInTheDocument();
   });
 

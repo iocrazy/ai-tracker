@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Monitor, ChevronDown, ChevronRight, Activity, Pause, Check, PowerOff, Pin, Wifi, WifiOff } from 'lucide-react';
+import { Monitor, ChevronDown, ChevronRight, Pin, LogOut } from 'lucide-react';
 import { AgentSession, AgentWindow, ClaudeStatus } from './shared/types';
 import { invoke } from '@tauri-apps/api/core';
+import { clearAuthToken } from './shared/services/auth';
 
 interface MenuBarPanelProps {
   sessions: AgentSession[];
@@ -11,43 +12,44 @@ interface MenuBarPanelProps {
     busyCount: number;
     totalCost: number;
   };
+  onLogout?: () => void;
 }
 
-const STATUS_CONFIG: Record<AgentWindow['status'], { color: string; icon: React.ElementType; label: string }> = {
-  IDLE: { color: 'text-green-500', icon: Activity, label: 'IDLE' },
-  BUSY: { color: 'text-yellow-400', icon: Activity, label: 'BUSY' },
-  PAUSED: { color: 'text-orange-400', icon: Pause, label: 'PAUSED' },
-  COMPLETED: { color: 'text-cyan-400', icon: Check, label: 'DONE' },
-  OFFLINE: { color: 'text-red-500', icon: PowerOff, label: 'OFF' },
+const STATUS_DOT: Record<AgentWindow['status'], { color: string; label: string }> = {
+  BUSY: { color: 'text-yellow-500', label: 'BUSY' },
+  PAUSED: { color: 'text-orange-500', label: 'WAIT' },
+  IDLE: { color: 'text-green-500', label: 'IDLE' },
+  COMPLETED: { color: 'text-cyan-500', label: 'DONE' },
+  OFFLINE: { color: 'text-gray-400', label: 'OFF' },
 };
 
 const ClaudeInfo: React.FC<{ status: ClaudeStatus }> = ({ status }) => (
-  <div className="pl-7 pb-1.5 space-y-0.5">
-    {status.current_tool && (
-      <div className="text-[11px] text-yellow-400/80 truncate">{status.current_tool}</div>
+  <div className="ml-7 mr-3 mb-1.5 px-2 py-1 bg-black/5 rounded text-[10px]">
+    {(status.current_tool || status.action) && (
+      <div className="text-orange-600 truncate mb-0.5">{status.current_tool || status.action}</div>
     )}
-    {status.action && !status.current_tool && (
-      <div className="text-[11px] text-yellow-400/80 truncate">{status.action}</div>
-    )}
-    <div className="flex items-center gap-2 text-[10px] text-neutral-500">
+    <div className="flex items-center gap-1.5 text-gray-500">
       {status.model && <span>{status.model.replace('claude-', '').split('-')[0]}</span>}
       {status.cost != null && <span>${status.cost.toFixed(2)}</span>}
-      {status.context_percent != null && <span>{status.context_percent.toFixed(0)}%</span>}
-      {status.session_duration && <span>{status.session_duration}</span>}
+      {status.context_percent != null && (
+        <span className={status.context_percent > 80 ? 'text-orange-500' : ''}>
+          {status.context_percent.toFixed(0)}% ctx
+        </span>
+      )}
     </div>
   </div>
 );
 
 const WindowRow: React.FC<{ win: AgentWindow }> = ({ win }) => {
-  const config = STATUS_CONFIG[win.status];
+  const s = STATUS_DOT[win.status];
   return (
-    <div className="py-1">
-      <div className="flex items-center gap-2 px-3 py-0.5">
-        <span className={`text-[10px] ${config.color}`}>{win.status === 'BUSY' ? '\u25CF' : win.status === 'IDLE' ? '\u25CB' : '\u25CE'}</span>
-        <span className="text-[11px] text-neutral-300 truncate flex-1">{win.name}</span>
-        <span className={`text-[10px] ${config.color}`}>{config.label}</span>
+    <div>
+      <div className="flex items-center gap-2 px-3 py-1 hover:bg-black/5 rounded-md mx-1">
+        <span className={`text-[8px] ${s.color}`}>{'\u25CF'}</span>
+        <span className="text-[12px] text-gray-800 truncate flex-1">{win.name}</span>
+        <span className={`text-[10px] font-medium ${s.color}`}>{s.label}</span>
         {win.lastActive !== '--:--' && (
-          <span className="text-[10px] text-neutral-600">{win.lastActive}</span>
+          <span className="text-[10px] text-gray-400 tabular-nums">{win.lastActive}</span>
         )}
       </div>
       {win.claudeStatus && (win.status === 'BUSY' || win.status === 'PAUSED') && (
@@ -60,84 +62,87 @@ const WindowRow: React.FC<{ win: AgentWindow }> = ({ win }) => {
 const SessionCard: React.FC<{ session: AgentSession }> = ({ session }) => {
   const [expanded, setExpanded] = useState(session.status === 'BUSY');
   const busyCount = session.windows.filter(w => w.status === 'BUSY').length;
-  const sessionColor = busyCount > 0 ? 'text-yellow-400' : 'text-green-500';
 
   return (
-    <div className="border-b border-neutral-800 last:border-b-0">
+    <div>
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-neutral-800/50 transition-colors"
+        className="w-full flex items-center gap-1.5 px-3 py-1.5 hover:bg-black/5 rounded-md mx-0 transition-colors"
       >
-        {expanded ? <ChevronDown className="w-3 h-3 text-neutral-500 shrink-0" /> : <ChevronRight className="w-3 h-3 text-neutral-500 shrink-0" />}
-        <Monitor className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
-        <span className="text-xs text-neutral-200 font-medium truncate flex-1 text-left">{session.name}</span>
-        <span className={`text-[10px] font-medium ${sessionColor}`}>
-          {busyCount > 0 ? `${busyCount} BUSY` : 'IDLE'}
-        </span>
+        {expanded
+          ? <ChevronDown className="w-3 h-3 text-gray-400 shrink-0" />
+          : <ChevronRight className="w-3 h-3 text-gray-400 shrink-0" />
+        }
+        <Monitor className="w-3 h-3 text-gray-500 shrink-0" />
+        <span className="text-[12px] text-gray-800 font-medium truncate flex-1 text-left">{session.name}</span>
+        {busyCount > 0 && (
+          <span className="text-[10px] font-semibold text-yellow-600">{busyCount} BUSY</span>
+        )}
       </button>
-      {expanded && (
-        <div className="pb-1">
-          {session.windows.map(win => (
-            <WindowRow key={win.id} win={win} />
-          ))}
-        </div>
-      )}
+      {expanded && session.windows.map(win => (
+        <WindowRow key={win.id} win={win} />
+      ))}
     </div>
   );
 };
 
-export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connectionStatus, stats }) => {
+export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connectionStatus, stats, onLogout }) => {
   const isOnline = connectionStatus === 'connected';
 
   const handlePinFloat = async () => {
-    try {
-      await invoke('show_float');
-    } catch (e) {
-      console.error('Failed to show float:', e);
-    }
+    try { await invoke('show_float'); } catch (e) { console.error('show_float failed:', e); }
+  };
+
+  const handleLogout = async () => {
+    await clearAuthToken();
+    onLogout?.();
   };
 
   return (
-    <div className="flex flex-col h-full bg-neutral-900/95 backdrop-blur-xl rounded-lg overflow-hidden border border-neutral-700/50">
+    <div className="flex flex-col h-full select-none rounded-[10px] overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800">
-        <span className="text-xs font-semibold text-neutral-300">Agent Tracker</span>
+      <div className="flex items-center justify-between px-3 py-2">
         <div className="flex items-center gap-1.5">
-          {isOnline ? (
-            <Wifi className="w-3 h-3 text-green-500" />
-          ) : (
-            <WifiOff className="w-3 h-3 text-red-500" />
-          )}
-          <span className={`text-[10px] font-medium ${isOnline ? 'text-green-500' : 'text-red-500'}`}>
-            {isOnline ? 'ONLINE' : connectionStatus === 'reconnecting' ? 'RETRY' : 'OFFLINE'}
+          <span className={`text-[8px] ${isOnline ? 'text-green-500' : 'text-red-500'}`}>{'\u25CF'}</span>
+          <span className="text-[12px] font-semibold text-gray-700">
+            {isOnline ? 'Agent Tracker is running' : connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Offline'}
           </span>
         </div>
       </div>
 
+      <div className="mx-3 border-t border-black/10" />
+
       {/* Session list */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto py-1">
         {sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 text-neutral-600">
-            <Monitor className="w-6 h-6 mb-2" />
-            <span className="text-xs">{isOnline ? 'No sessions' : 'Disconnected'}</span>
+          <div className="flex flex-col items-center justify-center py-8 text-gray-400">
+            <Monitor className="w-5 h-5 mb-1.5 opacity-50" />
+            <span className="text-[11px]">{isOnline ? 'No active sessions' : 'Server disconnected'}</span>
           </div>
         ) : (
-          sessions.map(session => (
-            <SessionCard key={session.id} session={session} />
-          ))
+          <div className="space-y-0.5">
+            {sessions.map(session => (
+              <SessionCard key={session.id} session={session} />
+            ))}
+          </div>
         )}
       </div>
 
+      <div className="mx-3 border-t border-black/10" />
+
       {/* Footer */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-t border-neutral-800 bg-neutral-900">
-        <button
-          onClick={handlePinFloat}
-          className="flex items-center gap-1 text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors"
-        >
-          <Pin className="w-3 h-3" />
-          <span>Pin Window</span>
-        </button>
-        <div className="flex items-center gap-2 text-[10px] text-neutral-600">
+      <div className="flex items-center justify-between px-3 py-2 text-[11px] text-gray-500">
+        <div className="flex items-center gap-3">
+          <button onClick={handlePinFloat} className="flex items-center gap-1 hover:text-gray-800 transition-colors">
+            <Pin className="w-3 h-3" />
+            <span>Float</span>
+          </button>
+          <button onClick={handleLogout} className="flex items-center gap-1 hover:text-gray-800 transition-colors">
+            <LogOut className="w-3 h-3" />
+          </button>
+        </div>
+        <div className="flex items-center gap-1.5 tabular-nums text-gray-400">
+          {stats.busyCount > 0 && <span className="text-yellow-600">{stats.busyCount} busy</span>}
           <span>{stats.totalSessions} sessions</span>
           {stats.totalCost > 0 && <span>${stats.totalCost.toFixed(2)}</span>}
         </div>

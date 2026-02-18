@@ -2,6 +2,8 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
+#[cfg(target_os = "macos")]
+use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
 #[tauri::command]
 fn show_float(app: tauri::AppHandle) -> Result<(), String> {
@@ -18,6 +20,8 @@ fn show_float(app: tauri::AppHandle) -> Result<(), String> {
             .resizable(false)
             .build()
             .map_err(|e: tauri::Error| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        apply_vibrancy(&win, NSVisualEffectMaterial::HudWindow, None, Some(8.0)).ok();
         let _ = win.set_focus();
     }
     Ok(())
@@ -47,7 +51,7 @@ fn toggle_panel(app: &tauri::AppHandle) {
 fn create_panel(app: &tauri::AppHandle) {
     let result = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App("index.html".into()))
         .title("Agent Tracker")
-        .inner_size(380.0, 480.0)
+        .inner_size(320.0, 360.0)
         .decorations(false)
         .always_on_top(true)
         .skip_taskbar(true)
@@ -56,6 +60,9 @@ fn create_panel(app: &tauri::AppHandle) {
         .build();
 
     if let Ok(panel) = result {
+        #[cfg(target_os = "macos")]
+        apply_vibrancy(&panel, NSVisualEffectMaterial::Popover, None, Some(10.0)).ok();
+
         let panel_clone = panel.as_ref().window().clone();
         panel.as_ref().window().on_window_event(move |event| {
             if let tauri::WindowEvent::Focused(false) = event {
@@ -72,10 +79,8 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![show_float, hide_float])
         .setup(|app| {
-            // Create the panel window (hidden initially)
             create_panel(app.handle());
 
-            // Create tray icon
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
@@ -93,7 +98,6 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Hide from dock on macOS (menu bar only app)
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 

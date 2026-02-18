@@ -29,29 +29,29 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
   };
 
   return (
-    <div className="flex flex-col items-center justify-center h-full p-6 bg-neutral-900">
-      <KeyRound className="w-8 h-8 text-neutral-400 mb-4" />
-      <h2 className="text-sm font-medium text-neutral-200 mb-4">Connect to Agent Tracker</h2>
+    <div className="flex flex-col items-center justify-center h-full p-6 rounded-[10px] overflow-hidden">
+      <KeyRound className="w-7 h-7 text-gray-400 mb-3" />
+      <h2 className="text-[13px] font-medium text-gray-700 mb-4">Connect to Agent Tracker</h2>
       <form onSubmit={handleSubmit} className="w-full space-y-3">
         <input
           type="password"
           value={token}
           onChange={e => setToken(e.target.value)}
           placeholder="Auth token"
-          className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded text-sm text-neutral-200 placeholder:text-neutral-500 outline-none focus:border-blue-500"
+          className="w-full px-3 py-1.5 bg-white/60 border border-black/10 rounded-md text-[12px] text-gray-800 placeholder:text-gray-400 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
           autoFocus
         />
-        {error && <p className="text-xs text-red-400">{error}</p>}
+        {error && <p className="text-[11px] text-red-500">{error}</p>}
         <button
           type="submit"
           disabled={loading || !token.trim()}
-          className="w-full py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm text-white font-medium flex items-center justify-center gap-2"
+          className="w-full py-1.5 bg-blue-500 hover:bg-blue-600 disabled:opacity-50 rounded-md text-[12px] text-white font-medium flex items-center justify-center gap-2"
         >
-          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
           Connect
         </button>
       </form>
-      <p className="text-[10px] text-neutral-600 mt-4">localhost:3099</p>
+      <p className="text-[10px] text-gray-400 mt-3">localhost:3099</p>
     </div>
   );
 };

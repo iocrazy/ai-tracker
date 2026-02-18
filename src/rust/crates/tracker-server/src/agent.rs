@@ -53,6 +53,9 @@ pub struct ClaudeStatus {
     pub session_duration: Option<String>,
     /// Pane number where agent is detected (e.g., "1", "2", "3")
     pub pane: Option<String>,
+    /// Whether the agent is showing a permission prompt (waiting for user input)
+    #[serde(default)]
+    pub awaiting_permission: bool,
 }
 
 /// tmux operations for agent management (async)
@@ -1148,6 +1151,20 @@ impl TmuxAgent {
                         status.session_duration = Some(duration.trim().to_string());
                     }
                 }
+            }
+        }
+
+        // Detect permission prompts (Claude waiting for user to approve an action)
+        // Patterns: "Do you want to", "Esc to cancel", permission choice lines
+        for line in &lines {
+            let line = line.trim();
+            if line.contains("Do you want to")
+                || line.contains("Esc to cancel")
+                || line.contains("Yes, allow all")
+                || (line.starts_with('>') && line.contains("Yes"))
+            {
+                status.awaiting_permission = true;
+                break;
             }
         }
 

@@ -590,8 +590,10 @@ async fn autofix_stale_awaiting_tasks(app_state: &AppState) {
             Ok(status) => {
                 // If Claude has an agent_type detected, it's running.
                 // If it also has a current_tool or action, it's actively working.
+                // But if a permission prompt is showing, it's genuinely waiting.
                 let is_active = status.agent_type.is_some()
-                    && (status.current_tool.is_some() || status.action.is_some());
+                    && (status.current_tool.is_some() || status.action.is_some())
+                    && !status.awaiting_permission;
 
                 if is_active {
                     let mut state = app_state.state.lock().unwrap();

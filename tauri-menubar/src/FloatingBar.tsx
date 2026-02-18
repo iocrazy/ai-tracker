@@ -72,10 +72,21 @@ export const FloatingBar: React.FC<FloatingBarProps> = ({ sessions, stats, conne
   useEffect(() => {
     const onMouseDown = (e: MouseEvent) => {
       if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
+      if (e.detail >= 2) return;
       getCurrentWebviewWindow().startDragging();
     };
+    // Prevent native double-click zoom/minimize on draggable areas only
+    const onDblClick = (e: MouseEvent) => {
+      if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
     document.addEventListener('mousedown', onMouseDown);
-    return () => document.removeEventListener('mousedown', onMouseDown);
+    document.addEventListener('dblclick', onDblClick, true);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('dblclick', onDblClick, true);
+    };
   }, []);
 
   const handleClose = async () => {
@@ -194,7 +205,7 @@ const WindowRow: React.FC<{ window: AgentWindow; sessionName: string }> = ({ win
   return (
     <div
       className="flex items-center gap-1 pl-4 pr-1 py-[1px] cursor-default hover:bg-black/5 rounded-sm"
-      onDoubleClick={() => selectTmuxWindow(sessionName, w.name, w.id)}
+      onClick={() => selectTmuxWindow(sessionName, w.name, w.id)}
     >
       <span className={`w-[4px] h-[4px] rounded-full shrink-0 ${DOT_COLOR[w.status] || 'bg-gray-400'}`} />
       <span className="text-[10px] text-gray-500 truncate">{w.name}</span>

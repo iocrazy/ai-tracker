@@ -1,4 +1,5 @@
 use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
@@ -60,7 +61,37 @@ fn show_float(app: tauri::AppHandle) -> Result<(), String> {
             .build()
             .map_err(|e: tauri::Error| e.to_string())?;
         #[cfg(target_os = "macos")]
-        apply_rounded_vibrancy(&win, NSVisualEffectMaterial::HudWindow, 8.0);
+        {
+            apply_rounded_vibrancy(&win, NSVisualEffectMaterial::HudWindow, 8.0);
+            // Make the float window stationary so double-click and Mission Control
+            // don't push other windows around
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = win.window_handle() {
+                if let RawWindowHandle::AppKit(appkit) = handle.as_raw() {
+                    unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::AnyObject;
+                        let ns_view = appkit.ns_view.as_ptr() as *mut AnyObject;
+                        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+                        // NSWindowCollectionBehaviorCanJoinAllSpaces (1)
+                        // | NSWindowCollectionBehaviorStationary (16)
+                        // | NSWindowCollectionBehaviorFullScreenAuxiliary (256)
+                        // | NSWindowCollectionBehaviorIgnoresCycle (64)
+                        let behavior: u64 = 1 | 16 | 64 | 256;
+                        let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+
+                        // Disable movable-by-background so macOS doesn't track
+                        // title-bar double-click (zoom/minimize) on this window
+                        let _: () = msg_send![ns_window, setMovableByWindowBackground: false];
+                        let _: () = msg_send![ns_window, setMovable: false];
+
+                        // Strip miniaturizable from style mask
+                        let mask: u64 = msg_send![ns_window, styleMask];
+                        let _: () = msg_send![ns_window, setStyleMask: mask & !4u64];
+                    }
+                }
+            }
+        }
         let _ = win.set_focus();
     }
     Ok(())
@@ -72,6 +103,11 @@ fn hide_float(app: tauri::AppHandle) -> Result<(), String> {
         let _ = win.hide();
     }
     Ok(())
+}
+
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 /// Read auth token from local agent-config.json
@@ -165,7 +201,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .invoke_handler(tauri::generate_handler![show_float, hide_float, set_float_opacity, open_url, read_local_token])
+        .invoke_handler(tauri::generate_handler![show_float, hide_float, set_float_opacity, open_url, read_local_token, quit_app])
         .setup(|app| {
             create_panel(app.handle());
 
@@ -173,9 +209,22 @@ pub fn run() {
                 let icon_bytes = include_bytes!("../icons/tray-icon.png");
                 tauri::image::Image::from_bytes(icon_bytes).expect("failed to load tray icon")
             };
+            let quit_item = MenuItemBuilder::with_id("quit", "Quit Agent Tracker")
+                .build(app)?;
+            let tray_menu = MenuBuilder::new(app)
+                .item(&quit_item)
+                .build()?;
+
             let _tray = TrayIconBuilder::new()
                 .icon(tray_icon)
                 .icon_as_template(true)
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    if event.id() == "quit" {
+                        app.exit(0);
+                    }
+                })
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
 

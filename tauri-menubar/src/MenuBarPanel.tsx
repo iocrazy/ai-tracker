@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Monitor, Pin, Globe, LogOut, ChevronRight, Eye } from 'lucide-react';
+import { Monitor, Pin, Globe, LogOut, Power, ChevronRight, Eye } from 'lucide-react';
 import { AgentSession, AgentWindow, ClaudeStatus } from './shared/types';
 import { invoke } from '@tauri-apps/api/core';
 import { clearAuthToken } from './shared/services/auth';
@@ -142,14 +142,20 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
 
   return (
     <div className="flex flex-col h-full select-none rounded-[10px] overflow-hidden py-1">
-      {/* Status */}
+      {/* Stats header */}
       <div className="flex items-center gap-2 px-3 py-[5px]">
         <span className={`text-[8px] ${isOnline ? 'text-green-500' : 'text-red-500'}`}>{'\u25CF'}</span>
-        <span className={`text-[13px] font-normal ${isOnline ? 'text-green-600' : 'text-red-500'}`}>
-          {isOnline
-            ? `Agent Tracker is running`
-            : connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Offline'}
-        </span>
+        {!isOnline ? (
+          <span className="text-[13px] text-red-500">
+            {connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Offline'}
+          </span>
+        ) : (
+          <span className="text-[13px] text-gray-700 tabular-nums">
+            {stats.totalSessions} session{stats.totalSessions !== 1 ? 's' : ''}
+            {stats.busyCount > 0 && <span className="text-yellow-600 ml-1.5">{stats.busyCount} busy</span>}
+            {stats.totalCost > 0 && <span className="text-gray-400 ml-1.5">${stats.totalCost.toFixed(2)}</span>}
+          </span>
+        )}
       </div>
 
       <Separator />
@@ -190,15 +196,7 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
 
       {/* Bottom */}
       <MenuItem icon={LogOut} label="Disconnect" onClick={handleLogout} danger />
-
-      {/* Stats footer */}
-      {isOnline && (stats.totalSessions > 0 || stats.totalCost > 0) && (
-        <div className="px-3 py-1 text-[11px] text-gray-400 tabular-nums flex items-center gap-2">
-          <span>{stats.totalSessions} session{stats.totalSessions !== 1 ? 's' : ''}</span>
-          {stats.busyCount > 0 && <span className="text-yellow-600">{stats.busyCount} busy</span>}
-          {stats.totalCost > 0 && <span>${stats.totalCost.toFixed(2)}</span>}
-        </div>
-      )}
+      <MenuItem icon={Power} label="Quit Agent Tracker" onClick={() => invoke('quit_app')} danger />
     </div>
   );
 };

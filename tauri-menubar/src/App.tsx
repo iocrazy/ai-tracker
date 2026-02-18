@@ -51,7 +51,7 @@ export const App: React.FC = () => {
   }, []);
 
   if (loading) {
-    return <div className="h-full bg-neutral-900" />;
+    return <div className="h-full" />;
   }
 
   if (!authenticated) {

@@ -7,10 +7,34 @@ html, body, #root {
   background: transparent;
   border-radius: 10px;
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
 /* macOS native text rendering */
 body {
   -webkit-font-smoothing: antialiased;
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  font-size: 13px;
+  color: #1d1d1f;
+}
+
+/* Native macOS menu item hover — rounded blue highlight */
+.menu-item {
+  border-radius: 4px;
+  margin: 0 4px;
+  transition: background-color 0.08s ease;
+}
+
+.menu-item:hover {
+  background-color: rgba(0, 88, 208, 0.12);
+}
+
+.menu-item:active {
+  background-color: rgba(0, 88, 208, 0.20);
+}
+
+/* Sub-rows (windows, claude details) — subtle hover */
+.menu-row {
+  border-radius: 4px;
+  margin: 0 4px;
 }

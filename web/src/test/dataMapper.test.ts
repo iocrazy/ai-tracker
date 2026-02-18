@@ -9,6 +9,7 @@ function makeTmuxWindow(overrides: Partial<TmuxWindowInfo> = {}): TmuxWindowInfo
     session_name: '1-tracker',
     window_id: '@1',
     window_name: 'main',
+    window_index: 0,
     pane_count: 2,
     active: true,
     ...overrides,

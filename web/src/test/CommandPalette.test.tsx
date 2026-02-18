@@ -17,7 +17,7 @@ const mockSessions: AgentSession[] = [
     id: '$1', name: '1-tracker', status: 'BUSY', ip: '$1',
     gitDir: '/home/user/tracker',
     windows: [
-      { id: '@1', name: 'main', status: 'BUSY', lastActive: '5m', avatar: '' },
+      { id: '@1', name: 'main', windowIndex: 0, status: 'BUSY', lastActive: '5m', avatar: '' },
     ],
   },
 ];

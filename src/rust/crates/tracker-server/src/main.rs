@@ -544,6 +544,84 @@ impl AppState {
     }
 }
 
+/// Auto-fix stale awaiting_input tasks by checking if Claude is actually active.
+/// When PermissionRequest hook fires, the task becomes awaiting_input. But after
+/// the user grants permission, there's no hook to set it back to in_progress.
+/// This function detects that Claude is actively working and promotes the task.
+async fn autofix_stale_awaiting_tasks(app_state: &AppState) {
+    // Collect awaiting_input tasks (session name + window ID + window name + task key)
+    let awaiting: Vec<(String, String, String, String)> = {
+        let state = app_state.state.lock().unwrap();
+        state.tasks.iter()
+            .filter(|(_, task)| matches!(task.status, TaskStatus::AwaitingInput))
+            .map(|(key, task)| (
+                task.session.clone(),
+                task.window_id.clone(),
+                task.window.clone(),
+                key.clone(),
+            ))
+            .collect()
+    };
+
+    if awaiting.is_empty() {
+        return;
+    }
+
+    let mut promoted = false;
+
+    for (session_name, window_id, window_name, task_key) in &awaiting {
+        // Skip if we don't have session name
+        if session_name.is_empty() {
+            continue;
+        }
+
+        // Prefer window_id (e.g., "@2") for reliable targeting — window names
+        // with dots (e.g., "2.1.45") cause tmux to misparse them.
+        let window_target = if !window_id.is_empty() {
+            window_id.as_str()
+        } else if !window_name.is_empty() {
+            window_name.as_str()
+        } else {
+            continue;
+        };
+
+        // Check if Claude is actively working in this window
+        match agent::TmuxAgent::get_claude_status(session_name, window_target).await {
+            Ok(status) => {
+                // If Claude has an agent_type detected, it's running.
+                // If it also has a current_tool or action, it's actively working.
+                let is_active = status.agent_type.is_some()
+                    && (status.current_tool.is_some() || status.action.is_some());
+
+                if is_active {
+                    let mut state = app_state.state.lock().unwrap();
+                    if let Some(task) = state.tasks.get_mut(task_key) {
+                        if matches!(task.status, TaskStatus::AwaitingInput) {
+                            info!(
+                                "Auto-fix: promoting awaiting_input → in_progress for {}:{} (claude active, tool={:?})",
+                                session_name, window_name, status.current_tool
+                            );
+                            task.status = TaskStatus::InProgress;
+                            let task_clone = task.clone();
+                            if let Err(e) = state.db.save_task(&task_clone) {
+                                error!("Failed to save auto-fixed task: {}", e);
+                            }
+                            promoted = true;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("Auto-fix: failed to get claude status for {}:{}: {}", session_name, window_target, e);
+            }
+        }
+    }
+
+    if promoted {
+        app_state.broadcast_state();
+    }
+}
+
 // ============================================================================
 // Response Types
 // ============================================================================
@@ -2074,6 +2152,20 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Background task: auto-fix stale awaiting_input tasks
+    // When PermissionRequest hook fires, task becomes awaiting_input.
+    // But there's no "PermissionApproved" hook, so after permission is granted
+    // and Claude resumes, the task stays stuck as awaiting_input.
+    // This loop detects active Claude processes and promotes tasks back to in_progress.
+    let autofix_state = app_state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            autofix_stale_awaiting_tasks(&autofix_state).await;
+        }
+    });
+
     // Start background task for chat watcher (JSONL file polling → WS push)
     // Two parts: 1) poll for file changes every 500ms, 2) sync watched sessions every 5s
     let chat_poll_state = app_state.clone();
@@ -2272,6 +2364,7 @@ async fn main() -> Result<()> {
         .route("/api/tmux/send-image", post(routes_tmux::tmux_send_image).layer(DefaultBodyLimit::max(50 * 1024 * 1024)))
         .route("/api/tmux/new-window", post(routes_tmux::tmux_new_window))
         .route("/api/tmux/select-window", post(routes_tmux::tmux_select_window))
+        .route("/api/tmux/swap-window", post(routes_tmux::tmux_swap_window))
         // Stream (real-time pane output)
         .route("/api/stream/start", post(stream_start))
         .route("/api/stream/stop", post(stream_stop))

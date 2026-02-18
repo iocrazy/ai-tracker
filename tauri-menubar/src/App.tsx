@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { invoke } from '@tauri-apps/api/core';
 import { MenuBarPanel } from './MenuBarPanel';
 import { FloatingBar } from './FloatingBar';
 import { LoginView } from './LoginView';
 import { useTrackerState } from './hooks/useTrackerState';
-import { getAuthTokenAsync } from './shared/services/auth';
+import { getAuthTokenAsync, setAuthToken } from './shared/services/auth';
 
 // Separate component so useTrackerState only runs after auth token is loaded
 const AuthenticatedApp: React.FC<{
@@ -44,10 +45,26 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    getAuthTokenAsync().then(token => {
-      setAuthenticated(!!token);
+    (async () => {
+      // Check cached token first
+      const cached = await getAuthTokenAsync();
+      if (cached) {
+        setAuthenticated(true);
+        setLoading(false);
+        return;
+      }
+      // Auto-read from local config file
+      try {
+        const localToken = await invoke<string>('read_local_token');
+        if (localToken) {
+          await setAuthToken(localToken);
+          setAuthenticated(true);
+        }
+      } catch {
+        // Config not found — show login
+      }
       setLoading(false);
-    });
+    })();
   }, []);
 
   if (loading) {

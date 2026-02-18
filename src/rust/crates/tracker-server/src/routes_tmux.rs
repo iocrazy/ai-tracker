@@ -192,6 +192,14 @@ pub(crate) struct TmuxSelectWindowRequest {
     window_id: Option<String>,  // tmux window ID like @9 for precise targeting
 }
 
+/// Swap window request (reorder windows within a session)
+#[derive(Deserialize)]
+pub(crate) struct TmuxSwapWindowRequest {
+    session: String,
+    source_index: u32,
+    target_index: u32,
+}
+
 // ============================================================================
 // Browser Handlers
 // ============================================================================
@@ -690,6 +698,27 @@ pub(crate) async fn tmux_select_window(Json(req): Json<TmuxSelectWindowRequest>)
         Err(e) => Json(CommandResponse {
             success: false,
             message: format!("Failed to select window: {}", e),
+        }),
+    }
+}
+
+/// Swap two windows within the same session (for drag-and-drop reordering)
+pub(crate) async fn tmux_swap_window(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TmuxSwapWindowRequest>,
+) -> Json<CommandResponse> {
+    match agent::TmuxAgent::swap_windows(&req.session, req.source_index, req.target_index).await {
+        Ok(()) => {
+            // Trigger broadcast so all clients see the new order
+            state.broadcast_state();
+            Json(CommandResponse {
+                success: true,
+                message: format!("Swapped windows {} <-> {}", req.source_index, req.target_index),
+            })
+        }
+        Err(e) => Json(CommandResponse {
+            success: false,
+            message: format!("Failed to swap windows: {}", e),
         }),
     }
 }

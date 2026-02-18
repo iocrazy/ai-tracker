@@ -69,13 +69,23 @@ export function useTrackerState() {
       })
     );
 
-    // Apply cached status to non-busy windows too
+    // Apply cached pane info to non-busy windows (for cost stats), but clear action/tool
     for (const s of sessions) {
       for (const w of s.windows) {
-        if (!w.claudeStatus) {
-          const key = `${s.id}|${w.id}`;
+        const key = `${s.id}|${w.id}`;
+        if (w.status === 'BUSY' || w.status === 'PAUSED') {
+          // Active windows: apply full cache if not already fetched
+          if (!w.claudeStatus) {
+            const cached = claudeStatusCache.current.get(key);
+            if (cached) w.claudeStatus = cached;
+          }
+        } else {
+          // Idle windows: only keep cost/model/pane, clear action/tool
           const cached = claudeStatusCache.current.get(key);
-          if (cached) w.claudeStatus = cached;
+          if (cached) {
+            w.claudeStatus = { ...cached, action: null, current_tool: null };
+            w.claudePane = cached.pane || undefined;
+          }
         }
       }
     }

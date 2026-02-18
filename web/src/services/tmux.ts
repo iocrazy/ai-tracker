@@ -8,6 +8,7 @@ export interface TmuxWindowInfo {
   session_name: string;
   window_id: string;
   window_name: string;
+  window_index: number;
   pane_count: number;
   active: boolean;
   git_dir?: string;  // Git directory for the session
@@ -196,6 +197,23 @@ export async function resumeClosedWindow(
       layout: layout || 'simple',
       closed_window_id: closedWindowId,
     }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
+// Swap two windows within a session (for drag-and-drop reordering)
+export async function tmuxSwapWindow(
+  session: string,
+  sourceIndex: number,
+  targetIndex: number
+): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/swap-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, source_index: sourceIndex, target_index: targetIndex }),
   });
   if (!response.ok) {
     return { success: false, message: `HTTP ${response.status}` };

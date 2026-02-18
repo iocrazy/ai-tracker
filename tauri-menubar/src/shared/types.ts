@@ -13,6 +13,7 @@ export interface ClaudeStatus {
 export interface AgentWindow {
     id: string;
     name: string;
+    windowIndex: number;
     status: 'IDLE' | 'BUSY' | 'OFFLINE' | 'PAUSED' | 'COMPLETED';
     lastActive: string;
     avatar: string;

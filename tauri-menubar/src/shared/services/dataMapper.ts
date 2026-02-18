@@ -58,12 +58,16 @@ export function mapTmuxToSessions(
       return {
         id: win.window_id,
         name: win.window_name,
+        windowIndex: win.window_index,
         status,
         lastActive,
         avatar: '',
         pane: String(win.pane_count),
       };
     });
+
+    // Sort windows by tmux window index
+    windows.sort((a, b) => a.windowIndex - b.windowIndex);
 
     const hasInProgress = windows.some(w => w.status === 'BUSY');
     const sessionStatus: AgentSession['status'] = hasInProgress ? 'BUSY' : 'IDLE';

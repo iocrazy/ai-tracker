@@ -607,6 +607,15 @@ impl TmuxAgent {
             bail!("tmux switch-client failed: {}", stderr);
         }
 
+        // Activate the terminal application on macOS so it comes to foreground
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("osascript")
+                .args(["-e", "tell application \"Terminal\" to activate"])
+                .output()
+                .await;
+        }
+
         Ok(())
     }
 
@@ -883,9 +892,87 @@ impl TmuxAgent {
             .await
             .unwrap_or_else(|| session.to_string());
 
-        let target = format!("{}:={}", actual_session, window);
+        // Use window ID directly if it starts with '@', otherwise use '=' prefix
+        // for exact name match. Note: window names with dots (e.g., "2.1.45") cause
+        // tmux to misparse them as window.pane notation, so we also use -F filter
+        // as a fallback.
+        let target = if window.starts_with('@') {
+            format!("{}:{}", actual_session, window)
+        } else {
+            format!("{}:={}", actual_session, window)
+        };
 
         // List panes with their current command and pane ID
+        let output = Command::new(TMUX_BIN)
+            .args(["list-panes", "-t", &target, "-F", "#{pane_id} #{pane_current_command}"])
+            .output()
+            .await
+            .ok()?;
+
+        // If exact name match fails (e.g., dots in window name), try listing all
+        // windows and filter by name manually
+        if !output.status.success() && !window.starts_with('@') {
+            return Self::find_claude_pane_by_window_name(session, &actual_session, window).await;
+        }
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let pane_id = parts[0];   // e.g., "%4"
+            let command = parts[1];    // e.g., "2.1.39" or "claude" or "opencode"
+
+            // Match Claude Code: version-like command (e.g., "2.1.39") or "claude"
+            if command.starts_with("2.") || command.starts_with("1.")
+                || command == "claude" || command == "claude-code"
+                || command == "opencode"
+            {
+                return Some(pane_id.to_string());
+            }
+        }
+
+        None
+    }
+
+    /// Fallback: find Claude pane when window name contains dots (e.g., "2.1.45")
+    /// which tmux misparses as window.pane notation.
+    async fn find_claude_pane_by_window_name(
+        _original_session: &str,
+        actual_session: &str,
+        window_name: &str,
+    ) -> Option<String> {
+        // List all windows to find the one matching by name
+        let output = Command::new(TMUX_BIN)
+            .args([
+                "list-windows", "-t", actual_session,
+                "-F", "#{window_id} #{window_name}",
+            ])
+            .output()
+            .await
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let window_id = stdout.lines().find_map(|line| {
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() == 2 && parts[1] == window_name {
+                Some(parts[0].to_string())
+            } else {
+                None
+            }
+        })?;
+
+        // Now list panes using window ID (safe, no dot issues)
+        let target = format!("{}:{}", actual_session, window_id);
         let output = Command::new(TMUX_BIN)
             .args(["list-panes", "-t", &target, "-F", "#{pane_id} #{pane_current_command}"])
             .output()
@@ -902,10 +989,8 @@ impl TmuxAgent {
             if parts.len() != 2 {
                 continue;
             }
-            let pane_id = parts[0];   // e.g., "%4"
-            let command = parts[1];    // e.g., "2.1.39" or "claude" or "opencode"
-
-            // Match Claude Code: version-like command (e.g., "2.1.39") or "claude"
+            let pane_id = parts[0];
+            let command = parts[1];
             if command.starts_with("2.") || command.starts_with("1.")
                 || command == "claude" || command == "claude-code"
                 || command == "opencode"
@@ -1206,7 +1291,7 @@ impl TmuxAgent {
                 "list-windows",
                 "-a",
                 "-F",
-                "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{window_panes}|#{window_active}|#{pane_current_path}",
+                "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{window_index}|#{window_panes}|#{window_active}|#{pane_current_path}",
             ])
             .output()
             .await
@@ -1228,14 +1313,14 @@ impl TmuxAgent {
             .lines()
             .filter_map(|line| {
                 let parts: Vec<&str> = line.split('|').collect();
-                if parts.len() != 7 {
+                if parts.len() != 8 {
                     return None;
                 }
                 let session_id = parts[0].to_string();
                 session_git_dirs.entry(session_id.clone()).or_insert(None);
 
                 let working_dir = {
-                    let p = parts[6].trim();
+                    let p = parts[7].trim();
                     if p.is_empty() { None } else { Some(p.to_string()) }
                 };
 
@@ -1244,8 +1329,9 @@ impl TmuxAgent {
                     session_name: parts[1].to_string(),
                     window_id: parts[2].to_string(),
                     window_name: parts[3].to_string(),
-                    pane_count: parts[4].parse().unwrap_or(1),
-                    active: parts[5] == "1",
+                    window_index: parts[4].parse().unwrap_or(0),
+                    pane_count: parts[5].parse().unwrap_or(1),
+                    active: parts[6] == "1",
                     git_dir: None, // Will be filled later
                     working_dir,
                 })
@@ -1269,6 +1355,30 @@ impl TmuxAgent {
             .collect();
 
         Ok(windows)
+    }
+
+    /// Swap two windows within the same session
+    pub async fn swap_windows(session: &str, src_index: u32, dst_index: u32) -> Result<()> {
+        let src_target = format!("{}:{}", session, src_index);
+        let dst_target = format!("{}:{}", session, dst_index);
+
+        let output = Command::new(TMUX_BIN)
+            .args([
+                "-S", "/private/tmp/tmux-501/default",
+                "swap-window",
+                "-s", &src_target,
+                "-t", &dst_target,
+            ])
+            .output()
+            .await
+            .context("Failed to swap tmux windows")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("tmux swap-window failed: {}", stderr);
+        }
+
+        Ok(())
     }
 
     /// Get git directory for a session
@@ -1356,7 +1466,7 @@ impl TmuxAgent {
                 "list-windows",
                 "-a",
                 "-F",
-                "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{window_panes}|#{window_active}|#{pane_current_path}",
+                "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{window_index}|#{window_panes}|#{window_active}|#{pane_current_path}",
             ])
             .output();
 
@@ -1387,7 +1497,7 @@ impl TmuxAgent {
                     .lines()
                     .filter_map(|line| {
                         let parts: Vec<&str> = line.split('|').collect();
-                        if parts.len() != 7 {
+                        if parts.len() != 8 {
                             tracing::warn!("Skipping invalid line: {}", line);
                             return None;
                         }
@@ -1395,7 +1505,7 @@ impl TmuxAgent {
                         session_git_dirs.entry(session_id.clone()).or_insert(None);
 
                         let working_dir = {
-                            let p = parts[6].trim();
+                            let p = parts[7].trim();
                             if p.is_empty() { None } else { Some(p.to_string()) }
                         };
 
@@ -1404,8 +1514,9 @@ impl TmuxAgent {
                             session_name: parts[1].to_string(),
                             window_id: parts[2].to_string(),
                             window_name: parts[3].to_string(),
-                            pane_count: parts[4].parse().unwrap_or(1),
-                            active: parts[5] == "1",
+                            window_index: parts[4].parse().unwrap_or(0),
+                            pane_count: parts[5].parse().unwrap_or(1),
+                            active: parts[6] == "1",
                             git_dir: None,
                             working_dir,
                         })
@@ -1716,6 +1827,7 @@ pub struct TmuxWindowInfo {
     pub session_name: String,
     pub window_id: String,
     pub window_name: String,
+    pub window_index: u32,
     pub pane_count: u32,
     pub active: bool,
     /// Git directory for the session (from @agent_main_repo or first pane's path)

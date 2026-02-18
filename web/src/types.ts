@@ -16,6 +16,7 @@ export interface ClaudeStatus {
 export interface AgentWindow {
     id: string;
     name: string; // e.g. "2.1.29"
+    windowIndex: number;  // tmux window index for ordering/swap
     status: 'IDLE' | 'BUSY' | 'OFFLINE' | 'PAUSED' | 'COMPLETED';
     lastActive: string;
     avatar: string;

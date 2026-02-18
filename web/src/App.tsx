@@ -17,7 +17,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
-import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
+import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 // localStorage cache keys
@@ -83,7 +83,7 @@ const App: React.FC = () => {
   const [allProjects, setAllProjects] = useState<ProjectInfo[]>([]);
 
   // Connection + Health state
-  const [connStatus, setConnStatus] = useState<ConnectionStatus>('connected');
+  const [connStatus, setConnStatus] = useState<ConnectionStatus>('reconnecting');
   const [retryCount, setRetryCount] = useState(0);
   const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const [healthUptime, setHealthUptime] = useState<string>('');
@@ -687,6 +687,11 @@ const App: React.FC = () => {
     await createNewSession(project.name, project.git_dir);
   }, []);
 
+  const handleReorderWindow = useCallback(async (sessionName: string, sourceIndex: number, targetIndex: number) => {
+    await tmuxSwapWindow(sessionName, sourceIndex, targetIndex);
+    // Server broadcasts new state automatically; no local update needed
+  }, []);
+
   const renderContent = () => {
       switch (activeTab) {
           case 'WORKSTATIONS': 
@@ -698,6 +703,7 @@ const App: React.FC = () => {
                         onRequestDeleteSession={handleRequestDeleteSession}
                         onRequestDeleteWindow={handleRequestDeleteWindow}
                         onViewHistory={handleViewHistory}
+                        onReorderWindow={handleReorderWindow}
                    />;
           case 'PROJECTS':
             return <ProjectsView sessions={sessions} onSwitchTab={setActiveTab} />;

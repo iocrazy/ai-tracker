@@ -8,6 +8,7 @@ import { AppTab, AgentSession } from '../types';
 import { ProjectTimeline } from './ProjectTimeline';
 import { HistoryEntry, HistoryResponse } from '../services/history';
 import { fetchProjectHistory } from '../services/projects';
+import { tmuxSelectWindow } from '../services/tmux';
 import {
   ProjectInfo, fetchProjects, deleteProject, createNewSession,
   createProjectService, createProjectEnvVar as createProjEnvVarApi,
@@ -340,6 +341,18 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
     if (e.key === 'Escape') { e.stopPropagation(); cancelFn(); }
   };
 
+  // Open project: select its first (main) tmux window
+  const handleOpenProject = useCallback((project: ProjectInfo) => {
+    const matchingSessions = sessions.filter(s => s.gitDir === project.git_dir);
+    if (matchingSessions.length > 0) {
+      const session = matchingSessions[0];
+      const firstWindow = session.windows[0];
+      if (firstWindow) {
+        tmuxSelectWindow(session.name, firstWindow.name, firstWindow.id).catch(() => {});
+      }
+    }
+  }, [sessions]);
+
   // Session creation
   const handleStartSession = async (project: ProjectInfo) => {
     setCreatingSession(project.git_dir);
@@ -508,7 +521,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                     <div className="flex items-center gap-2 shrink-0">
                       {active ? (
                         <button
-                          onClick={e => { e.stopPropagation(); onSwitchTab('WORKSTATIONS'); }}
+                          onClick={e => { e.stopPropagation(); handleOpenProject(project); }}
                           className="flex items-center gap-1 px-3 py-1.5 border border-green-700 text-green-500 hover:bg-green-900/30 hover:border-green-500 text-xs font-bold tracking-widest uppercase transition-all"
                         >
                           <ExternalLink className="w-3 h-3" /> OPEN
@@ -649,7 +662,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
         <div className="flex items-center gap-2">
           {active && (
             <button
-              onClick={() => onSwitchTab('WORKSTATIONS')}
+              onClick={() => handleOpenProject(selectedProject)}
               className="flex items-center gap-1 px-3 py-1.5 border border-green-700 text-green-500 hover:bg-green-900/30 hover:border-green-500 text-xs font-bold tracking-widest uppercase transition-all"
             >
               <ExternalLink className="w-3 h-3" /> OPEN

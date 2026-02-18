@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { AgentSession, AgentWindow } from './shared/types';
+import { API_BASE, authFetch } from './shared/services/auth';
 
 interface FloatingBarProps {
   sessions: AgentSession[];
@@ -59,6 +60,14 @@ export const FloatingBar: React.FC<FloatingBarProps> = ({ sessions, stats, conne
     const height = expanded ? calcExpandedHeight() : COLLAPSED_HEIGHT;
     win.setSize(new LogicalSize(BAR_WIDTH, height)).catch(() => {});
   }, [expanded, calcExpandedHeight]);
+
+  // Apply stored opacity on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('float_opacity');
+    if (saved) {
+      invoke('set_float_opacity', { opacity: parseFloat(saved) }).catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     const onMouseDown = (e: MouseEvent) => {
@@ -156,6 +165,14 @@ export const FloatingBar: React.FC<FloatingBarProps> = ({ sessions, stats, conne
   );
 };
 
+const selectTmuxWindow = (sessionName: string, windowName: string, windowId?: string) => {
+  authFetch(`${API_BASE}/tmux/select-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session: sessionName, window: windowName, window_id: windowId }),
+  }).catch(() => {});
+};
+
 const SessionRow: React.FC<{ session: AgentSession }> = ({ session }) => (
   <div className="mb-0.5">
     <div className="flex items-center gap-1.5 px-1 py-0.5">
@@ -166,15 +183,19 @@ const SessionRow: React.FC<{ session: AgentSession }> = ({ session }) => (
       </span>
     </div>
     {session.windows.map(w => (
-      <WindowRow key={w.id} window={w} />
+      <WindowRow key={w.id} window={w} sessionName={session.name} />
     ))}
   </div>
 );
 
-const WindowRow: React.FC<{ window: AgentWindow }> = ({ window: w }) => {
-  const tool = w.claudeStatus?.current_tool || w.claudeStatus?.action;
+const WindowRow: React.FC<{ window: AgentWindow; sessionName: string }> = ({ window: w, sessionName }) => {
+  const isActive = w.status === 'BUSY' || w.status === 'PAUSED';
+  const tool = isActive ? (w.claudeStatus?.current_tool || w.claudeStatus?.action) : undefined;
   return (
-    <div className="flex items-center gap-1 pl-4 pr-1 py-[1px]">
+    <div
+      className="flex items-center gap-1 pl-4 pr-1 py-[1px] cursor-default hover:bg-black/5 rounded-sm"
+      onDoubleClick={() => selectTmuxWindow(sessionName, w.name, w.id)}
+    >
       <span className={`w-[4px] h-[4px] rounded-full shrink-0 ${DOT_COLOR[w.status] || 'bg-gray-400'}`} />
       <span className="text-[10px] text-gray-500 truncate">{w.name}</span>
       {tool && (

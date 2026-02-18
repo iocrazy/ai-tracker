@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Monitor, Pin, Globe, LogOut, ChevronRight } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Monitor, Pin, Globe, LogOut, ChevronRight, Eye } from 'lucide-react';
 import { AgentSession, AgentWindow, ClaudeStatus } from './shared/types';
 import { invoke } from '@tauri-apps/api/core';
 import { clearAuthToken } from './shared/services/auth';
@@ -109,15 +109,30 @@ const MenuItem: React.FC<{
   </button>
 );
 
+const OPACITY_KEY = 'float_opacity';
+
 export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connectionStatus, stats, onLogout }) => {
   const isOnline = connectionStatus === 'connected';
+  const [floatOpacity, setFloatOpacity] = useState(() => {
+    const saved = localStorage.getItem(OPACITY_KEY);
+    return saved ? parseFloat(saved) : 1.0;
+  });
+
+  useEffect(() => {
+    localStorage.setItem(OPACITY_KEY, String(floatOpacity));
+    invoke('set_float_opacity', { opacity: floatOpacity }).catch(() => {});
+  }, [floatOpacity]);
 
   const handlePinFloat = async () => {
     try { await invoke('show_float'); } catch (e) { console.error('show_float failed:', e); }
+    // Apply stored opacity after showing
+    setTimeout(() => {
+      invoke('set_float_opacity', { opacity: floatOpacity }).catch(() => {});
+    }, 100);
   };
 
   const handleOpenDashboard = () => {
-    window.open('http://localhost:3099', '_blank');
+    invoke('open_url', { url: 'http://localhost:3099' }).catch(console.error);
   };
 
   const handleLogout = async () => {
@@ -156,6 +171,19 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
 
       {/* Actions */}
       <MenuItem icon={Pin} label="Pin Float Window" onClick={handlePinFloat} />
+      <div className="menu-item flex items-center gap-2 px-3 py-[5px]">
+        <Eye className="w-4 h-4 text-gray-500 shrink-0" />
+        <span className="text-[13px] text-gray-800">Opacity</span>
+        <input
+          type="range"
+          min="10"
+          max="100"
+          value={Math.round(floatOpacity * 100)}
+          onChange={e => setFloatOpacity(parseInt(e.target.value) / 100)}
+          className="flex-1 h-1 accent-gray-500 cursor-default"
+        />
+        <span className="text-[11px] text-gray-400 tabular-nums w-7 text-right">{Math.round(floatOpacity * 100)}%</span>
+      </div>
       <MenuItem icon={Globe} label="Open Dashboard" onClick={handleOpenDashboard} />
 
       <Separator />

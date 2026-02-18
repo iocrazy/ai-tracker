@@ -67,6 +67,7 @@ export function mapTmuxToSessions(
       return {
         id: win.window_id,
         name: win.window_name,
+        windowIndex: win.window_index,
         status,
         lastActive,
         // Use session_name + window_id for unique avatar
@@ -75,6 +76,9 @@ export function mapTmuxToSessions(
         pane: String(win.pane_count),
       };
     });
+
+    // Sort windows by tmux window index
+    windows.sort((a, b) => a.windowIndex - b.windowIndex);
 
     // Determine session status
     const hasInProgress = windows.some(w => w.status === 'BUSY');
@@ -127,9 +131,10 @@ export function mapTasksToSessions(tasks: BackendTask[]): AgentSession[] {
     const sessionStatus: AgentSession['status'] =
       hasInProgress ? 'BUSY' : hasPaused ? 'IDLE' : 'IDLE';
 
-    const windows: AgentWindow[] = data.tasks.map(task => ({
+    const windows: AgentWindow[] = data.tasks.map((task, idx) => ({
       id: `${task.window_id}-${task.pane}`,
       name: task.window || task.window_id,
+      windowIndex: idx,
       status: mapTaskStatus(task.status, task.acknowledged),
       lastActive: task.started_at ? formatDuration(task.duration_seconds) : '--:--',
       avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(task.summary.slice(0, 10))}`,

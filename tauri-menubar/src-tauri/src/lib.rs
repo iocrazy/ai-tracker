@@ -1,10 +1,88 @@
+use std::sync::Mutex;
+
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewUrl, WebviewWindowBuilder,
+    Manager, RunEvent, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::CommandChild;
 #[cfg(target_os = "macos")]
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+
+/// Holds the sidecar child process so we can kill it on exit.
+struct SidecarState {
+    child: Mutex<Option<CommandChild>>,
+    /// "sidecar" if we spawned it, "external" if port was already occupied
+    source: &'static str,
+}
+
+/// Check if a TCP port is already in use.
+fn is_port_in_use(port: u16) -> bool {
+    std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+/// Start the tracker-server sidecar if port 3099 is not already occupied.
+fn start_sidecar(app: &tauri::AppHandle) {
+    const PORT: u16 = 3099;
+
+    if is_port_in_use(PORT) {
+        eprintln!("tracker-server already running on port {PORT}, reusing existing instance");
+        app.manage(SidecarState {
+            child: Mutex::new(None),
+            source: "external",
+        });
+        return;
+    }
+
+    let cmd = match app.shell().sidecar("tracker-server") {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            eprintln!("Failed to create sidecar command: {e}");
+            app.manage(SidecarState {
+                child: Mutex::new(None),
+                source: "offline",
+            });
+            return;
+        }
+    };
+
+    match cmd.spawn() {
+        Ok((_rx, child)) => {
+            // Wait for the server to become ready (poll health check)
+            for i in 0..50 {
+                if is_port_in_use(PORT) {
+                    eprintln!("tracker-server sidecar ready after {i}x100ms");
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            app.manage(SidecarState {
+                child: Mutex::new(Some(child)),
+                source: "sidecar",
+            });
+        }
+        Err(e) => {
+            eprintln!("Failed to spawn sidecar: {e}");
+            app.manage(SidecarState {
+                child: Mutex::new(None),
+                source: "offline",
+            });
+        }
+    }
+}
+
+/// Kill the sidecar process if we spawned one.
+fn stop_sidecar(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<SidecarState>() {
+        if let Ok(mut guard) = state.child.lock() {
+            if let Some(child) = guard.take() {
+                let _ = child.kill();
+                eprintln!("tracker-server sidecar killed");
+            }
+        }
+    }
+}
 
 /// Apply vibrancy + make NSWindow non-opaque so rounded corners show through
 #[cfg(target_os = "macos")]
@@ -128,11 +206,73 @@ fn read_local_token() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(&url)
-        .spawn()
+fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
+    // If the dashboard window already exists, just focus it
+    if let Some(win) = app.get_webview_window("dashboard") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+
+    // Read auth token to auto-authenticate the dashboard
+    let token_script = match read_local_token() {
+        Ok(token) => {
+            // Escape backslashes and quotes for JS string literal
+            let escaped = token.replace('\\', "\\\\").replace('\'', "\\'");
+            format!(
+                "localStorage.setItem('agent-tracker-auth-token', '{}');",
+                escaped
+            )
+        }
+        Err(_) => String::new(),
+    };
+
+    // Create a new dashboard window pointing at the tracker-server web UI
+    let url = WebviewUrl::External("http://localhost:3099".parse().unwrap());
+    let mut builder = WebviewWindowBuilder::new(&app, "dashboard", url)
+        .title("Agent Tracker Dashboard")
+        .inner_size(1200.0, 800.0)
+        .resizable(true);
+
+    if !token_script.is_empty() {
+        builder = builder.initialization_script(&token_script);
+    }
+
+    builder
+        .build()
+        .map_err(|e: tauri::Error| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_server_status(app: tauri::AppHandle) -> serde_json::Value {
+    let source = app
+        .try_state::<SidecarState>()
+        .map(|s| s.source)
+        .unwrap_or("unknown");
+    let running = is_port_in_use(3099);
+    serde_json::json!({
+        "source": source,
+        "port": 3099,
+        "running": running,
+    })
+}
+
+#[tauri::command]
+fn save_local_token(token: String) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let path = std::path::PathBuf::from(home)
+        .join(".config/agent-tracker/agent-config.json");
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Cannot read config: {}", e))?;
+    let mut json: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| format!("Invalid JSON: {}", e))?;
+    json["auth"]["token"] = serde_json::Value::String(token);
+    let output = serde_json::to_string_pretty(&json)
         .map_err(|e| e.to_string())?;
+    std::fs::write(&path, output)
+        .map_err(|e| format!("Cannot write config: {}", e))?;
     Ok(())
 }
 
@@ -199,10 +339,23 @@ fn create_panel(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .invoke_handler(tauri::generate_handler![show_float, hide_float, set_float_opacity, open_url, read_local_token, quit_app])
+        .invoke_handler(tauri::generate_handler![show_float, hide_float, set_float_opacity, open_dashboard, read_local_token, save_local_token, get_server_status, quit_app])
         .setup(|app| {
+            // Enable autostart on first run
+            use tauri_plugin_autostart::ManagerExt;
+            let autostart = app.autolaunch();
+            if !autostart.is_enabled().unwrap_or(false) {
+                let _ = autostart.enable();
+            }
+
+            start_sidecar(app.handle());
             create_panel(app.handle());
 
             let tray_icon = {
@@ -244,6 +397,11 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let RunEvent::ExitRequested { .. } = &event {
+                stop_sidecar(app);
+            }
+        });
 }

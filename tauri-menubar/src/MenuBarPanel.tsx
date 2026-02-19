@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { Monitor, Pin, Globe, LogOut, Power, ChevronRight, Eye } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Monitor, Pin, Globe, LogOut, Power, ChevronRight, Eye, Server, Key, Check, X } from 'lucide-react';
 import { AgentSession, AgentWindow, ClaudeStatus } from './shared/types';
 import { invoke } from '@tauri-apps/api/core';
-import { clearAuthToken } from './shared/services/auth';
+import { clearAuthToken, setAuthToken, API_BASE } from './shared/services/auth';
 
 interface MenuBarPanelProps {
   sessions: AgentSession[];
@@ -111,12 +111,54 @@ const MenuItem: React.FC<{
 
 const OPACITY_KEY = 'float_opacity';
 
+interface ServerStatus {
+  source: 'sidecar' | 'external' | 'offline' | 'unknown';
+  port: number;
+  running: boolean;
+}
+
+interface HealthInfo {
+  uptime: string;
+  dbSize: string;
+  tmuxSessions: number;
+}
+
 export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connectionStatus, stats, onLogout }) => {
   const isOnline = connectionStatus === 'connected';
   const [floatOpacity, setFloatOpacity] = useState(() => {
     const saved = localStorage.getItem(OPACITY_KEY);
     return saved ? parseFloat(saved) : 1.0;
   });
+  const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+  const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [editingToken, setEditingToken] = useState(false);
+  const [tokenValue, setTokenValue] = useState('');
+  const [tokenSaved, setTokenSaved] = useState(false);
+
+  // Fetch server status and health on mount + periodically
+  const fetchStatus = useCallback(async () => {
+    try {
+      const status = await invoke<ServerStatus>('get_server_status');
+      setServerStatus(status);
+    } catch { /* ignore */ }
+    try {
+      const resp = await fetch(`${API_BASE}/health`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setHealth({
+          uptime: data.checks?.uptime || data.uptime || '',
+          dbSize: data.checks?.database?.size || '',
+          tmuxSessions: data.checks?.tmux?.sessions ?? 0,
+        });
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 30000);
+    return () => clearInterval(interval);
+  }, [fetchStatus]);
 
   useEffect(() => {
     localStorage.setItem(OPACITY_KEY, String(floatOpacity));
@@ -125,20 +167,60 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
 
   const handlePinFloat = async () => {
     try { await invoke('show_float'); } catch (e) { console.error('show_float failed:', e); }
-    // Apply stored opacity after showing
     setTimeout(() => {
       invoke('set_float_opacity', { opacity: floatOpacity }).catch(() => {});
     }, 100);
   };
 
   const handleOpenDashboard = () => {
-    invoke('open_url', { url: 'http://localhost:3099' }).catch(console.error);
+    invoke('open_dashboard').catch(console.error);
   };
 
   const handleLogout = async () => {
     await clearAuthToken();
     onLogout?.();
   };
+
+  const handleEditToken = async () => {
+    if (!editingToken) {
+      // Load current token from config file
+      try {
+        const token = await invoke<string>('read_local_token');
+        setTokenValue(token);
+      } catch {
+        setTokenValue('');
+      }
+      setEditingToken(true);
+      setTokenSaved(false);
+    }
+  };
+
+  const handleSaveToken = async () => {
+    if (!tokenValue.trim()) return;
+    try {
+      // Save to server config (agent-config.json)
+      await invoke('save_local_token', { token: tokenValue.trim() });
+      // Also update the Tauri app's auth token
+      await setAuthToken(tokenValue.trim());
+      setTokenSaved(true);
+      setTimeout(() => {
+        setEditingToken(false);
+        setTokenSaved(false);
+      }, 1000);
+    } catch (e) {
+      console.error('save token failed:', e);
+    }
+  };
+
+  const handleCancelToken = () => {
+    setEditingToken(false);
+    setTokenSaved(false);
+  };
+
+  const sourceLabel = serverStatus?.source === 'sidecar' ? 'Sidecar'
+    : serverStatus?.source === 'external' ? 'External'
+    : serverStatus?.source === 'offline' ? 'Offline'
+    : '...';
 
   return (
     <div className="flex flex-col h-full select-none rounded-[10px] overflow-hidden py-1">
@@ -156,6 +238,16 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
             {stats.totalCost > 0 && <span className="text-gray-400 ml-1.5">${stats.totalCost.toFixed(2)}</span>}
           </span>
         )}
+      </div>
+
+      {/* Server info */}
+      <div className="flex items-center gap-2 px-3 py-[3px] text-[11px] text-gray-400">
+        <Server className="w-3 h-3 shrink-0" />
+        <span className={serverStatus?.running ? 'text-green-600' : 'text-red-500'}>
+          {sourceLabel}
+        </span>
+        <span>:{serverStatus?.port ?? 3099}</span>
+        {health?.uptime && <span className="ml-auto">{health.uptime}</span>}
       </div>
 
       <Separator />
@@ -193,6 +285,41 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
       <MenuItem icon={Globe} label="Open Dashboard" onClick={handleOpenDashboard} />
 
       <Separator />
+
+      {/* Token */}
+      {!editingToken ? (
+        <MenuItem icon={Key} label="Auth Token" onClick={handleEditToken} />
+      ) : (
+        <div className="px-3 py-[5px]">
+          <div className="flex items-center gap-1">
+            <Key className="w-4 h-4 text-gray-500 shrink-0" />
+            <input
+              type="text"
+              value={tokenValue}
+              onChange={e => setTokenValue(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') handleSaveToken();
+                if (e.key === 'Escape') handleCancelToken();
+              }}
+              placeholder="Enter token..."
+              autoFocus
+              className="flex-1 text-[12px] bg-black/5 rounded px-1.5 py-0.5 outline-none focus:ring-1 focus:ring-blue-400 min-w-0 font-mono"
+            />
+            {tokenSaved ? (
+              <Check className="w-4 h-4 text-green-500 shrink-0" />
+            ) : (
+              <>
+                <button onClick={handleSaveToken} className="p-0.5 hover:bg-black/5 rounded">
+                  <Check className="w-3.5 h-3.5 text-blue-500" />
+                </button>
+                <button onClick={handleCancelToken} className="p-0.5 hover:bg-black/5 rounded">
+                  <X className="w-3.5 h-3.5 text-gray-400" />
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Bottom */}
       <MenuItem icon={LogOut} label="Disconnect" onClick={handleLogout} danger />

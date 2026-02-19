@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
@@ -9,6 +10,33 @@ use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandChild;
 #[cfg(target_os = "macos")]
 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+
+/// Global sidecar PID for signal handler cleanup.
+/// When the app is killed via SIGTERM/SIGINT (e.g. pkill), the RunEvent::ExitRequested
+/// handler doesn't fire. This atomic lets the signal handler kill the sidecar.
+static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn signal_cleanup(_sig: libc::c_int) {
+    let pid = SIDECAR_PID.swap(0, Ordering::Relaxed);
+    if pid != 0 {
+        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    }
+    unsafe { libc::_exit(1); }
+}
+
+fn install_signal_handlers() {
+    unsafe {
+        // Use sigaction for reliable signal handling that persists
+        // across framework event loops
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = signal_cleanup as *const () as libc::sighandler_t;
+        sa.sa_flags = 0;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
+    }
+}
 
 /// Holds the sidecar child process so we can kill it on exit.
 struct SidecarState {
@@ -49,6 +77,8 @@ fn start_sidecar(app: &tauri::AppHandle) {
 
     match cmd.spawn() {
         Ok((_rx, child)) => {
+            // Store PID for signal handler cleanup
+            SIDECAR_PID.store(child.pid(), Ordering::Relaxed);
             // Wait for the server to become ready (poll health check)
             for i in 0..50 {
                 if is_port_in_use(PORT) {
@@ -74,6 +104,7 @@ fn start_sidecar(app: &tauri::AppHandle) {
 
 /// Kill the sidecar process if we spawned one.
 fn stop_sidecar(app: &tauri::AppHandle) {
+    SIDECAR_PID.store(0, Ordering::Relaxed);
     if let Some(state) = app.try_state::<SidecarState>() {
         if let Ok(mut guard) = state.child.lock() {
             if let Some(child) = guard.take() {
@@ -338,6 +369,9 @@ fn create_panel(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install early — before Tauri builder so we catch signals during init
+    install_signal_handlers();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -400,6 +434,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            // Install signal handlers once, AFTER Tauri's own initialization,
+            // so ours aren't overridden by the framework.
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(install_signal_handlers);
+
             if let RunEvent::ExitRequested { .. } = &event {
                 stop_sidecar(app);
             }

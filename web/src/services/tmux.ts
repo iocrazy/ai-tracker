@@ -235,6 +235,32 @@ export async function tmuxSelectWindow(session: string, window: string, windowId
   return response.json();
 }
 
+// Rename a tmux window
+export async function tmuxRenameWindow(session: string, window: string, name: string): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/rename-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, window, name }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
+// Rename a tmux session
+export async function tmuxRenameSession(session: string, name: string): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/rename-session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, name }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
 // Claude status API
 export interface ClaudeStatus {
   agent_type: 'claude' | 'opencode' | null;  // Detected AI agent type

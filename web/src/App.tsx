@@ -17,7 +17,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
-import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
+import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, consumeTokenFromURL, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 // localStorage cache keys
@@ -94,8 +94,9 @@ const App: React.FC = () => {
   const [notifications, setNotifications] = useState<NotificationEntry[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
 
-  // Check existing token on mount
+  // Check existing token on mount (also consume ?token= from URL for Tauri auto-auth)
   useEffect(() => {
+    consumeTokenFromURL();
     const token = getAuthToken();
     if (!token) {
       setIsAuthenticated(false);

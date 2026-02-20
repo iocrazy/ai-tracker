@@ -110,7 +110,7 @@ export const AIAnalystView: React.FC<AIAnalystViewProps> = ({ sessions, timeline
   const maxHourly = Math.max(...stats.hourlyActivity, 1);
 
   return (
-    <div className="flex flex-col gap-4 sm:gap-6 max-w-5xl mx-auto pt-4 pb-10 px-2 sm:px-0">
+    <div className="flex flex-col gap-4 sm:gap-6 pt-4 pb-10 px-2 sm:px-0">
       <div className="flex items-center gap-4 sm:gap-6 mb-2">
         <h2 className="text-lg sm:text-2xl font-black text-green-700 uppercase tracking-tighter bg-green-900/10 px-3 sm:px-4 py-1 font-pixel">
           <BarChart3 className="w-5 h-5 inline mr-2" />SYSTEM ANALYTICS

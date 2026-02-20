@@ -1691,6 +1691,23 @@ impl TmuxAgent {
         Ok(())
     }
 
+    /// Rename a tmux session
+    /// Format: tmux rename-session -t {target} "{name}"
+    pub async fn rename_session(target: &str, name: &str) -> Result<()> {
+        let output = Command::new(TMUX_BIN)
+            .args(["rename-session", "-t", target, name])
+            .output()
+            .await
+            .context("Failed to rename tmux session")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux rename-session failed: {}", stderr);
+        }
+
+        Ok(())
+    }
+
     /// Update window name with status icon prefix
     /// Status icons match session icons in tmux-status/left.sh:
     /// - in_progress/BUSY → ⏳

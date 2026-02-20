@@ -1,7 +1,8 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { AgentSession, AgentWindow } from '../types';
-import { Plus, Terminal, Trash2, MessageSquare, XCircle, Pause, Check, Activity, PowerOff, Settings, GripVertical } from 'lucide-react';
+import { Plus, Terminal, Trash2, MessageSquare, XCircle, Pause, Check, Activity, PowerOff, Settings, GripVertical, Pencil } from 'lucide-react';
 import { ProjectSettings } from './ProjectSettings';
+import { tmuxRenameWindow, tmuxRenameSession } from '../services/tmux';
 import {
   DndContext,
   closestCenter,
@@ -100,16 +101,21 @@ const WindowCardContent: React.FC<{
   radialPos: typeof RADIAL_EXPANDED | typeof RADIAL_COLLAPSED;
   style: typeof STATUS_STYLES.IDLE;
   onCardClick?: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
   onAvatarTap?: (windowId: string, e: React.MouseEvent) => void;
   onDeleteWindow?: () => void;
   onSelectWindow?: () => void;
   onViewHistory?: () => void;
   dragHandleProps?: { listeners: Record<string, any> | undefined; attributes: Record<string, any> };
   isDragging?: boolean;
-}> = ({ win, sessionIp, isExpanded, radialPos, style, onCardClick, onAvatarTap, onDeleteWindow, onSelectWindow, onViewHistory, dragHandleProps, isDragging }) => (
+  renameMode?: boolean;
+  onRenameConfirm?: (name: string) => void;
+  onRenameCancel?: () => void;
+}> = ({ win, sessionIp, isExpanded, radialPos, style, onCardClick, onContextMenu, onAvatarTap, onDeleteWindow, onSelectWindow, onViewHistory, dragHandleProps, isDragging, renameMode, onRenameConfirm, onRenameCancel }) => (
   <div
     className={`relative group cursor-pointer ${isDragging ? 'opacity-50' : ''}`}
     onClick={onCardClick}
+    onContextMenu={onContextMenu}
   >
     {/* Drag Handle */}
     {dragHandleProps && (
@@ -186,9 +192,23 @@ const WindowCardContent: React.FC<{
         </div>
 
         <div className="flex items-center gap-2 mb-2 sm:mb-3">
-          <h4 title={win.name} className="text-base sm:text-xl md:text-2xl font-bold retro-text-shadow font-['Share_Tech_Mono'] truncate text-green-400">
-            {win.name}
-          </h4>
+          {renameMode ? (
+            <input
+              autoFocus
+              defaultValue={win.name}
+              onKeyDown={e => {
+                if (e.key === 'Enter') { const v = (e.target as HTMLInputElement).value.trim(); if (v && v !== win.name) onRenameConfirm?.(v); else onRenameCancel?.(); }
+                if (e.key === 'Escape') onRenameCancel?.();
+              }}
+              onBlur={e => { const v = e.target.value.trim(); if (v && v !== win.name) onRenameConfirm?.(v); else onRenameCancel?.(); }}
+              onClick={e => e.stopPropagation()}
+              className="text-base sm:text-xl md:text-2xl font-bold retro-text-shadow font-['Share_Tech_Mono'] text-green-400 bg-black/80 border border-green-500 px-1 outline-none w-full"
+            />
+          ) : (
+            <h4 title={win.name} className="text-base sm:text-xl md:text-2xl font-bold retro-text-shadow font-['Share_Tech_Mono'] truncate text-green-400">
+              {win.name}
+            </h4>
+          )}
         </div>
 
         <div className={`h-1.5 sm:h-2 w-full mb-2 sm:mb-4 overflow-hidden border ${win.status === 'IDLE' ? 'bg-green-900/20 border-green-800/50' : 'bg-green-900/30 border-green-900/50'}`}>
@@ -233,11 +253,15 @@ const SortableWindowCard: React.FC<{
   sessionIp: string;
   isExpanded: boolean;
   onCardClick: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
   onAvatarTap: (windowId: string, e: React.MouseEvent) => void;
   onDeleteWindow: () => void;
   onSelectWindow: () => void;
   onViewHistory: () => void;
-}> = ({ window: win, sessionName, sessionId, sessionIp, isExpanded, onCardClick, onAvatarTap, onDeleteWindow, onSelectWindow, onViewHistory }) => {
+  renameMode?: boolean;
+  onRenameConfirm?: (name: string) => void;
+  onRenameCancel?: () => void;
+}> = ({ window: win, sessionName, sessionId, sessionIp, isExpanded, onCardClick, onContextMenu, onAvatarTap, onDeleteWindow, onSelectWindow, onViewHistory, renameMode, onRenameConfirm, onRenameCancel }) => {
   const {
     attributes,
     listeners,
@@ -265,14 +289,104 @@ const SortableWindowCard: React.FC<{
         radialPos={radialPos}
         style={statusStyle}
         onCardClick={onCardClick}
+        onContextMenu={onContextMenu}
         onAvatarTap={onAvatarTap}
         onDeleteWindow={onDeleteWindow}
         onSelectWindow={onSelectWindow}
         onViewHistory={onViewHistory}
         dragHandleProps={{ listeners, attributes }}
         isDragging={isDragging}
+        renameMode={renameMode}
+        onRenameConfirm={onRenameConfirm}
+        onRenameCancel={onRenameCancel}
       />
     </div>
+  );
+};
+
+// Context menu for right-click on window cards
+const ContextMenu: React.FC<{
+  x: number;
+  y: number;
+  onRename: () => void;
+  onConsole: () => void;
+  onHistory: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}> = ({ x, y, onRename, onConsole, onHistory, onDelete, onClose }) => {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [onClose]);
+
+  const items = [
+    { label: 'Rename', icon: Pencil, action: onRename, color: 'text-green-400' },
+    { label: 'Console', icon: Terminal, action: onConsole, color: 'text-green-400' },
+    { label: 'History', icon: MessageSquare, action: onHistory, color: 'text-cyan-400' },
+    { label: 'Delete', icon: Trash2, action: onDelete, color: 'text-red-400' },
+  ];
+
+  return (
+    <div
+      ref={menuRef}
+      className="fixed z-[100] bg-black/95 border border-green-700/60 rounded shadow-[0_0_20px_rgba(34,197,94,0.3)] py-1 min-w-[140px]"
+      style={{ left: x, top: y }}
+    >
+      {items.map(item => (
+        <button
+          key={item.label}
+          onClick={() => { item.action(); onClose(); }}
+          className="w-full flex items-center gap-2 px-3 py-1.5 text-xs font-mono tracking-wider hover:bg-green-900/30 transition-colors"
+        >
+          <item.icon className={`w-3.5 h-3.5 ${item.color}`} />
+          <span className={item.color}>{item.label.toUpperCase()}</span>
+        </button>
+      ))}
+    </div>
+  );
+};
+
+// Inline rename input
+const InlineRenameInput: React.FC<{
+  value: string;
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}> = ({ value, onConfirm, onCancel }) => {
+  const [text, setText] = useState(value);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.select();
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      const trimmed = text.trim();
+      if (trimmed && trimmed !== value) onConfirm(trimmed);
+      else onCancel();
+    }
+    if (e.key === 'Escape') onCancel();
+  };
+
+  return (
+    <input
+      ref={inputRef}
+      value={text}
+      onChange={e => setText(e.target.value)}
+      onKeyDown={handleKeyDown}
+      onBlur={() => {
+        const trimmed = text.trim();
+        if (trimmed && trimmed !== value) onConfirm(trimmed);
+        else onCancel();
+      }}
+      autoFocus
+      className="text-base sm:text-lg md:text-xl font-black text-green-400 retro-text-shadow-strong font-pixel tracking-wider bg-black/60 px-2 border border-green-500 shadow-[0_0_10px_rgba(34,197,94,0.3)] outline-none focus:border-green-400 w-48"
+    />
   );
 };
 
@@ -297,6 +411,36 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
 
   // Click timer for distinguishing single/double click
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<{
+    x: number; y: number;
+    sessionName: string; windowName: string; windowId: string; claudePane?: string;
+  } | null>(null);
+
+  // Rename state
+  const [renamingSession, setRenamingSession] = useState<string | null>(null);
+  const [renamingWindow, setRenamingWindow] = useState<{ sessionName: string; windowId: string } | null>(null);
+
+  // Right-click on window card
+  const handleWindowContextMenu = (
+    e: React.MouseEvent,
+    sessionName: string, windowName: string, windowId: string, claudePane?: string
+  ) => {
+    e.preventDefault();
+    setExpandedCard(null);
+    setContextMenu({ x: e.clientX, y: e.clientY, sessionName, windowName, windowId, claudePane });
+  };
+
+  const handleRenameWindow = async (sessionName: string, windowName: string, newName: string) => {
+    await tmuxRenameWindow(sessionName, windowName, newName);
+    setRenamingWindow(null);
+  };
+
+  const handleRenameSession = async (sessionName: string, newName: string) => {
+    await tmuxRenameSession(sessionName, newName);
+    setRenamingSession(null);
+  };
 
   // Pointer sensor with activation distance to distinguish click from drag
   const sensors = useSensors(
@@ -386,9 +530,21 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
                   <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 sm:gap-4 mb-4 sm:mb-6">
                       <div className="flex items-center gap-2 sm:gap-4">
                           <span className="text-green-700 font-bold tracking-widest uppercase text-xs sm:text-sm">SESSION:</span>
-                          <span className="text-base sm:text-lg md:text-xl font-black text-green-400 retro-text-shadow-strong font-pixel tracking-wider bg-black/60 px-2 border border-green-500/30 shadow-[0_0_10px_rgba(34,197,94,0.3)]">
+                          {renamingSession === session.name ? (
+                            <InlineRenameInput
+                              value={session.name}
+                              onConfirm={(newName) => handleRenameSession(session.name, newName)}
+                              onCancel={() => setRenamingSession(null)}
+                            />
+                          ) : (
+                            <span
+                              className="text-base sm:text-lg md:text-xl font-black text-green-400 retro-text-shadow-strong font-pixel tracking-wider bg-black/60 px-2 border border-green-500/30 shadow-[0_0_10px_rgba(34,197,94,0.3)] cursor-pointer hover:border-green-400 transition-colors"
+                              onClick={() => setRenamingSession(session.name)}
+                              title="Click to rename"
+                            >
                               {session.name}
-                          </span>
+                            </span>
+                          )}
                           <span className="text-green-800 text-xs sm:text-sm font-mono">({session.windows.length})</span>
                       </div>
                       <div className="h-px flex-grow bg-gradient-to-r from-green-900/50 to-transparent hidden sm:block"></div>
@@ -429,10 +585,14 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
                               sessionIp={session.ip}
                               isExpanded={expandedCard === window.id}
                               onCardClick={() => handleCardClick(session.name, window.name, window.id)}
+                              onContextMenu={(e) => handleWindowContextMenu(e, session.name, window.name, window.id, window.claudePane)}
                               onAvatarTap={handleAvatarTap}
                               onDeleteWindow={() => { onRequestDeleteWindow(session.id, window.id, window.name); setExpandedCard(null); }}
                               onSelectWindow={() => { onSelectWindow(session.name, window.name, window.id); setExpandedCard(null); }}
                               onViewHistory={() => { onViewHistory(session.name, window.name, window.id, window.claudePane); setExpandedCard(null); }}
+                              renameMode={renamingWindow?.sessionName === session.name && renamingWindow?.windowId === window.id}
+                              onRenameConfirm={(name) => handleRenameWindow(session.name, window.name, name)}
+                              onRenameCancel={() => setRenamingWindow(null)}
                             />
                         ))}
 
@@ -451,6 +611,22 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
          </div>
 
          {settingsSession && <ProjectSettings sessionName={settingsSession} onClose={() => setSettingsSession(null)} />}
+
+         {/* Context Menu */}
+         {contextMenu && (
+           <ContextMenu
+             x={contextMenu.x}
+             y={contextMenu.y}
+             onRename={() => setRenamingWindow({ sessionName: contextMenu.sessionName, windowId: contextMenu.windowId })}
+             onConsole={() => { onSelectWindow(contextMenu.sessionName, contextMenu.windowName, contextMenu.windowId); }}
+             onHistory={() => { onViewHistory(contextMenu.sessionName, contextMenu.windowName, contextMenu.windowId, contextMenu.claudePane); }}
+             onDelete={() => {
+               const session = sessions.find(s => s.name === contextMenu.sessionName);
+               if (session) onRequestDeleteWindow(session.id, contextMenu.windowId, contextMenu.windowName);
+             }}
+             onClose={() => setContextMenu(null)}
+           />
+         )}
       </div>
 
       {/* Drag Overlay */}

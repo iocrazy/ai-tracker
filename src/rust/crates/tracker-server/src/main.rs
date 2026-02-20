@@ -2367,6 +2367,8 @@ async fn main() -> Result<()> {
         .route("/api/tmux/new-window", post(routes_tmux::tmux_new_window))
         .route("/api/tmux/select-window", post(routes_tmux::tmux_select_window))
         .route("/api/tmux/swap-window", post(routes_tmux::tmux_swap_window))
+        .route("/api/tmux/rename-window", post(routes_tmux::tmux_rename_window))
+        .route("/api/tmux/rename-session", post(routes_tmux::tmux_rename_session))
         // Stream (real-time pane output)
         .route("/api/stream/start", post(stream_start))
         .route("/api/stream/stop", post(stream_stop))

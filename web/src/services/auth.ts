@@ -6,6 +6,20 @@ export const WS_BASE = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'
 
 const AUTH_TOKEN_KEY = 'agent-tracker-auth-token';
 
+/** Check URL for ?token= param, store it, and clean URL */
+export function consumeTokenFromURL(): void {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('token');
+  if (token) {
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+    // Remove token from URL without reload
+    params.delete('token');
+    const clean = params.toString();
+    const newUrl = window.location.pathname + (clean ? `?${clean}` : '') + window.location.hash;
+    window.history.replaceState({}, '', newUrl);
+  }
+}
+
 export function getAuthToken(): string | null {
   return localStorage.getItem(AUTH_TOKEN_KEY);
 }

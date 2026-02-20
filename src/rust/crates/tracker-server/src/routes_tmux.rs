@@ -200,6 +200,21 @@ pub(crate) struct TmuxSwapWindowRequest {
     target_index: u32,
 }
 
+/// Rename window request
+#[derive(Deserialize)]
+pub(crate) struct TmuxRenameWindowRequest {
+    session: String,
+    window: String,
+    name: String,
+}
+
+/// Rename session request
+#[derive(Deserialize)]
+pub(crate) struct TmuxRenameSessionRequest {
+    session: String,
+    name: String,
+}
+
 // ============================================================================
 // Browser Handlers
 // ============================================================================
@@ -719,6 +734,47 @@ pub(crate) async fn tmux_swap_window(
         Err(e) => Json(CommandResponse {
             success: false,
             message: format!("Failed to swap windows: {}", e),
+        }),
+    }
+}
+
+/// Rename a tmux window
+pub(crate) async fn tmux_rename_window(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TmuxRenameWindowRequest>,
+) -> Json<CommandResponse> {
+    let target = format!("{}:{}", req.session, req.window);
+    match agent::TmuxAgent::rename_window(&target, &req.name).await {
+        Ok(()) => {
+            state.broadcast_state();
+            Json(CommandResponse {
+                success: true,
+                message: format!("Renamed window to '{}'", req.name),
+            })
+        }
+        Err(e) => Json(CommandResponse {
+            success: false,
+            message: format!("Failed to rename window: {}", e),
+        }),
+    }
+}
+
+/// Rename a tmux session
+pub(crate) async fn tmux_rename_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TmuxRenameSessionRequest>,
+) -> Json<CommandResponse> {
+    match agent::TmuxAgent::rename_session(&req.session, &req.name).await {
+        Ok(()) => {
+            state.broadcast_state();
+            Json(CommandResponse {
+                success: true,
+                message: format!("Renamed session to '{}'", req.name),
+            })
+        }
+        Err(e) => Json(CommandResponse {
+            success: false,
+            message: format!("Failed to rename session: {}", e),
         }),
     }
 }

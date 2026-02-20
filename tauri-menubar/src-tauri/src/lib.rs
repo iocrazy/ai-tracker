@@ -2,7 +2,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, RunEvent, WebviewUrl, WebviewWindowBuilder,
 };
@@ -245,29 +244,18 @@ fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    // Read auth token to auto-authenticate the dashboard
-    let token_script = match read_local_token() {
-        Ok(token) => {
-            // Escape backslashes and quotes for JS string literal
-            let escaped = token.replace('\\', "\\\\").replace('\'', "\\'");
-            format!(
-                "localStorage.setItem('agent-tracker-auth-token', '{}');",
-                escaped
-            )
-        }
-        Err(_) => String::new(),
+    // Build URL with auth token as query parameter for auto-authentication.
+    // The web frontend reads ?token= from URL, stores it in localStorage, and cleans the URL.
+    let url_str = match read_local_token() {
+        Ok(token) => format!("http://localhost:3099?token={}", token.trim()),
+        Err(_) => "http://localhost:3099".to_string(),
     };
 
-    // Create a new dashboard window pointing at the tracker-server web UI
-    let url = WebviewUrl::External("http://localhost:3099".parse().unwrap());
-    let mut builder = WebviewWindowBuilder::new(&app, "dashboard", url)
+    let url = WebviewUrl::External(url_str.parse().unwrap());
+    let builder = WebviewWindowBuilder::new(&app, "dashboard", url)
         .title("Agent Tracker Dashboard")
         .inner_size(1200.0, 800.0)
         .resizable(true);
-
-    if !token_script.is_empty() {
-        builder = builder.initialization_script(&token_script);
-    }
 
     builder
         .build()
@@ -396,22 +384,10 @@ pub fn run() {
                 let icon_bytes = include_bytes!("../icons/tray-icon.png");
                 tauri::image::Image::from_bytes(icon_bytes).expect("failed to load tray icon")
             };
-            let quit_item = MenuItemBuilder::with_id("quit", "Quit Agent Tracker")
-                .build(app)?;
-            let tray_menu = MenuBuilder::new(app)
-                .item(&quit_item)
-                .build()?;
-
             let _tray = TrayIconBuilder::new()
                 .icon(tray_icon)
                 .icon_as_template(true)
-                .menu(&tray_menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| {
-                    if event.id() == "quit" {
-                        app.exit(0);
-                    }
-                })
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
 

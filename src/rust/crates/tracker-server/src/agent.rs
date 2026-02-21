@@ -1374,25 +1374,58 @@ impl TmuxAgent {
         Ok(windows)
     }
 
-    /// Swap two windows within the same session
-    pub async fn swap_windows(session: &str, src_index: u32, dst_index: u32) -> Result<()> {
-        let src_target = format!("{}:{}", session, src_index);
-        let dst_target = format!("{}:{}", session, dst_index);
+    /// Move a window from src_index to dst_index within the same session.
+    /// Uses sequential swaps to "bubble" the window to its new position,
+    /// shifting intermediate windows rather than just swapping two positions.
+    pub async fn move_window(session: &str, src_index: u32, dst_index: u32) -> Result<()> {
+        if src_index == dst_index {
+            return Ok(());
+        }
 
+        let step: i32 = if src_index < dst_index { 1 } else { -1 };
+        let mut current = src_index as i32;
+
+        while current != dst_index as i32 {
+            let next = current + step;
+            let src_target = format!("{}:{}", session, current);
+            let dst_target = format!("{}:{}", session, next);
+
+            let output = Command::new(TMUX_BIN)
+                .args([
+                    "-S", "/private/tmp/tmux-501/default",
+                    "swap-window",
+                    "-s", &src_target,
+                    "-t", &dst_target,
+                ])
+                .output()
+                .await
+                .context("Failed to swap tmux windows")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("tmux swap-window failed at {}→{}: {}", current, next, stderr);
+            }
+
+            current = next;
+        }
+
+        Ok(())
+    }
+
+    /// Set a built-in tmux window option (e.g. automatic-rename, allow-rename)
+    pub async fn set_builtin_window_option(target: &str, key: &str, value: &str) -> Result<()> {
         let output = Command::new(TMUX_BIN)
             .args([
                 "-S", "/private/tmp/tmux-501/default",
-                "swap-window",
-                "-s", &src_target,
-                "-t", &dst_target,
+                "set-option", "-w", "-t", target, key, value,
             ])
             .output()
             .await
-            .context("Failed to swap tmux windows")?;
+            .context("Failed to set tmux window option")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("tmux swap-window failed: {}", stderr);
+            bail!("tmux set-option failed: {}", stderr);
         }
 
         Ok(())

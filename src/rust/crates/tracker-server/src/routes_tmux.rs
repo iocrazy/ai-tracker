@@ -717,23 +717,24 @@ pub(crate) async fn tmux_select_window(Json(req): Json<TmuxSelectWindowRequest>)
     }
 }
 
-/// Swap two windows within the same session (for drag-and-drop reordering)
+/// Move a window to a new position within the same session (for drag-and-drop reordering).
+/// Uses sequential swaps to shift intermediate windows, implementing insert-style reorder.
 pub(crate) async fn tmux_swap_window(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TmuxSwapWindowRequest>,
 ) -> Json<CommandResponse> {
-    match agent::TmuxAgent::swap_windows(&req.session, req.source_index, req.target_index).await {
+    match agent::TmuxAgent::move_window(&req.session, req.source_index, req.target_index).await {
         Ok(()) => {
             // Trigger broadcast so all clients see the new order
             state.broadcast_state();
             Json(CommandResponse {
                 success: true,
-                message: format!("Swapped windows {} <-> {}", req.source_index, req.target_index),
+                message: format!("Moved window {} → {}", req.source_index, req.target_index),
             })
         }
         Err(e) => Json(CommandResponse {
             success: false,
-            message: format!("Failed to swap windows: {}", e),
+            message: format!("Failed to move window: {}", e),
         }),
     }
 }
@@ -746,6 +747,10 @@ pub(crate) async fn tmux_rename_window(
     let target = format!("{}:{}", req.session, req.window);
     match agent::TmuxAgent::rename_window(&target, &req.name).await {
         Ok(()) => {
+            // Disable automatic-rename so tmux doesn't overwrite the new name
+            agent::TmuxAgent::set_builtin_window_option(&target, "automatic-rename", "off").await.ok();
+            // Update agent_base_name so status icon system uses the new name
+            agent::TmuxAgent::set_window_option(&target, "agent_base_name", &req.name).await.ok();
             state.broadcast_state();
             Json(CommandResponse {
                 success: true,

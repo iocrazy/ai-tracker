@@ -323,6 +323,11 @@ impl ProjectDatabase {
         Ok(())
     }
 
+    /// Get a lock on the database connection (for direct SQL in handlers)
+    pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap()
+    }
+
     // =========================================================================
     // History operations
     // =========================================================================
@@ -348,11 +353,11 @@ impl ProjectDatabase {
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(start) = start_date {
-            conditions.push("completed_at >= ?".to_string());
+            conditions.push("started_at >= ?".to_string());
             params_vec.push(Box::new(start.to_string()));
         }
         if let Some(end) = end_date {
-            conditions.push("completed_at <= ?".to_string());
+            conditions.push("started_at <= ?".to_string());
             params_vec.push(Box::new(end.to_string()));
         }
         if let Some(q) = search {
@@ -410,6 +415,146 @@ impl ProjectDatabase {
                 })
             })?
             .filter_map(|r| r.ok())
+            .collect();
+
+        Ok((entries, total))
+    }
+
+    /// Load history grouped by session:window (for grouped timeline view)
+    pub fn load_history_grouped(
+        &self,
+        limit: i32,
+        offset: i32,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<(Vec<WindowGroupEntry>, i32)> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(start) = start_date {
+            conditions.push("started_at >= ?".to_string());
+            params_vec.push(Box::new(start.to_string()));
+        }
+        if let Some(end) = end_date {
+            conditions.push("started_at <= ?".to_string());
+            params_vec.push(Box::new(end.to_string()));
+        }
+        if let Some(q) = search {
+            conditions.push("(summary LIKE ? OR completion_note LIKE ?)".to_string());
+            let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        // Count distinct groups
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM (
+                SELECT 1 FROM history {}
+                GROUP BY COALESCE(NULLIF(session, ''), session_id),
+                         COALESCE(NULLIF(window, ''), window_id)
+            )",
+            where_clause
+        );
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let total: i32 = conn
+            .prepare(&count_sql)?
+            .query_row(params_refs.as_slice(), |row| row.get(0))
+            .unwrap_or(0);
+
+        // Grouped query
+        let select_sql = format!(
+            "SELECT COALESCE(NULLIF(session, ''), session_id) as sess,
+                    COALESCE(NULLIF(window, ''), window_id) as win,
+                    GROUP_CONCAT(id, ',') as entry_ids,
+                    COUNT(*) as task_count,
+                    MIN(started_at) as first_started,
+                    MAX(COALESCE(completed_at, started_at)) as last_ended,
+                    SUM(duration_seconds) as total_duration,
+                    GROUP_CONCAT(COALESCE(NULLIF(summary, ''), 'No summary'), '|||') as summaries
+             FROM history {}
+             GROUP BY sess, win
+             ORDER BY MAX(started_at) DESC
+             LIMIT ? OFFSET ?",
+            where_clause
+        );
+
+        params_vec.push(Box::new(limit));
+        params_vec.push(Box::new(offset));
+        let all_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&select_sql)?;
+        let entries: Vec<WindowGroupEntry> = stmt
+            .query_map(all_refs.as_slice(), |row| {
+                let session: String = row.get::<_, String>(0).unwrap_or_default();
+                let window: String = row.get::<_, String>(1).unwrap_or_default();
+                let ids_str: String = row.get::<_, String>(2).unwrap_or_default();
+                let summaries_str: String = row.get::<_, String>(7).unwrap_or_default();
+
+                let entry_ids: Vec<i64> = ids_str
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+                let summaries: Vec<String> = summaries_str
+                    .split("|||")
+                    .map(|s| s.to_string())
+                    .collect();
+
+                let group_key = if session.is_empty() && window.is_empty() {
+                    "Unknown".to_string()
+                } else if session.is_empty() {
+                    window.clone()
+                } else {
+                    format!("{}:{}", session, window)
+                };
+
+                Ok(WindowGroupEntry {
+                    group_key,
+                    session,
+                    window,
+                    entry_ids,
+                    task_count: row.get::<_, i32>(3).unwrap_or(0),
+                    total_messages: 0, // filled in below
+                    total_duration: row.get::<_, f64>(6).unwrap_or(0.0),
+                    first_started: row.get::<_, String>(4).unwrap_or_default(),
+                    last_ended: row.get::<_, String>(5).unwrap_or_default(),
+                    summaries,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Fill in message counts per group
+        let entries: Vec<WindowGroupEntry> = entries
+            .into_iter()
+            .map(|mut g| {
+                if !g.entry_ids.is_empty() {
+                    let placeholders: String = g.entry_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let sql = format!(
+                        "SELECT COUNT(*) FROM conversation_messages WHERE history_id IN ({})",
+                        placeholders
+                    );
+                    if let Ok(mut stmt) = conn.prepare(&sql) {
+                        let params: Vec<Box<dyn rusqlite::ToSql>> =
+                            g.entry_ids.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>).collect();
+                        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+                        if let Ok(count) = stmt.query_row(refs.as_slice(), |row| row.get::<_, i32>(0)) {
+                            g.total_messages = count;
+                        }
+                    }
+                }
+                g
+            })
             .collect();
 
         Ok((entries, total))
@@ -663,6 +808,21 @@ pub struct HistoryEntry {
     pub message_count: i32,
     pub file_path: Option<String>,
     pub project: Option<String>,
+}
+
+/// Grouped history entry (multiple tasks in the same session:window)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WindowGroupEntry {
+    pub group_key: String,
+    pub session: String,
+    pub window: String,
+    pub entry_ids: Vec<i64>,
+    pub task_count: i32,
+    pub total_messages: i32,
+    pub total_duration: f64,
+    pub first_started: String,
+    pub last_ended: String,
+    pub summaries: Vec<String>,
 }
 
 // =============================================================================

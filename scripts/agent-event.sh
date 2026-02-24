@@ -5,11 +5,12 @@
 # Actions: start, finish, pause
 # Agents: claude, opencode, codex, cursor, ...
 
-TRACKER_URL="http://127.0.0.1:3099"
-NOTIFY_SCRIPT="$HOME/.config/agent-tracker/scripts/notify.py"
-LOG_FILE="$HOME/.config/agent-tracker/logs/agent-event.log"
+source "$(dirname "$0")/env.sh"
 
-mkdir -p "$(dirname "$LOG_FILE")"
+NOTIFY_SCRIPT="$TRACKER_SCRIPTS_DIR/notify.py"
+LOG_FILE="$TRACKER_LOG_DIR/agent-event.log"
+
+mkdir -p "$TRACKER_LOG_DIR"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
@@ -86,8 +87,13 @@ PAYLOAD=$(jq -n \
     '{command: $command, session_id: $session_id, session: $session, window_id: $window_id, window: $window, pane: $pane, summary: $summary, transcript_path: $transcript_path}')
 
 log "POST $TRACKER_URL/api/command: $PAYLOAD"
+AUTH_HEADER=""
+if [[ -n "$TRACKER_TOKEN" ]]; then
+    AUTH_HEADER="Authorization: Bearer $TRACKER_TOKEN"
+fi
 RESPONSE=$(curl -s -m 5 -X POST "$TRACKER_URL/api/command" \
     -H "Content-Type: application/json" \
+    ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
     -d "$PAYLOAD" 2>&1)
 log "Response: $RESPONSE"
 

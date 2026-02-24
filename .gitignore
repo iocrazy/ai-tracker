@@ -21,5 +21,19 @@ Thumbs.db
 *.log
 *.pid
 
-# 本地配置
+# Tauri
+tauri-menubar/dist/
+tauri-menubar/node_modules/
+tauri-menubar/src-tauri/target/
+tauri-menubar/src-tauri/gen/
+tauri-menubar/src-tauri/bin/
+
+# Playwright
+.playwright-mcp/
+
+# Local config
 agent-config.json
+
+# Design artifacts (root-level only)
+/icon-*.png
+/reference/

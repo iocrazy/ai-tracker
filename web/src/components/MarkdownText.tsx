@@ -114,7 +114,7 @@ export const MarkdownText: React.FC<MarkdownTextProps> = React.memo(({
   // matchOffset is mutable per-render (tracks across text nodes), so this
   // can't be a pure useMemo — it's intentionally rebuilt each render when searching.
   const components = useMemo(() => {
-    if (!searchQuery || !onRegisterMatch) return MARKDOWN_COMPONENTS;
+    if (!searchQuery) return MARKDOWN_COMPONENTS;
 
     // Clone base components and wrap text-containing elements with search highlight
     let matchOffset = searchStartMatchIndex;

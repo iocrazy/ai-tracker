@@ -73,6 +73,11 @@ impl TmuxAgent {
         Self::find_session(workspace).await.is_some()
     }
 
+    /// Public version of find_session for use in route handlers
+    pub async fn find_session_public(workspace: &str) -> Option<String> {
+        Self::find_session(workspace).await
+    }
+
     /// Find the actual tmux session name by workspace label
     /// Handles numbered prefix from tmux session manager (e.g., "5-workspace")
     async fn find_session(workspace: &str) -> Option<String> {
@@ -112,7 +117,7 @@ impl TmuxAgent {
     }
 
     /// Check if a window exists in a session
-    async fn window_exists(session: &str, window: &str) -> bool {
+    pub async fn window_exists(session: &str, window: &str) -> bool {
         let output = Command::new(TMUX_BIN)
             .args([
                 "list-windows",
@@ -210,7 +215,10 @@ impl TmuxAgent {
             bail!("tmux new-session failed: {}", stderr);
         }
 
-        // Get actual session name after creation (may have numbered prefix)
+        // Wait for tmux session-created hook to finish renaming (adds numbered prefix)
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Get actual session name after creation (may have numbered prefix from hook)
         let actual_session = Self::find_session(workspace)
             .await
             .unwrap_or_else(|| workspace.to_string());
@@ -1863,6 +1871,144 @@ impl TmuxAgent {
             name,
             fullstack,
         }
+    }
+
+    /// Reset window layout to the default 3-pane layout (yazi + lazygit + agent).
+    ///
+    /// This kills all panes except the agent pane (claude/opencode), then
+    /// rebuilds the layout around it. Safe because yazi and lazygit can be
+    /// restarted without data loss.
+    pub async fn reset_window_layout(session: &str, window: &str) -> Result<String> {
+        let actual_session = Self::find_session(session)
+            .await
+            .unwrap_or_else(|| session.to_string());
+
+        // Build target - handle window ID (@N) or window name
+        let target = if window.starts_with('@') {
+            format!("{}:{}", actual_session, window)
+        } else {
+            format!("{}:={}", actual_session, window)
+        };
+
+        // List panes with pane_id, command, and current_path
+        let output = Command::new(TMUX_BIN)
+            .args([
+                "list-panes", "-t", &target,
+                "-F", "#{pane_id} #{pane_current_command} #{pane_current_path}",
+            ])
+            .output()
+            .await
+            .context("Failed to list panes")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux list-panes failed: {}", stderr);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let panes: Vec<(&str, &str, &str)> = stdout
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, ' ');
+                let id = parts.next()?;
+                let cmd = parts.next()?;
+                let path = parts.next().unwrap_or("");
+                Some((id, cmd, path))
+            })
+            .collect();
+
+        if panes.is_empty() {
+            bail!("No panes found in window");
+        }
+
+        // Find the agent pane (claude/opencode)
+        let agent_pane = panes.iter().find(|(_, cmd, _)| {
+            cmd.starts_with("2.") || cmd.starts_with("1.")
+                || *cmd == "claude" || *cmd == "claude-code"
+                || *cmd == "opencode"
+        });
+
+        let (agent_pane_id, working_dir) = match agent_pane {
+            Some((id, _, path)) => (id.to_string(), path.to_string()),
+            None => {
+                // Fallback: keep the first pane and use its working dir
+                let (id, _, path) = panes[0];
+                (id.to_string(), path.to_string())
+            }
+        };
+
+        // Kill all panes except the agent pane
+        for (id, _, _) in &panes {
+            if *id != agent_pane_id {
+                let _ = Command::new(TMUX_BIN)
+                    .args(["kill-pane", "-t", id])
+                    .output()
+                    .await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
+        }
+
+        // Small delay for tmux to settle
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        // Now only the agent pane remains, filling the entire window.
+        // Split to create the default layout: left 30% (yazi + lazygit), right 70% (agent)
+
+        // Create left pane: split horizontally, new pane to the left (-b), 30% width
+        let output = Command::new(TMUX_BIN)
+            .args([
+                "split-window", "-h", "-b", "-p", "30",
+                "-t", &target,
+                "-c", &working_dir,
+            ])
+            .output()
+            .await
+            .context("Failed to split window horizontally")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("split-window -h failed: {}", stderr);
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Split the left pane vertically: top for yazi, bottom for lazygit
+        let output = Command::new(TMUX_BIN)
+            .args([
+                "split-window", "-v", "-p", "50",
+                "-t", &format!("{}.{{left}}", target),
+                "-c", &working_dir,
+            ])
+            .output()
+            .await
+            .context("Failed to split window vertically")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("split-window -v failed: {}", stderr);
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Start yazi in top-left
+        let _ = Command::new(TMUX_BIN)
+            .args(["send-keys", "-t", &format!("{}.{{top-left}}", target), "yazi", "Enter"])
+            .output()
+            .await;
+
+        // Start lazygit in bottom-left
+        let _ = Command::new(TMUX_BIN)
+            .args(["send-keys", "-t", &format!("{}.{{bottom-left}}", target), "lazygit", "Enter"])
+            .output()
+            .await;
+
+        // Focus on the agent pane (right)
+        let _ = Command::new(TMUX_BIN)
+            .args(["select-pane", "-t", &format!("{}.{{right}}", target)])
+            .output()
+            .await;
+
+        Ok(format!("Layout reset with working_dir={}", working_dir))
     }
 }
 

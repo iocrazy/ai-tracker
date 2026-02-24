@@ -2,15 +2,17 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FolderGit2, ArrowLeft, Search, Plus, Trash2, Eye, EyeOff, Save, Edit3,
   Key, GitBranch, Play, ExternalLink, X, Loader, Globe, Layers, ChevronDown,
-  BarChart3, Activity, Clock, Wrench, List,
+  BarChart3, Activity, Clock, Wrench, List, FileText, Check, CheckSquare,
+  ChevronRight, ChevronLeft, AlertCircle, Circle, Minus, ArrowUp,
 } from 'lucide-react';
 import { AppTab, AgentSession } from '../types';
 import { ProjectTimeline } from './ProjectTimeline';
 import { HistoryEntry, HistoryResponse } from '../services/history';
 import { fetchProjectHistory } from '../services/projects';
 import { tmuxSelectWindow } from '../services/tmux';
+import { startWorkspace } from '../services/workspace';
 import {
-  ProjectInfo, fetchProjects, deleteProject, createNewSession,
+  ProjectInfo, fetchProjects, deleteProject, createNewSession, updateProject,
   createProjectService, createProjectEnvVar as createProjEnvVarApi,
   fetchProjectServices, ProjectService,
   // Global env vars
@@ -26,7 +28,12 @@ import {
   // Git info + Statistics
   GitInfoResponse, fetchGitInfo,
   ProjectStatistics, fetchProjectStatistics,
+  // Project files
+  ProjectFileEntry, fetchProjectFiles,
+  // Project todos
+  ProjectTodo, fetchProjectTodos, createProjectTodo, updateProjectTodo, deleteProjectTodo, updateProjectTodoStatus,
 } from '../services/api';
+import { MarkdownText } from './MarkdownText';
 
 // Project templates
 interface ProjectTemplate {
@@ -80,7 +87,7 @@ interface ProjectsViewProps {
 }
 
 type EnvScope = 'effective' | 'global' | 'project' | 'worktree';
-type DetailTab = 'overview' | 'timeline' | 'env-vars' | 'worktrees' | 'statistics';
+type DetailTab = 'overview' | 'todos' | 'timeline' | 'env-vars' | 'worktrees' | 'statistics' | 'docs';
 
 export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTab }) => {
   // Project list state
@@ -139,6 +146,25 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
 
   // Project services (for worktree computed ports)
   const [projectServices, setProjectServices] = useState<ProjectService[]>([]);
+
+  // DOCS tab state
+  const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+
+  // Todos state
+  const [projectTodos, setProjectTodos] = useState<ProjectTodo[]>([]);
+  const [todosLoading, setTodosLoading] = useState(false);
+  const [newTodoTitle, setNewTodoTitle] = useState('');
+  const [editingTodoId, setEditingTodoId] = useState<number | null>(null);
+  const [editTodoTitle, setEditTodoTitle] = useState('');
+  const [editTodoDesc, setEditTodoDesc] = useState('');
+  const [expandedTodoId, setExpandedTodoId] = useState<number | null>(null);
+  const [showAddInput, setShowAddInput] = useState(false);
+
+  // Inline editing state (for OVERVIEW info card)
+  const [editingField, setEditingField] = useState<string | null>(null);
+  const [editFieldValue, setEditFieldValue] = useState('');
 
   // Fetch projects
   const loadProjects = useCallback(async () => {
@@ -224,6 +250,33 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
         .catch(() => setActivityLoading(false));
     }
   }, [selectedProject, detailTab]);
+
+  // Load project files when DOCS tab is selected
+  useEffect(() => {
+    if (selectedProject && detailTab === 'docs') {
+      setFilesLoading(true);
+      fetchProjectFiles(selectedProject.git_dir).then(files => {
+        setProjectFiles(files);
+        // Auto-select first existing file
+        const firstExisting = files.find(f => f.exists);
+        setSelectedFile(firstExisting?.name || null);
+        setFilesLoading(false);
+      });
+    }
+  }, [selectedProject, detailTab]);
+
+  // Load todos when TODOS tab is selected
+  const loadTodos = useCallback(async () => {
+    if (!selectedProject) return;
+    setTodosLoading(true);
+    const todos = await fetchProjectTodos(selectedProject.git_dir);
+    setProjectTodos(todos);
+    setTodosLoading(false);
+  }, [selectedProject]);
+
+  useEffect(() => {
+    if (selectedProject && detailTab === 'todos') loadTodos();
+  }, [selectedProject, detailTab, loadTodos]);
 
   // Load project services for worktree port display
   useEffect(() => {
@@ -353,11 +406,15 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
     }
   }, [sessions]);
 
-  // Session creation
+  // Session creation — start with 3-pane layout (yazi | lazygit | claude) on main branch
   const handleStartSession = async (project: ProjectInfo) => {
     setCreatingSession(project.git_dir);
     try {
-      await createNewSession(project.name, project.git_dir);
+      await startWorkspace({
+        git_dir: project.git_dir,
+        branch: 'main',
+        layout: 'default',
+      });
     } finally {
       setCreatingSession(null);
     }
@@ -510,12 +567,24 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                         </span>
                       </div>
                       <div className="text-green-700 font-mono text-xs truncate">{project.git_dir}</div>
+                      {project.tech_stack && (
+                        <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                          {project.tech_stack.split(/[|,+]/).map(t => t.trim()).filter(Boolean).map(tech => (
+                            <span key={tech} className="text-[9px] tracking-wider px-1.5 py-0.5 border border-blue-900/60 text-blue-500/80 bg-blue-900/15">{tech}</span>
+                          ))}
+                        </div>
+                      )}
                       <div className="flex items-center gap-3 mt-1.5 text-green-800 text-[10px] font-mono tracking-wider">
                         <span>Last active: {timeAgo(project.last_active_at)}</span>
                         {sessionCount > 0 && <span>{sessionCount} session{sessionCount > 1 ? 's' : ''}</span>}
                         {windowCount > 0 && <span>{windowCount} window{windowCount > 1 ? 's' : ''}</span>}
                         {project.history_count > 0 && <span>{project.history_count} tasks</span>}
                         {wtCount > 0 && <span>{wtCount} worktree{wtCount > 1 ? 's' : ''}</span>}
+                        {project.todos_count > 0 && (
+                          <span className="text-yellow-600">
+                            {project.todos_count} todo{project.todos_count > 1 ? 's' : ''}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
@@ -693,7 +762,9 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
         <div className="flex">
           {([
             { id: 'overview' as DetailTab, label: 'OVERVIEW', icon: Activity },
+            { id: 'todos' as DetailTab, label: `TODOS${selectedProject.todos_count ? ` (${selectedProject.todos_count})` : ''}`, icon: CheckSquare },
             { id: 'timeline' as DetailTab, label: `TIMELINE${selectedProject.history_count > 0 ? ` (${selectedProject.history_count})` : ''}`, icon: List },
+            { id: 'docs' as DetailTab, label: 'DOCS', icon: FileText },
             { id: 'env-vars' as DetailTab, label: 'ENV VARS', icon: Key },
             { id: 'worktrees' as DetailTab, label: `WORKTREES${physicalWorktrees.length + worktreeSlots.length > 0 ? ` (${physicalWorktrees.length + worktreeSlots.length})` : ''}`, icon: GitBranch },
             { id: 'statistics' as DetailTab, label: 'STATISTICS', icon: BarChart3 },
@@ -716,6 +787,127 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
       {/* OVERVIEW Tab */}
       {detailTab === 'overview' && (
         <div className="space-y-4">
+          {/* Project Info Card */}
+          <div className="retro-border bg-black/40 px-4 py-3 space-y-2.5">
+            {/* Description */}
+            <div className="flex items-start gap-2">
+              <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold w-[80px] shrink-0 pt-0.5">DESC</span>
+              {editingField === 'description' ? (
+                <input
+                  autoFocus
+                  value={editFieldValue}
+                  onChange={e => setEditFieldValue(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      updateProject(selectedProject.git_dir, { description: editFieldValue });
+                      setSelectedProject({ ...selectedProject, description: editFieldValue });
+                      setEditingField(null);
+                    }
+                    if (e.key === 'Escape') { e.stopPropagation(); setEditingField(null); }
+                  }}
+                  onBlur={() => {
+                    updateProject(selectedProject.git_dir, { description: editFieldValue });
+                    setSelectedProject({ ...selectedProject, description: editFieldValue });
+                    setEditingField(null);
+                  }}
+                  className="flex-1 bg-black/60 border border-green-700 text-green-300 px-2 py-0.5 text-sm font-mono focus:border-green-500 outline-none"
+                />
+              ) : (
+                <span
+                  className="flex-1 text-green-400 font-mono text-sm cursor-pointer hover:text-green-300 transition-colors"
+                  onClick={() => { setEditingField('description'); setEditFieldValue(selectedProject.description || ''); }}
+                >
+                  {selectedProject.description || <span className="text-green-800 italic">Click to add description...</span>}
+                </span>
+              )}
+            </div>
+            {/* Tech Stack */}
+            <div className="flex items-start gap-2">
+              <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold w-[80px] shrink-0 pt-0.5">STACK</span>
+              {editingField === 'tech_stack' ? (
+                <input
+                  autoFocus
+                  value={editFieldValue}
+                  onChange={e => setEditFieldValue(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      updateProject(selectedProject.git_dir, { tech_stack: editFieldValue });
+                      setSelectedProject({ ...selectedProject, tech_stack: editFieldValue });
+                      setEditingField(null);
+                    }
+                    if (e.key === 'Escape') { e.stopPropagation(); setEditingField(null); }
+                  }}
+                  onBlur={() => {
+                    updateProject(selectedProject.git_dir, { tech_stack: editFieldValue });
+                    setSelectedProject({ ...selectedProject, tech_stack: editFieldValue });
+                    setEditingField(null);
+                  }}
+                  className="flex-1 bg-black/60 border border-green-700 text-green-300 px-2 py-0.5 text-sm font-mono focus:border-green-500 outline-none"
+                  placeholder="e.g. React + Vite | Rust + Axum"
+                />
+              ) : (
+                <span
+                  className="flex-1 text-green-400 font-mono text-sm cursor-pointer hover:text-green-300 transition-colors"
+                  onClick={() => { setEditingField('tech_stack'); setEditFieldValue(selectedProject.tech_stack || ''); }}
+                >
+                  {selectedProject.tech_stack || <span className="text-green-800 italic">Click to add tech stack...</span>}
+                </span>
+              )}
+            </div>
+            {/* Tags */}
+            <div className="flex items-start gap-2">
+              <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold w-[80px] shrink-0 pt-0.5">TAGS</span>
+              {editingField === 'tags' ? (
+                <input
+                  autoFocus
+                  value={editFieldValue}
+                  onChange={e => setEditFieldValue(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      updateProject(selectedProject.git_dir, { tags: editFieldValue });
+                      setSelectedProject({ ...selectedProject, tags: editFieldValue });
+                      setEditingField(null);
+                    }
+                    if (e.key === 'Escape') { e.stopPropagation(); setEditingField(null); }
+                  }}
+                  onBlur={() => {
+                    updateProject(selectedProject.git_dir, { tags: editFieldValue });
+                    setSelectedProject({ ...selectedProject, tags: editFieldValue });
+                    setEditingField(null);
+                  }}
+                  className="flex-1 bg-black/60 border border-green-700 text-green-300 px-2 py-0.5 text-sm font-mono focus:border-green-500 outline-none"
+                  placeholder="e.g. web, fullstack, private"
+                />
+              ) : (
+                <div
+                  className="flex-1 flex items-center gap-1.5 flex-wrap cursor-pointer"
+                  onClick={() => { setEditingField('tags'); setEditFieldValue(selectedProject.tags || ''); }}
+                >
+                  {selectedProject.tags ? (
+                    selectedProject.tags.split(',').map(t => t.trim()).filter(Boolean).map(tag => (
+                      <span key={tag} className="text-[10px] tracking-widest uppercase px-1.5 py-0.5 border border-green-800 text-green-500 bg-green-900/20">{tag}</span>
+                    ))
+                  ) : (
+                    <span className="text-green-800 italic text-sm font-mono">Click to add tags...</span>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* Status */}
+            <div className="flex items-center gap-2">
+              <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold w-[80px] shrink-0">STATUS</span>
+              <span className={`text-[10px] tracking-widest uppercase px-1.5 py-0.5 border font-bold ${
+                selectedProject.status === 'active' || !selectedProject.status
+                  ? 'text-green-400 border-green-600 bg-green-900/30'
+                  : selectedProject.status === 'archived'
+                  ? 'text-green-800 border-green-900/50'
+                  : 'text-yellow-600 border-yellow-800 bg-yellow-900/20'
+              }`}>
+                {(selectedProject.status || 'active').toUpperCase()}
+              </span>
+            </div>
+          </div>
+
           {gitLoading ? (
             <div className="flex items-center justify-center py-8">
               <Loader className="w-5 h-5 text-green-700 animate-spin mr-2" />
@@ -849,6 +1041,277 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
         </div>
       )}
 
+      {/* TODOS Tab */}
+      {detailTab === 'todos' && selectedProject && (
+        <div>
+          {todosLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader className="w-5 h-5 text-green-500 animate-spin" />
+            </div>
+          ) : (
+            (() => {
+              const todoItems = projectTodos.filter(t => t.status === 'todo');
+              const inProgressItems = projectTodos.filter(t => t.status === 'in_progress');
+              const doneItems = projectTodos.filter(t => t.status === 'done');
+              const urgentCount = projectTodos.filter(t => t.priority >= 2).length;
+
+              const nextStatus = (s: string) => s === 'todo' ? 'in_progress' : s === 'in_progress' ? 'done' : 'done';
+              const prevStatus = (s: string) => s === 'done' ? 'in_progress' : s === 'in_progress' ? 'todo' : 'todo';
+
+              const handleStatusChange = async (id: number, status: string) => {
+                await updateProjectTodoStatus(id, status);
+                loadTodos();
+                loadProjects();
+              };
+
+              const handleCreateTodo = async () => {
+                if (!newTodoTitle.trim()) return;
+                await createProjectTodo(selectedProject.git_dir, newTodoTitle.trim());
+                setNewTodoTitle('');
+                setShowAddInput(false);
+                loadTodos();
+                loadProjects();
+              };
+
+              const handleDeleteTodo = async (id: number) => {
+                await deleteProjectTodo(id);
+                loadTodos();
+                loadProjects();
+              };
+
+              const handleSaveEdit = async (id: number) => {
+                await updateProjectTodo(id, { title: editTodoTitle, description: editTodoDesc });
+                setEditingTodoId(null);
+                loadTodos();
+              };
+
+              const handlePriorityChange = async (id: number, priority: number) => {
+                await updateProjectTodo(id, { priority });
+                loadTodos();
+              };
+
+              const priorityBorderColor = (p: number) =>
+                p >= 2 ? 'border-l-red-500' : p === 1 ? 'border-l-yellow-500' : 'border-l-green-900/50';
+
+              const PriorityIcon = ({ priority }: { priority: number }) => {
+                if (priority >= 2) return <span className="flex items-center gap-0.5 text-red-400"><ArrowUp className="w-3 h-3" /><ArrowUp className="w-3 h-3 -ml-2" /></span>;
+                if (priority === 1) return <ArrowUp className="w-3 h-3 text-yellow-400" />;
+                return <Minus className="w-3 h-3 text-green-800" />;
+              };
+
+              const renderCard = (todo: ProjectTodo, isDone = false) => (
+                <div
+                  key={todo.id}
+                  className={`group bg-black/40 border border-green-900/40 border-l-2 ${priorityBorderColor(todo.priority)} p-2.5 hover:border-green-700/60 hover:bg-black/50 transition-all`}
+                >
+                  {editingTodoId === todo.id ? (
+                    <div className="space-y-2">
+                      <input
+                        value={editTodoTitle}
+                        onChange={e => setEditTodoTitle(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') handleSaveEdit(todo.id); if (e.key === 'Escape') setEditingTodoId(null); }}
+                        autoFocus
+                        className="w-full bg-black/60 border border-green-700 text-green-300 px-2 py-1 text-sm font-mono focus:border-green-400 outline-none"
+                      />
+                      <textarea
+                        value={editTodoDesc}
+                        onChange={e => setEditTodoDesc(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Escape') setEditingTodoId(null); }}
+                        placeholder="Description (optional)"
+                        rows={2}
+                        className="w-full bg-black/60 border border-green-900 text-green-400 px-2 py-1 text-xs font-mono focus:border-green-700 outline-none resize-none placeholder:text-green-900"
+                      />
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => handleSaveEdit(todo.id)}
+                          className="flex items-center gap-1 px-2 py-0.5 border border-green-700 text-green-500 hover:bg-green-900/30 text-[10px] font-bold tracking-widest uppercase"
+                        >
+                          <Save className="w-3 h-3" /> SAVE
+                        </button>
+                        <button
+                          onClick={() => setEditingTodoId(null)}
+                          className="flex items-center gap-1 px-2 py-0.5 border border-green-900 text-green-700 hover:text-green-500 text-[10px] font-bold tracking-widest uppercase"
+                        >
+                          <X className="w-3 h-3" /> CANCEL
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Row 1: ID + hover menu */}
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-green-900 text-[10px] font-mono">#{todo.id}</span>
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={() => { setEditingTodoId(todo.id); setEditTodoTitle(todo.title); setEditTodoDesc(todo.description); }}
+                            className="text-green-800 hover:text-green-400 transition-colors p-0.5"
+                            title="Edit"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteTodo(todo.id)}
+                            className="text-red-900 hover:text-red-500 transition-colors p-0.5"
+                            title="Delete"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                      {/* Row 2: Title */}
+                      <div className={`text-sm font-mono leading-tight truncate ${isDone ? 'line-through opacity-60 text-green-600' : 'text-green-300'}`}>
+                        {todo.title}
+                      </div>
+                      {/* Row 3: Description preview */}
+                      {todo.description && (
+                        <div
+                          className="text-green-700 text-xs font-mono leading-snug mt-1 cursor-pointer hover:text-green-600"
+                          style={{ display: '-webkit-box', WebkitLineClamp: expandedTodoId === todo.id ? 999 : 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
+                          onClick={() => setExpandedTodoId(expandedTodoId === todo.id ? null : todo.id)}
+                        >
+                          {todo.description}
+                        </div>
+                      )}
+                      {/* Row 4: Priority icon + status arrows */}
+                      <div className="flex items-center justify-between mt-1.5">
+                        <button
+                          onClick={() => handlePriorityChange(todo.id, (todo.priority + 1) % 3)}
+                          className="flex items-center gap-1 hover:opacity-80 transition-opacity"
+                          title="Click to cycle priority"
+                        >
+                          <PriorityIcon priority={todo.priority} />
+                          <span className={`text-[9px] font-mono tracking-wider uppercase ${todo.priority >= 2 ? 'text-red-400' : todo.priority === 1 ? 'text-yellow-400' : 'text-green-800'}`}>
+                            {todo.priority >= 2 ? 'URGENT' : todo.priority === 1 ? 'HIGH' : ''}
+                          </span>
+                        </button>
+                        <div className="flex items-center gap-0.5">
+                          {todo.status !== 'todo' && (
+                            <button
+                              onClick={() => handleStatusChange(todo.id, prevStatus(todo.status))}
+                              className="text-green-800 hover:text-green-400 transition-colors p-0.5"
+                              title="Move back"
+                            >
+                              <ChevronLeft className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          {todo.status !== 'done' && (
+                            <button
+                              onClick={() => handleStatusChange(todo.id, nextStatus(todo.status))}
+                              className="text-green-800 hover:text-green-400 transition-colors p-0.5"
+                              title="Move forward"
+                            >
+                              <ChevronRight className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+
+              // Empty state component
+              const EmptyColumn = ({ message }: { message: string }) => (
+                <div className="border border-dashed border-green-900/40 rounded px-3 py-6 flex items-center justify-center">
+                  <span className="text-green-900/60 text-xs font-mono text-center">{message}</span>
+                </div>
+              );
+
+              return (
+                <>
+                  {/* Stats bar */}
+                  <div className="text-[10px] font-mono tracking-wider text-green-800 px-1 pb-2 flex items-center gap-2">
+                    <span>{projectTodos.length} total</span>
+                    <span className="text-green-900">·</span>
+                    <span>{inProgressItems.length} in progress</span>
+                    <span className="text-green-900">·</span>
+                    <span>{doneItems.length} done</span>
+                    {urgentCount > 0 && (
+                      <>
+                        <span className="text-green-900">·</span>
+                        <span className="text-red-500">{urgentCount} urgent</span>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Kanban columns */}
+                  <div className="flex h-[calc(100vh-280px)] min-h-[400px] border border-green-900/30">
+                    {/* TODO Column */}
+                    <div className="flex-1 min-w-0 flex flex-col border-r border-green-900/50">
+                      <div className="sticky top-0 z-10 bg-green-900/20 px-3 py-2 border-b border-green-900/50">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 text-[10px] font-bold tracking-[0.2em] uppercase text-green-400">
+                            <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" />
+                            TODO
+                            <span className="text-green-700 font-normal">({todoItems.length})</span>
+                          </div>
+                          <button
+                            onClick={() => { setShowAddInput(!showAddInput); if (!showAddInput) setNewTodoTitle(''); }}
+                            className="text-green-700 hover:text-green-400 transition-colors p-0.5"
+                            title="Add todo"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        {showAddInput && (
+                          <div className="mt-2">
+                            <input
+                              value={newTodoTitle}
+                              onChange={e => setNewTodoTitle(e.target.value)}
+                              onKeyDown={e => { if (e.key === 'Enter') handleCreateTodo(); if (e.key === 'Escape') { setShowAddInput(false); setNewTodoTitle(''); } }}
+                              autoFocus
+                              placeholder="New todo title..."
+                              className="w-full bg-black/60 border border-green-700 text-green-300 px-2 py-1.5 text-xs font-mono focus:border-green-400 outline-none placeholder:text-green-900"
+                            />
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {todoItems.length > 0 ? todoItems.map(t => renderCard(t)) : (
+                          <EmptyColumn message="Add your first todo above" />
+                        )}
+                      </div>
+                    </div>
+
+                    {/* IN PROGRESS Column */}
+                    <div className="flex-1 min-w-0 flex flex-col border-r border-green-900/50">
+                      <div className="sticky top-0 z-10 bg-yellow-900/15 px-3 py-2 border-b border-green-900/50">
+                        <div className="flex items-center gap-2 text-[10px] font-bold tracking-[0.2em] uppercase text-yellow-400">
+                          <span className="w-2 h-2 rounded-full bg-yellow-400 shrink-0" />
+                          IN PROGRESS
+                          <span className="text-yellow-700 font-normal">({inProgressItems.length})</span>
+                        </div>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {inProgressItems.length > 0 ? inProgressItems.map(t => renderCard(t)) : (
+                          <EmptyColumn message="Move items here when you start working" />
+                        )}
+                      </div>
+                    </div>
+
+                    {/* DONE Column */}
+                    <div className="flex-1 min-w-0 flex flex-col">
+                      <div className="sticky top-0 z-10 bg-emerald-900/15 px-3 py-2 border-b border-green-900/50">
+                        <div className="flex items-center gap-2 text-[10px] font-bold tracking-[0.2em] uppercase text-emerald-400">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                          DONE
+                          <span className="text-emerald-700 font-normal">({doneItems.length})</span>
+                        </div>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {doneItems.length > 0 ? doneItems.map(t => renderCard(t, true)) : (
+                          <EmptyColumn message="Completed items will appear here" />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              );
+            })()
+          )}
+        </div>
+      )}
+
       {/* TIMELINE Tab */}
       {detailTab === 'timeline' && selectedProject && (
         <div className="h-[calc(100vh-280px)] min-h-[400px]">
@@ -857,6 +1320,76 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
             projectName={selectedProject.name}
             isActive={detailTab === 'timeline'}
           />
+        </div>
+      )}
+
+      {/* DOCS Tab */}
+      {detailTab === 'docs' && (
+        <div className="space-y-3">
+          {filesLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader className="w-5 h-5 text-green-700 animate-spin mr-2" />
+              <span className="text-green-700 text-sm font-mono tracking-widest">LOADING FILES...</span>
+            </div>
+          ) : (
+            <>
+              {/* File selector buttons */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {projectFiles.map(file => (
+                  <button
+                    key={file.name}
+                    onClick={() => file.exists && setSelectedFile(file.name)}
+                    disabled={!file.exists}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold tracking-widest uppercase transition-all border
+                      ${selectedFile === file.name
+                        ? 'text-green-300 border-green-500 bg-green-900/30'
+                        : file.exists
+                        ? 'text-green-600 border-green-900 hover:border-green-700 hover:text-green-400'
+                        : 'text-green-900 border-green-900/50 cursor-not-allowed'}`}
+                  >
+                    <FileText className="w-3 h-3" />
+                    {file.name}{!file.exists && ' (missing)'}
+                  </button>
+                ))}
+              </div>
+
+              {/* File content viewer */}
+              {(() => {
+                const file = projectFiles.find(f => f.name === selectedFile);
+                if (!file || !file.exists) {
+                  return (
+                    <div className="flex flex-col items-center py-12 retro-border bg-black/40">
+                      <FileText className="w-8 h-8 text-green-900 mb-2" />
+                      <div className="text-green-600 text-sm font-mono mb-1">No file selected</div>
+                      <div className="text-green-800 text-xs font-mono">Select a file above to view its contents.</div>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="border border-green-900/50">
+                    {/* File header */}
+                    <div className="flex items-center gap-2 px-3 py-2 border-b border-green-900/50 bg-green-900/10">
+                      <FileText className="w-3.5 h-3.5 text-green-600" />
+                      <span className="text-green-400 font-mono text-sm font-bold">{file.name}</span>
+                    </div>
+                    <div className="px-3 py-1.5 border-b border-green-900/30 bg-black/20">
+                      <span className="text-green-800 font-mono text-[10px] break-all">{file.path}</span>
+                    </div>
+                    {/* File content */}
+                    <div className="p-4 max-h-[60vh] overflow-auto">
+                      {file.name.endsWith('.md') ? (
+                        <div className="prose-green">
+                          <MarkdownText content={file.content} />
+                        </div>
+                      ) : (
+                        <pre className="text-green-400 font-mono text-sm whitespace-pre-wrap break-words">{file.content}</pre>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </>
+          )}
         </div>
       )}
 

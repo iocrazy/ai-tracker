@@ -384,6 +384,18 @@ impl Database {
                 channels TEXT DEFAULT 'web',
                 created_at TEXT DEFAULT (datetime('now'))
             )"),
+            (9, "ALTER TABLE projects ADD COLUMN tech_stack TEXT DEFAULT ''"),
+            (10, "CREATE TABLE IF NOT EXISTS project_todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                git_dir TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'todo',
+                priority INTEGER DEFAULT 0,
+                sort_order INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"),
         ];
 
         for (version, sql) in migrations {
@@ -1317,7 +1329,9 @@ impl Database {
             "SELECT git_dir, name, last_session, last_window, last_active_at,
                     notes_count, goals_count, history_count,
                     COALESCE(description, ''), COALESCE(status, 'active'),
-                    COALESCE(tags, ''), COALESCE(created_at, '')
+                    COALESCE(tags, ''), COALESCE(created_at, ''),
+                    COALESCE(tech_stack, ''),
+                    COALESCE((SELECT COUNT(*) FROM project_todos WHERE project_todos.git_dir = projects.git_dir AND status != 'done'), 0)
              FROM projects
              ORDER BY last_active_at DESC",
         )?;
@@ -1337,6 +1351,8 @@ impl Database {
                     status: row.get(9)?,
                     tags: row.get(10)?,
                     created_at: row.get(11)?,
+                    tech_stack: row.get(12)?,
+                    todos_count: row.get(13)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1350,7 +1366,9 @@ impl Database {
             "SELECT git_dir, name, last_session, last_window, last_active_at,
                     notes_count, goals_count, history_count,
                     COALESCE(description, ''), COALESCE(status, 'active'),
-                    COALESCE(tags, ''), COALESCE(created_at, '')
+                    COALESCE(tags, ''), COALESCE(created_at, ''),
+                    COALESCE(tech_stack, ''),
+                    COALESCE((SELECT COUNT(*) FROM project_todos WHERE project_todos.git_dir = projects.git_dir AND status != 'done'), 0)
              FROM projects WHERE git_dir = ?1",
             params![git_dir],
             |row| {
@@ -1367,6 +1385,8 @@ impl Database {
                     status: row.get(9)?,
                     tags: row.get(10)?,
                     created_at: row.get(11)?,
+                    tech_stack: row.get(12)?,
+                    todos_count: row.get(13)?,
                 })
             },
         );
@@ -1379,12 +1399,13 @@ impl Database {
     }
 
     /// Update project metadata (description, status, tags)
-    pub fn update_project(&self, git_dir: &str, description: Option<&str>, status: Option<&str>, tags: Option<&str>) -> Result<()> {
+    pub fn update_project(&self, git_dir: &str, description: Option<&str>, status: Option<&str>, tags: Option<&str>, tech_stack: Option<&str>) -> Result<()> {
         let mut sets = Vec::new();
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
         if let Some(v) = description { sets.push(format!("description = ?{}", params_vec.len() + 1)); params_vec.push(Box::new(v.to_string())); }
         if let Some(v) = status { sets.push(format!("status = ?{}", params_vec.len() + 1)); params_vec.push(Box::new(v.to_string())); }
         if let Some(v) = tags { sets.push(format!("tags = ?{}", params_vec.len() + 1)); params_vec.push(Box::new(v.to_string())); }
+        if let Some(v) = tech_stack { sets.push(format!("tech_stack = ?{}", params_vec.len() + 1)); params_vec.push(Box::new(v.to_string())); }
         if sets.is_empty() { return Ok(()); }
         params_vec.push(Box::new(git_dir.to_string()));
         let sql = format!("UPDATE projects SET {} WHERE git_dir = ?{}", sets.join(", "), params_vec.len());
@@ -1520,6 +1541,138 @@ impl Database {
             params![id],
         )?;
         Ok(session_name)
+    }
+
+    // =========================================================================
+    // Project todos operations
+    // =========================================================================
+
+    pub fn list_project_todos(&self, git_dir: &str) -> Result<Vec<ProjectTodo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, git_dir, title, description, status, priority, sort_order, created_at, updated_at
+             FROM project_todos
+             WHERE git_dir = ?1
+             ORDER BY
+               CASE status WHEN 'todo' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'done' THEN 2 ELSE 3 END,
+               sort_order ASC, id ASC",
+        )?;
+
+        let rows = stmt
+            .query_map(params![git_dir], |row| {
+                Ok(ProjectTodo {
+                    id: row.get(0)?,
+                    git_dir: row.get(1)?,
+                    title: row.get(2)?,
+                    description: row.get(3)?,
+                    status: row.get(4)?,
+                    priority: row.get(5)?,
+                    sort_order: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    pub fn create_project_todo(
+        &self,
+        git_dir: &str,
+        title: &str,
+        description: &str,
+        status: &str,
+        priority: i32,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO project_todos (git_dir, title, description, status, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![git_dir, title, description, status, priority],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_project_todo(
+        &self,
+        id: i64,
+        title: Option<&str>,
+        description: Option<&str>,
+        status: Option<&str>,
+        priority: Option<i32>,
+        sort_order: Option<i32>,
+    ) -> Result<()> {
+        let mut set_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(v) = title {
+            set_clauses.push("title = ?");
+            param_values.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = description {
+            set_clauses.push("description = ?");
+            param_values.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = status {
+            set_clauses.push("status = ?");
+            param_values.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = priority {
+            set_clauses.push("priority = ?");
+            param_values.push(Box::new(v));
+        }
+        if let Some(v) = sort_order {
+            set_clauses.push("sort_order = ?");
+            param_values.push(Box::new(v));
+        }
+
+        if set_clauses.is_empty() {
+            anyhow::bail!("No fields to update");
+        }
+
+        set_clauses.push("updated_at = datetime('now')");
+
+        let numbered: Vec<String> = set_clauses
+            .iter()
+            .enumerate()
+            .map(|(i, clause)| {
+                if clause.contains('?') {
+                    clause.replacen('?', &format!("?{}", i + 1), 1)
+                } else {
+                    clause.to_string()
+                }
+            })
+            .collect();
+
+        let id_param_idx = param_values.len() + 1;
+        let sql = format!(
+            "UPDATE project_todos SET {} WHERE id = ?{}",
+            numbered.join(", "),
+            id_param_idx
+        );
+        param_values.push(Box::new(id));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        self.conn.execute(&sql, params_refs.as_slice())?;
+        Ok(())
+    }
+
+    pub fn delete_project_todo(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM project_todos WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_project_todos(&self, git_dir: &str) -> Result<(i32, i32)> {
+        let (total, done) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0)
+             FROM project_todos WHERE git_dir = ?1",
+            params![git_dir],
+            |row| Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?)),
+        )?;
+        Ok((total, done))
     }
 
     // =========================================================================
@@ -2190,6 +2343,8 @@ pub struct ProjectInfo {
     pub status: String,
     pub tags: String,
     pub created_at: String,
+    pub tech_stack: String,
+    pub todos_count: i32,
 }
 
 /// Closed window record
@@ -2258,6 +2413,20 @@ pub struct WorktreeEnvVar {
     pub updated_at: String,
 }
 
+/// Project todo item
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProjectTodo {
+    pub id: i64,
+    pub git_dir: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub priority: i32,
+    pub sort_order: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// Merged env var with source annotation
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EffectiveEnvVar {
@@ -2314,12 +2483,15 @@ pub struct AlertRule {
     pub created_at: String,
 }
 
-/// Get default database path
+/// Get default database path.
+/// Checks TRACKER_DATA_DIR env var first (Tauri mode), falls back to ~/.config/agent-tracker/.
 pub fn default_db_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".config")
-        .join("agent-tracker")
+    if let Ok(data_dir) = std::env::var("TRACKER_DATA_DIR") {
+        if !data_dir.is_empty() {
+            return std::path::PathBuf::from(data_dir).join("data").join("tracker.db");
+        }
+    }
+    crate::paths::TrackerPaths::legacy_config_dir()
         .join("data")
         .join("tracker.db")
 }

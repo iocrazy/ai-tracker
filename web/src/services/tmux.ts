@@ -248,6 +248,19 @@ export async function tmuxRenameWindow(session: string, window: string, name: st
   return response.json();
 }
 
+// Reset window layout to default 3-pane (yazi + lazygit + agent)
+export async function tmuxResetLayout(session: string, window: string): Promise<{ success: boolean; message: string }> {
+  const response = await authFetch(`${API_BASE}/tmux/reset-layout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, window }),
+  });
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` };
+  }
+  return response.json();
+}
+
 // Rename a tmux session
 export async function tmuxRenameSession(session: string, name: string): Promise<{ success: boolean; message: string }> {
   const response = await authFetch(`${API_BASE}/tmux/rename-session`, {

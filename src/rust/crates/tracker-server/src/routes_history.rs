@@ -49,6 +49,9 @@ pub(crate) struct HistoryQueryParams {
     /// Filter by project git_dir
     #[serde(default)]
     pub project: Option<String>,
+    /// Group by: "window" groups entries by session:window
+    #[serde(default)]
+    pub group_by: Option<String>,
 }
 
 /// History group

@@ -6,7 +6,19 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-DB_PATH = os.path.expanduser("~/.config/agent-tracker/data/tracker.db")
+def _resolve_db_path():
+    """Resolve DB path: TRACKER_DATA_DIR env → Application Support → legacy."""
+    data_dir = os.environ.get("TRACKER_DATA_DIR", "")
+    if data_dir:
+        return os.path.join(data_dir, "data", "tracker.db")
+    app_support = os.path.expanduser(
+        "~/Library/Application Support/com.agent-tracker.menubar/data/tracker.db"
+    )
+    if os.path.exists(app_support):
+        return app_support
+    return os.path.expanduser("~/.config/agent-tracker/data/tracker.db")
+
+DB_PATH = _resolve_db_path()
 
 def parse_transcript(path: str, started_at: str | None, completed_at: str | None) -> list[dict]:
     """Parse a Claude transcript JSONL file and extract user/assistant messages."""

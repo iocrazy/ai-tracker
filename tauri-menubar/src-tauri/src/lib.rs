@@ -44,6 +44,13 @@ struct SidecarState {
     source: &'static str,
 }
 
+/// Legacy config directory (~/.config/agent-tracker).
+/// Single source of truth for the Tauri crate; mirrors TrackerPaths::legacy_config_dir() in the server.
+fn legacy_config_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".config").join("agent-tracker")
+}
+
 /// Check if a TCP port is already in use.
 fn is_port_in_use(port: u16) -> bool {
     std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
@@ -62,8 +69,23 @@ fn start_sidecar(app: &tauri::AppHandle) {
         return;
     }
 
+    // Resolve Tauri standard directories for sidecar env vars
+    let resources_dir = app.path().resource_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let data_dir = app.path().app_data_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Ensure data directory exists
+    if !data_dir.is_empty() {
+        let _ = std::fs::create_dir_all(&data_dir);
+    }
+
     let cmd = match app.shell().sidecar("tracker-server") {
-        Ok(cmd) => cmd,
+        Ok(cmd) => cmd
+            .env("TRACKER_RESOURCES_DIR", &resources_dir)
+            .env("TRACKER_DATA_DIR", &data_dir),
         Err(e) => {
             eprintln!("Failed to create sidecar command: {e}");
             app.manage(SidecarState {
@@ -73,6 +95,9 @@ fn start_sidecar(app: &tauri::AppHandle) {
             return;
         }
     };
+
+    eprintln!("Sidecar env: TRACKER_RESOURCES_DIR={resources_dir}");
+    eprintln!("Sidecar env: TRACKER_DATA_DIR={data_dir}");
 
     match cmd.spawn() {
         Ok((_rx, child)) => {
@@ -218,21 +243,110 @@ fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-/// Read auth token from local agent-config.json
 #[tauri::command]
-fn read_local_token() -> Result<String, String> {
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    let path = std::path::PathBuf::from(home)
-        .join(".config/agent-tracker/agent-config.json");
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Cannot read config: {}", e))?;
-    let json: serde_json::Value = serde_json::from_str(&data)
-        .map_err(|e| format!("Invalid JSON: {}", e))?;
-    json["auth"]["token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No token in config".to_string())
+fn restart_sidecar(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    const PORT: u16 = 3099;
+
+    // 1. Kill current sidecar (only if we own it)
+    let source = app
+        .try_state::<SidecarState>()
+        .map(|s| s.source)
+        .unwrap_or("unknown");
+
+    if source == "sidecar" {
+        SIDECAR_PID.store(0, Ordering::Relaxed);
+        if let Some(state) = app.try_state::<SidecarState>() {
+            if let Ok(mut guard) = state.child.lock() {
+                if let Some(child) = guard.take() {
+                    let _ = child.kill();
+                    eprintln!("restart_sidecar: killed old sidecar");
+                }
+            }
+        }
+    } else if source == "external" {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": "Server is running externally (not managed by this app)"
+        }));
+    }
+
+    // 2. Wait for port to be released (up to 5s)
+    for _ in 0..50 {
+        if !is_port_in_use(PORT) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if is_port_in_use(PORT) {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": "Port 3099 still in use after 5s"
+        }));
+    }
+
+    // 3. Spawn new sidecar
+    let resources_dir = app.path().resource_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let data_dir = app.path().app_data_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let cmd = app.shell().sidecar("tracker-server")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .env("TRACKER_RESOURCES_DIR", &resources_dir)
+        .env("TRACKER_DATA_DIR", &data_dir);
+
+    let (_rx, child) = cmd.spawn()
+        .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
+
+    SIDECAR_PID.store(child.pid(), Ordering::Relaxed);
+
+    // Update existing SidecarState
+    if let Some(state) = app.try_state::<SidecarState>() {
+        if let Ok(mut guard) = state.child.lock() {
+            *guard = Some(child);
+        }
+    }
+
+    // 4. Wait for health check (up to 10s)
+    for i in 0..100 {
+        if is_port_in_use(PORT) {
+            eprintln!("restart_sidecar: new sidecar ready after {}ms", i * 100);
+            return Ok(serde_json::json!({
+                "success": true,
+                "message": format!("Sidecar restarted in {}ms", i * 100)
+            }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    Ok(serde_json::json!({
+        "success": false,
+        "error": "Sidecar started but health check timed out after 10s"
+    }))
+}
+
+/// Read auth token — try Application Support first, fall back to legacy path
+#[tauri::command]
+fn read_local_token(app: tauri::AppHandle) -> Result<String, String> {
+    let paths: Vec<std::path::PathBuf> = [
+        app.path().app_data_dir().ok().map(|p| p.join("agent-config.json")),
+        Some(legacy_config_dir().join("agent-config.json")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    for path in &paths {
+        if let Ok(data) = std::fs::read_to_string(path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                if let Some(token) = json["auth"]["token"].as_str().filter(|s| !s.is_empty()) {
+                    return Ok(token.to_string());
+                }
+            }
+        }
+    }
+
+    Err("No token found in any config location".to_string())
 }
 
 #[tauri::command]
@@ -246,7 +360,7 @@ fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
 
     // Build URL with auth token as query parameter for auto-authentication.
     // The web frontend reads ?token= from URL, stores it in localStorage, and cleans the URL.
-    let url_str = match read_local_token() {
+    let url_str = match read_local_token(app.clone()) {
         Ok(token) => format!("http://localhost:3099?token={}", token.trim()),
         Err(_) => "http://localhost:3099".to_string(),
     };
@@ -279,14 +393,20 @@ fn get_server_status(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 #[tauri::command]
-fn save_local_token(token: String) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    let path = std::path::PathBuf::from(home)
-        .join(".config/agent-tracker/agent-config.json");
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Cannot read config: {}", e))?;
-    let mut json: serde_json::Value = serde_json::from_str(&data)
-        .map_err(|e| format!("Invalid JSON: {}", e))?;
+fn save_local_token(app: tauri::AppHandle, token: String) -> Result<(), String> {
+    let path = app.path().app_data_dir()
+        .map(|p| p.join("agent-config.json"))
+        .map_err(|e| format!("Cannot resolve app data dir: {}", e))?;
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let mut json: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_else(|| serde_json::json!({"auth": {}}));
+
     json["auth"]["token"] = serde_json::Value::String(token);
     let output = serde_json::to_string_pretty(&json)
         .map_err(|e| e.to_string())?;
@@ -361,6 +481,10 @@ pub fn run() {
     install_signal_handlers();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // If a second instance is launched, just focus the existing panel
+            toggle_panel(app);
+        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -368,7 +492,7 @@ pub fn run() {
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .invoke_handler(tauri::generate_handler![show_float, hide_float, set_float_opacity, open_dashboard, read_local_token, save_local_token, get_server_status, quit_app])
+        .invoke_handler(tauri::generate_handler![show_float, hide_float, set_float_opacity, open_dashboard, read_local_token, save_local_token, get_server_status, quit_app, restart_sidecar])
         .setup(|app| {
             // Enable autostart on first run
             use tauri_plugin_autostart::ManagerExt;

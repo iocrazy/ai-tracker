@@ -10,6 +10,7 @@ mod config;
 mod db;
 mod env_file;
 mod layout;
+mod paths;
 mod port;
 mod project_db;
 mod stream;
@@ -154,10 +155,12 @@ pub(crate) struct AppState {
     allowed_origins: Vec<String>,
     /// Server start time (for uptime)
     start_time: std::time::Instant,
+    /// Resolved paths for all server directories
+    paths: paths::TrackerPaths,
 }
 
 impl AppState {
-    fn new(db: Database, auth_token: String, allowed_origins: Vec<String>) -> Result<Self> {
+    fn new(db: Database, auth_token: String, allowed_origins: Vec<String>, paths: paths::TrackerPaths) -> Result<Self> {
         let (broadcast_tx, _) = broadcast::channel(16);
         let mut state = ServerState::new(db);
         state.load_from_db()?;
@@ -171,6 +174,7 @@ impl AppState {
             auth_token,
             allowed_origins,
             start_time: std::time::Instant::now(),
+            paths,
         })
     }
 
@@ -1624,6 +1628,305 @@ async fn health_check(
 }
 
 // ============================================================================
+// Diagnostics
+// ============================================================================
+
+async fn diagnostics(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let start = std::time::Instant::now();
+    let mut components = Vec::<serde_json::Value>::new();
+    let mut has_error = false;
+    let mut has_warning = false;
+
+    let config_dir = state.paths.data_dir.to_string_lossy().to_string();
+
+    // 1. Server: PID, version, uptime, memory
+    {
+        let pid = std::process::id();
+        let version = env!("CARGO_PKG_VERSION");
+        let uptime_secs = state.start_time.elapsed().as_secs();
+        let uptime_str = if uptime_secs >= 86400 {
+            format!("{}d {}h {}m", uptime_secs / 86400, (uptime_secs % 86400) / 3600, (uptime_secs % 3600) / 60)
+        } else if uptime_secs >= 3600 {
+            format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
+        } else {
+            format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
+        };
+        // Memory: read from /proc on Linux, use ps on macOS
+        let mem_str = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|kb| {
+                if kb > 1024 { format!("{:.1}MB", kb as f64 / 1024.0) }
+                else { format!("{}KB", kb) }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        components.push(serde_json::json!({
+            "name": "server",
+            "status": "ok",
+            "detail": format!("PID {}, v{}, uptime {}, mem {}", pid, version, uptime_str, mem_str)
+        }));
+    }
+
+    // 2. Tmux: server status, session count, window count
+    {
+        match std::process::Command::new(agent::TMUX_BIN)
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                let sessions = String::from_utf8_lossy(&o.stdout)
+                    .lines().filter(|l| !l.is_empty()).count();
+                let windows = std::process::Command::new(agent::TMUX_BIN)
+                    .args(["list-windows", "-a", "-F", "#{window_id}"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.is_empty()).count())
+                    .unwrap_or(0);
+                components.push(serde_json::json!({
+                    "name": "tmux",
+                    "status": "ok",
+                    "detail": format!("{} sessions, {} windows", sessions, windows)
+                }));
+            }
+            _ => {
+                has_warning = true;
+                components.push(serde_json::json!({
+                    "name": "tmux",
+                    "status": "warning",
+                    "detail": "tmux server not running"
+                }));
+            }
+        }
+    }
+
+    // 3. Database: integrity, file size, table count
+    {
+        let server_state = state.state.lock().unwrap();
+        let db_path = db::default_db_path();
+        let integrity = server_state.db.conn.query_row(
+            "PRAGMA integrity_check", [], |row| row.get::<_, String>(0)
+        );
+        let table_count: usize = server_state.db.conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table'", [], |row| row.get(0)
+        ).unwrap_or(0);
+        drop(server_state);
+
+        let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        let size_str = if size > 1024 * 1024 {
+            format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.0}KB", size as f64 / 1024.0)
+        };
+
+        match integrity {
+            Ok(ref s) if s == "ok" => {
+                components.push(serde_json::json!({
+                    "name": "database",
+                    "status": "ok",
+                    "detail": format!("integrity OK, {}, {} tables", size_str, table_count)
+                }));
+            }
+            Ok(s) => {
+                has_warning = true;
+                components.push(serde_json::json!({
+                    "name": "database",
+                    "status": "warning",
+                    "detail": format!("integrity: {}, {}", s, size_str)
+                }));
+            }
+            Err(e) => {
+                has_error = true;
+                components.push(serde_json::json!({
+                    "name": "database",
+                    "status": "error",
+                    "detail": format!("integrity check failed: {}", e)
+                }));
+            }
+        }
+    }
+
+    // 4. WebSocket: active connections via broadcast receiver count
+    {
+        let count = state.broadcast_tx.receiver_count();
+        components.push(serde_json::json!({
+            "name": "websocket",
+            "status": "ok",
+            "detail": format!("{} active connections", count)
+        }));
+    }
+
+    // 5. Hooks: check agent-event.sh
+    {
+        let hook_path = state.paths.scripts_dir.join("agent-event.sh").to_string_lossy().to_string();
+        let path = std::path::Path::new(&hook_path);
+        if path.exists() {
+            let executable = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(path)
+                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+            };
+            if executable {
+                components.push(serde_json::json!({
+                    "name": "hooks",
+                    "status": "ok",
+                    "detail": "agent-event.sh present and executable"
+                }));
+            } else {
+                has_warning = true;
+                components.push(serde_json::json!({
+                    "name": "hooks",
+                    "status": "warning",
+                    "detail": "agent-event.sh exists but not executable"
+                }));
+            }
+        } else {
+            has_warning = true;
+            components.push(serde_json::json!({
+                "name": "hooks",
+                "status": "warning",
+                "detail": "agent-event.sh not found"
+            }));
+        }
+    }
+
+    // 6. Disk: config directory total size
+    {
+        let du_output = std::process::Command::new("du")
+            .args(["-sk", &config_dir])
+            .output();
+        let size_str = du_output.ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.split_whitespace().next().and_then(|n| n.parse::<u64>().ok()))
+            .map(|kb| {
+                if kb > 1024 * 1024 { format!("{:.1}GB", kb as f64 / (1024.0 * 1024.0)) }
+                else if kb > 1024 { format!("{:.1}MB", kb as f64 / 1024.0) }
+                else { format!("{}KB", kb) }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        components.push(serde_json::json!({
+            "name": "disk",
+            "status": "ok",
+            "detail": format!("{} total", size_str)
+        }));
+    }
+
+    // 7. Logs: file size, recent entry time
+    {
+        let log_path_str = state.paths.log_path.to_string_lossy().to_string();
+        let log_path = if std::path::Path::new(&log_path_str).exists() {
+            Some(log_path_str.clone())
+        } else {
+            let legacy = "/opt/homebrew/var/log/agent-tracker-server.log".to_string();
+            if std::path::Path::new(&legacy).exists() { Some(legacy) } else { None }
+        };
+        match log_path {
+            Some(ref p) => {
+                let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                let size_str = if size > 1024 * 1024 {
+                    format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
+                } else {
+                    format!("{:.0}KB", size as f64 / 1024.0)
+                };
+                let modified = std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Utc> = t.into();
+                        dt.format("%H:%M:%S").to_string()
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+                components.push(serde_json::json!({
+                    "name": "logs",
+                    "status": "ok",
+                    "detail": format!("{}, last write {}", size_str, modified)
+                }));
+            }
+            None => {
+                components.push(serde_json::json!({
+                    "name": "logs",
+                    "status": "warning",
+                    "detail": "log file not found"
+                }));
+                has_warning = true;
+            }
+        }
+    }
+
+    let overall = if has_error { "unhealthy" }
+        else if has_warning { "degraded" }
+        else { "healthy" };
+
+    let response_ms = start.elapsed().as_millis();
+
+    Json(serde_json::json!({
+        "status": overall,
+        "components": components,
+        "timestamp": Utc::now().to_rfc3339(),
+        "response_ms": response_ms,
+    }))
+}
+
+// ============================================================================
+// Admin
+// ============================================================================
+
+async fn admin_restart() -> Json<serde_json::Value> {
+    info!("Admin restart requested — shutting down for launchd restart");
+    // Spawn a delayed exit so we can return the response first
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        std::process::exit(0);
+    });
+    Json(serde_json::json!({
+        "success": true,
+        "message": "Restart requested — server shutting down"
+    }))
+}
+
+async fn admin_clear_logs(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let log_path_str = state.paths.log_path.to_string_lossy().to_string();
+    let log_paths = [
+        log_path_str,
+        "/opt/homebrew/var/log/agent-tracker-server.log".to_string(),
+    ];
+
+    let log_path = log_paths.iter().find(|p| std::path::Path::new(p).exists());
+    match log_path {
+        Some(p) => {
+            let before = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            match std::fs::write(p, "") {
+                Ok(_) => {
+                    info!("Admin clear-logs: cleared {} bytes from {}", before, p);
+                    Json(serde_json::json!({
+                        "success": true,
+                        "before_bytes": before,
+                        "after_bytes": 0,
+                        "path": p,
+                    }))
+                }
+                Err(e) => Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to clear log: {}", e),
+                })),
+            }
+        }
+        None => Json(serde_json::json!({
+            "success": false,
+            "error": "Log file not found",
+        })),
+    }
+}
+
+// ============================================================================
 // Log Viewer
 // ============================================================================
 
@@ -1648,12 +1951,14 @@ struct LogEntry {
 }
 
 async fn get_logs(
+    State(state): State<Arc<AppState>>,
     Query(params): Query<LogQuery>,
 ) -> Json<serde_json::Value> {
     // Try known log file locations
+    let log_path_str = state.paths.log_path.to_string_lossy().to_string();
     let log_paths = [
-        "/opt/homebrew/var/log/agent-tracker-server.log",
-        &format!("{}/.config/agent-tracker/logs/tracker-server.log", std::env::var("HOME").unwrap_or_default()),
+        log_path_str,
+        "/opt/homebrew/var/log/agent-tracker-server.log".to_string(),
     ];
 
     let log_path = log_paths.iter().find(|p| std::path::Path::new(p).exists());
@@ -1846,8 +2151,7 @@ async fn delete_alert_rule(
 async fn create_backup(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let backup_dir = format!("{}/.config/agent-tracker/backups", home);
+    let backup_dir = state.paths.backup_dir.to_string_lossy().to_string();
     let _ = std::fs::create_dir_all(&backup_dir);
 
     let now = chrono::Utc::now().format("%Y-%m-%d_%H%M%S");
@@ -1860,9 +2164,10 @@ async fn create_backup(
     }
 }
 
-async fn list_backups() -> Json<serde_json::Value> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let backup_dir = format!("{}/.config/agent-tracker/backups", home);
+async fn list_backups(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let backup_dir = state.paths.backup_dir.to_string_lossy().to_string();
 
     let entries = match std::fs::read_dir(&backup_dir) {
         Ok(e) => e,
@@ -1936,11 +2241,20 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     // Spawn task to forward state updates to WebSocket
     let sender_clone = sender.clone();
     let state_send_task = tokio::spawn(async move {
-        while let Ok(msg) = state_rx.recv().await {
-            let json = serde_json::to_string(&msg).unwrap_or_default();
-            let mut sender_guard = sender_clone.lock().await;
-            if sender_guard.send(Message::Text(json)).await.is_err() {
-                break;
+        loop {
+            match state_rx.recv().await {
+                Ok(msg) => {
+                    let json = serde_json::to_string(&msg).unwrap_or_default();
+                    let mut sender_guard = sender_clone.lock().await;
+                    if sender_guard.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("WebSocket state receiver lagged, skipped {} messages", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -1948,15 +2262,24 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     // Spawn task to forward stream chunks to WebSocket
     let sender_clone2 = sender.clone();
     let stream_send_task = tokio::spawn(async move {
-        while let Ok(chunk) = stream_rx.recv().await {
-            let msg = StreamMessage {
-                kind: "stream".to_string(),
-                chunk,
-            };
-            let json = serde_json::to_string(&msg).unwrap_or_default();
-            let mut sender_guard = sender_clone2.lock().await;
-            if sender_guard.send(Message::Text(json)).await.is_err() {
-                break;
+        loop {
+            match stream_rx.recv().await {
+                Ok(chunk) => {
+                    let msg = StreamMessage {
+                        kind: "stream".to_string(),
+                        chunk,
+                    };
+                    let json = serde_json::to_string(&msg).unwrap_or_default();
+                    let mut sender_guard = sender_clone2.lock().await;
+                    if sender_guard.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("WebSocket stream receiver lagged, skipped {} messages", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -1964,11 +2287,20 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     // Spawn task to forward chat message events to WebSocket
     let sender_clone3 = sender.clone();
     let chat_send_task = tokio::spawn(async move {
-        while let Ok(event) = chat_rx.recv().await {
-            let json = serde_json::to_string(&event).unwrap_or_default();
-            let mut sender_guard = sender_clone3.lock().await;
-            if sender_guard.send(Message::Text(json)).await.is_err() {
-                break;
+        loop {
+            match chat_rx.recv().await {
+                Ok(event) => {
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    let mut sender_guard = sender_clone3.lock().await;
+                    if sender_guard.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("WebSocket chat receiver lagged, skipped {} messages", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -1978,7 +2310,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         match msg {
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(data)) => {
-                let _ = data;
+                let mut sender_guard = sender.lock().await;
+                let _ = sender_guard.send(Message::Pong(data)).await;
             }
             Ok(Message::Text(text)) => {
                 // Handle command from WebSocket
@@ -2114,6 +2447,13 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Resolve and initialize paths
+    let paths = paths::TrackerPaths::resolve();
+    if let Err(e) = paths.ensure_dirs() {
+        error!("Failed to create data directories: {}", e);
+    }
+    paths.migrate_if_needed();
+
     // Load configuration and initialize auth token
     let mut config = config::AgentConfig::load().unwrap_or_default();
     if config.auth.token.is_empty() {
@@ -2141,7 +2481,7 @@ async fn main() -> Result<()> {
     let db = Database::open(&db_path)?;
 
     // Create application state
-    let app_state = Arc::new(AppState::new(db, auth_token, allowed_origins)?);
+    let app_state = Arc::new(AppState::new(db, auth_token, allowed_origins, paths)?);
 
     // Start background task for tmux monitoring (real-time updates)
     let tmux_monitor_state = app_state.clone();
@@ -2228,14 +2568,13 @@ async fn main() -> Result<()> {
 
     // Background task: daily auto-backup
     let backup_state = app_state.clone();
+    let backup_dir_str = app_state.paths.backup_dir.to_string_lossy().to_string();
     tokio::spawn(async move {
         // Check on startup, then every 6 hours
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(6 * 3600));
         loop {
             interval.tick().await;
-            let home = std::env::var("HOME").unwrap_or_default();
-            let backup_dir = format!("{}/.config/agent-tracker/backups", home);
-            let _ = std::fs::create_dir_all(&backup_dir);
+            let backup_dir = &backup_dir_str;
 
             let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
             let today_backup = format!("{}/tracker-{}.db", backup_dir, today);
@@ -2307,6 +2646,7 @@ async fn main() -> Result<()> {
         // Projects (per-project .aitracker storage)
         .route("/api/projects", get(routes_projects::get_projects))
         .route("/api/projects/history", get(routes_projects::get_project_history))
+        .route("/api/projects/history/grouped-detail", get(routes_projects::get_grouped_detail))
         // History (legacy, from hooks)
         .route("/api/history", get(routes_history::get_history))
         .route("/api/history/stats", get(routes_history::get_history_stats))
@@ -2341,7 +2681,11 @@ async fn main() -> Result<()> {
         .route("/api/projects/:git_dir", delete(routes_projects::delete_project).put(routes_projects::update_project))
         .route("/api/projects/git-info", get(routes_projects::get_git_info))
         .route("/api/projects/statistics", get(routes_projects::get_project_statistics))
+        .route("/api/projects/files", get(routes_projects::get_project_files))
         // Project environment & worktree isolation
+        .route("/api/projects/todos", get(routes_projects::list_project_todos).post(routes_projects::create_project_todo))
+        .route("/api/projects/todos/:id", put(routes_projects::update_project_todo).delete(routes_projects::delete_project_todo))
+        .route("/api/projects/todos/:id/status", put(routes_projects::update_project_todo_status))
         .route("/api/project/env-vars", get(routes_projects::list_project_env_vars).post(routes_projects::create_project_env_var))
         .route("/api/project/env-vars/:id", put(routes_projects::update_project_env_var).delete(routes_projects::delete_project_env_var))
         .route("/api/project/services", get(routes_projects::list_project_services).post(routes_projects::create_project_service))
@@ -2369,6 +2713,7 @@ async fn main() -> Result<()> {
         .route("/api/tmux/swap-window", post(routes_tmux::tmux_swap_window))
         .route("/api/tmux/rename-window", post(routes_tmux::tmux_rename_window))
         .route("/api/tmux/rename-session", post(routes_tmux::tmux_rename_session))
+        .route("/api/tmux/reset-layout", post(routes_tmux::tmux_reset_layout))
         // Stream (real-time pane output)
         .route("/api/stream/start", post(stream_start))
         .route("/api/stream/stop", post(stream_stop))
@@ -2377,7 +2722,11 @@ async fn main() -> Result<()> {
         .route("/api/auth/verify", get(verify_auth))
         // Health check (no auth required — bypassed in auth_middleware)
         .route("/api/health", get(health_check))
+        .route("/api/diagnostics", get(diagnostics))
         .route("/api/logs", get(get_logs))
+        // Admin
+        .route("/api/admin/restart", post(admin_restart))
+        .route("/api/admin/clear-logs", post(admin_clear_logs))
         // Notifications
         .route("/api/notifications", get(list_notifications))
         .route("/api/notifications/:id/read", post(mark_notification_read))
@@ -2412,23 +2761,22 @@ async fn main() -> Result<()> {
                     .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
             }
         })
-        .with_state(app_state);
+        .with_state(app_state.clone());
 
     // Static file serving for web frontend
-    // Look for dist in multiple locations
-    let web_dist_paths = vec![
-        std::path::PathBuf::from("/Users/heygo/.config/agent-tracker/web/dist"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("../../web/dist")))
-            .unwrap_or_default(),
-        std::path::PathBuf::from("./web/dist"),
-    ];
-
-    let web_dist = web_dist_paths
-        .into_iter()
-        .find(|p| p.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("/Users/heygo/.config/agent-tracker/web/dist"));
+    let web_dist = if app_state.paths.web_dist_dir.exists() {
+        app_state.paths.web_dist_dir.clone()
+    } else {
+        // Fallback: try legacy path and ./web/dist
+        let legacy = paths::TrackerPaths::legacy_config_dir()
+            .join("web")
+            .join("dist");
+        let cwd = std::path::PathBuf::from("./web/dist");
+        [legacy, cwd]
+            .into_iter()
+            .find(|p| p.exists())
+            .unwrap_or(app_state.paths.web_dist_dir.clone())
+    };
 
     info!("Serving static files from {:?}", web_dist);
 

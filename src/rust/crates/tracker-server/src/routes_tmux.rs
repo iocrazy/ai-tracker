@@ -215,6 +215,13 @@ pub(crate) struct TmuxRenameSessionRequest {
     name: String,
 }
 
+/// Reset layout request
+#[derive(Deserialize)]
+pub(crate) struct TmuxResetLayoutRequest {
+    session: String,
+    window: String,
+}
+
 // ============================================================================
 // Browser Handlers
 // ============================================================================
@@ -751,7 +758,9 @@ pub(crate) async fn tmux_rename_window(
             agent::TmuxAgent::set_builtin_window_option(&target, "automatic-rename", "off").await.ok();
             // Update agent_base_name so status icon system uses the new name
             agent::TmuxAgent::set_window_option(&target, "agent_base_name", &req.name).await.ok();
-            state.broadcast_state();
+            // Broadcast in background to avoid blocking the response
+            let state_clone = state.clone();
+            tokio::task::spawn_blocking(move || state_clone.broadcast_state());
             Json(CommandResponse {
                 success: true,
                 message: format!("Renamed window to '{}'", req.name),
@@ -771,7 +780,8 @@ pub(crate) async fn tmux_rename_session(
 ) -> Json<CommandResponse> {
     match agent::TmuxAgent::rename_session(&req.session, &req.name).await {
         Ok(()) => {
-            state.broadcast_state();
+            let state_clone = state.clone();
+            tokio::task::spawn_blocking(move || state_clone.broadcast_state());
             Json(CommandResponse {
                 success: true,
                 message: format!("Renamed session to '{}'", req.name),
@@ -780,6 +790,20 @@ pub(crate) async fn tmux_rename_session(
         Err(e) => Json(CommandResponse {
             success: false,
             message: format!("Failed to rename session: {}", e),
+        }),
+    }
+}
+
+/// Reset a window's layout to the default 3-pane arrangement (yazi + lazygit + agent)
+pub(crate) async fn tmux_reset_layout(Json(req): Json<TmuxResetLayoutRequest>) -> Json<CommandResponse> {
+    match agent::TmuxAgent::reset_window_layout(&req.session, &req.window).await {
+        Ok(msg) => Json(CommandResponse {
+            success: true,
+            message: msg,
+        }),
+        Err(e) => Json(CommandResponse {
+            success: false,
+            message: format!("Failed to reset layout: {}", e),
         }),
     }
 }

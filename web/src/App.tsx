@@ -740,34 +740,19 @@ const App: React.FC = () => {
                      </div>
                 </div>
 
-                <div className="flex flex-col items-end gap-0.5 md:gap-1">
-                    <div className="flex items-center gap-1.5 md:gap-3 bg-black/40 px-2 md:px-4 py-1 md:py-2 border border-green-900 rounded-full">
-                        <div className={`w-3 h-3 rounded-full ${
+                <div className="flex items-center gap-2 md:gap-3">
+                    {/* Logged in user + connection status */}
+                    <div className="hidden sm:flex text-green-800 font-mono text-xs tracking-widest items-center gap-2">
+                        <span className={`w-1.5 h-1.5 rounded-full ${
                           connStatus === 'connected' && healthStatus !== 'degraded'
-                            ? 'bg-green-500 shadow-[0_0_8px_#22c55e] animate-pulse'
+                            ? 'bg-green-500 shadow-[0_0_4px_#22c55e]'
                             : connStatus === 'connected' && healthStatus === 'degraded'
-                            ? 'bg-yellow-500 shadow-[0_0_8px_#eab308] animate-pulse'
+                            ? 'bg-yellow-500 shadow-[0_0_4px_#eab308]'
                             : connStatus === 'reconnecting'
-                            ? 'bg-orange-500 shadow-[0_0_8px_#f97316] animate-pulse'
-                            : 'bg-red-500 shadow-[0_0_8px_#ef4444] animate-pulse'
-                        }`}></div>
-                        <span className={`hidden sm:inline font-bold tracking-wider md:tracking-widest text-xs md:text-sm lg:text-lg retro-text-shadow ${
-                          connStatus === 'connected' && healthStatus !== 'degraded'
-                            ? 'text-green-400'
-                            : connStatus === 'connected' && healthStatus === 'degraded'
-                            ? 'text-yellow-400'
-                            : connStatus === 'reconnecting'
-                            ? 'text-orange-400'
-                            : 'text-red-400'
-                        }`}>
-                            {connStatus === 'connected' && healthStatus !== 'degraded'
-                              ? 'ONLINE'
-                              : connStatus === 'connected' && healthStatus === 'degraded'
-                              ? 'DEGRADED'
-                              : connStatus === 'reconnecting'
-                              ? `RETRY #${retryCount}`
-                              : 'OFFLINE'}
-                        </span>
+                            ? 'bg-orange-500 shadow-[0_0_4px_#f97316] animate-pulse'
+                            : 'bg-red-500 shadow-[0_0_4px_#ef4444]'
+                        }`}></span>
+                        OP: {currentUser.toUpperCase()}{healthUptime ? ` | UP ${healthUptime}` : ''}
                     </div>
                     {/* Notification bell */}
                     <div className="relative">
@@ -816,11 +801,6 @@ const App: React.FC = () => {
                           )}
                         </div>
                       )}
-                    </div>
-                    {/* Logged in user display - hidden on small screens */}
-                    <div className="hidden sm:flex text-green-800 font-mono text-xs tracking-widest items-center gap-2">
-                        <span className="w-1.5 h-1.5 bg-green-700 rounded-full"></span>
-                        OP: {currentUser.toUpperCase()}{healthUptime ? ` | UP ${healthUptime}` : ''}
                     </div>
                 </div>
             </header>

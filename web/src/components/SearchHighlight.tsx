@@ -5,7 +5,7 @@ interface SearchHighlightProps {
   query: string;
   currentIndex: number;
   startMatchIndex: number;
-  onRegisterMatch: (globalIndex: number, el: HTMLElement | null) => void;
+  onRegisterMatch?: (globalIndex: number, el: HTMLElement | null) => void;
 }
 
 /**
@@ -59,7 +59,7 @@ export const SearchHighlight: React.FC<SearchHighlightProps> = ({
 interface HighlightMarkProps {
   globalIndex: number;
   isCurrent: boolean;
-  onRegister: (index: number, el: HTMLElement | null) => void;
+  onRegister?: (index: number, el: HTMLElement | null) => void;
   children: React.ReactNode;
 }
 
@@ -72,13 +72,14 @@ const HighlightMark: React.FC<HighlightMarkProps> = ({
   const ref = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
+    if (!onRegister) return;
     onRegister(globalIndex, ref.current);
     return () => onRegister(globalIndex, null);
   }, [globalIndex, onRegister]);
 
   return (
     <span
-      ref={ref}
+      ref={onRegister ? ref : undefined}
       className={
         isCurrent
           ? 'bg-yellow-400/50 text-yellow-200 rounded px-0.5'

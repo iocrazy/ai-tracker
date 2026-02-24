@@ -1,6 +1,8 @@
 #!/bin/bash
 # 获取当前 pane 的 tracker 状态，用于 tmux 状态栏显示
 
+source "$(dirname "$0")/env.sh"
+
 SESSION_ID="$1"
 WINDOW_ID="$2"
 PANE_ID="$3"
@@ -9,8 +11,8 @@ if [ -z "$SESSION_ID" ] || [ -z "$WINDOW_ID" ] || [ -z "$PANE_ID" ]; then
     exit 0
 fi
 
-# 获取 tracker 状态
-STATE=$("$HOME/.config/agent-tracker/bin/tracker-client" state 2>/dev/null)
+# 获取 tracker 状态 via HTTP API
+STATE=$(curl -s -m 2 "$TRACKER_URL/api/state" 2>/dev/null)
 
 if [ -z "$STATE" ]; then
     exit 0

@@ -84,6 +84,7 @@ export interface HistoryQueryParams {
   page?: number;
   per_page?: number;
   project?: string;
+  group_by?: 'window';
 }
 
 export interface HistoryEntry {
@@ -130,6 +131,89 @@ export async function fetchHistory(params: HistoryQueryParams = {}): Promise<His
 // Fetch history detail
 export async function fetchHistoryDetail(id: number): Promise<HistoryDetail> {
   const response = await authFetch(`${API_BASE}/history/${id}`);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+// ============================================================================
+// Grouped history types (session:window grouped view)
+// ============================================================================
+
+export interface WindowGroupEntry {
+  group_key: string;
+  session: string;
+  window: string;
+  entry_ids: number[];
+  task_count: number;
+  total_messages: number;
+  total_duration: number;
+  first_started: string;
+  last_ended: string;
+  summaries: string[];
+}
+
+export interface WindowGroupDateGroup {
+  label: string;
+  records: WindowGroupEntry[];
+}
+
+export interface WindowGroupResponse {
+  groups: WindowGroupDateGroup[];
+  total: number;
+  grouped: boolean;
+}
+
+export interface TaskSegment {
+  history_id: number;
+  summary: string;
+  started_at: string;
+  ended_at: string;
+  message_start_index: number;
+  message_count: number;
+}
+
+export interface GroupedMessage {
+  role: string;
+  content: string;
+  created_at: string;
+  history_id: number;
+}
+
+export interface GroupedToolUsage {
+  id: number;
+  tool_name: string;
+  tool_args: string;
+  result_summary: string;
+  success: boolean;
+  timestamp: string;
+  history_id: number;
+}
+
+export interface GroupedCommit {
+  id: number;
+  commit_hash: string;
+  commit_message: string;
+  files_changed: number;
+  timestamp: string;
+  history_id: number;
+}
+
+export interface GroupedDetailResponse {
+  segments: TaskSegment[];
+  messages: GroupedMessage[];
+  tool_usage: GroupedToolUsage[];
+  commits: GroupedCommit[];
+}
+
+// Fetch grouped detail (merged messages from multiple history entries)
+export async function fetchGroupedDetail(project: string, ids: number[]): Promise<GroupedDetailResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set('project', project);
+  searchParams.set('ids', ids.join(','));
+
+  const response = await authFetch(`${API_BASE}/projects/history/grouped-detail?${searchParams}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }

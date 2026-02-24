@@ -8,8 +8,8 @@ import type { AgentSession, AppTab } from '../types';
 Element.prototype.scrollIntoView = vi.fn();
 
 const mockProjects: ProjectInfo[] = [
-  { git_dir: '/home/user/tracker', name: 'tracker', last_session: '', last_window: '', last_active_at: null, notes_count: 0, goals_count: 0, history_count: 10, description: '', status: 'active', tags: '', created_at: '' },
-  { git_dir: '/home/user/api', name: 'api', last_session: '', last_window: '', last_active_at: null, notes_count: 0, goals_count: 0, history_count: 5, description: '', status: '', tags: '', created_at: '' },
+  { git_dir: '/home/user/tracker', name: 'tracker', last_session: '', last_window: '', last_active_at: null, notes_count: 0, goals_count: 0, history_count: 10, description: '', status: 'active', tags: '', created_at: '', tech_stack: '', todos_count: 0 },
+  { git_dir: '/home/user/api', name: 'api', last_session: '', last_window: '', last_active_at: null, notes_count: 0, goals_count: 0, history_count: 5, description: '', status: '', tags: '', created_at: '', tech_stack: '', todos_count: 0 },
 ];
 
 const mockSessions: AgentSession[] = [

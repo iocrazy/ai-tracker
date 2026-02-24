@@ -234,12 +234,15 @@ fn default_agent() -> String {
 }
 
 impl AgentConfig {
-    /// Get the default config file path
+    /// Get the default config file path.
+    /// Checks TRACKER_DATA_DIR env var first (Tauri mode), falls back to ~/.config/agent-tracker/.
     pub fn default_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config")
-            .join("agent-tracker")
+        if let Ok(data_dir) = std::env::var("TRACKER_DATA_DIR") {
+            if !data_dir.is_empty() {
+                return PathBuf::from(data_dir).join("agent-config.json");
+            }
+        }
+        crate::paths::TrackerPaths::legacy_config_dir()
             .join("agent-config.json")
     }
 

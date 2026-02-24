@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { AgentSession, AgentWindow } from '../types';
-import { Plus, Terminal, Trash2, MessageSquare, XCircle, Pause, Check, Activity, PowerOff, Settings, GripVertical, Pencil } from 'lucide-react';
+import { Plus, Terminal, Trash2, MessageSquare, XCircle, Pause, Check, Activity, PowerOff, Settings, GripVertical, Pencil, LayoutGrid } from 'lucide-react';
 import { ProjectSettings } from './ProjectSettings';
-import { tmuxRenameWindow, tmuxRenameSession } from '../services/tmux';
+import { tmuxRenameWindow, tmuxRenameSession, tmuxResetLayout } from '../services/tmux';
 import {
   DndContext,
   closestCenter,
@@ -311,9 +311,10 @@ const ContextMenu: React.FC<{
   onRename: () => void;
   onConsole: () => void;
   onHistory: () => void;
+  onResetLayout: () => void;
   onDelete: () => void;
   onClose: () => void;
-}> = ({ x, y, onRename, onConsole, onHistory, onDelete, onClose }) => {
+}> = ({ x, y, onRename, onConsole, onHistory, onResetLayout, onDelete, onClose }) => {
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -328,6 +329,7 @@ const ContextMenu: React.FC<{
     { label: 'Rename', icon: Pencil, action: onRename, color: 'text-green-400' },
     { label: 'Console', icon: Terminal, action: onConsole, color: 'text-green-400' },
     { label: 'History', icon: MessageSquare, action: onHistory, color: 'text-cyan-400' },
+    { label: 'Reset Layout', icon: LayoutGrid, action: onResetLayout, color: 'text-yellow-400' },
     { label: 'Delete', icon: Trash2, action: onDelete, color: 'text-red-400' },
   ];
 
@@ -432,8 +434,9 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
     setContextMenu({ x: e.clientX, y: e.clientY, sessionName, windowName, windowId, claudePane });
   };
 
-  const handleRenameWindow = async (sessionName: string, windowName: string, newName: string) => {
-    await tmuxRenameWindow(sessionName, windowName, newName);
+  const handleRenameWindow = async (sessionName: string, windowId: string, newName: string) => {
+    // Use window ID (@N) instead of window name to avoid tmux parsing dots as pane separators
+    await tmuxRenameWindow(sessionName, windowId, newName);
     setRenamingWindow(null);
   };
 
@@ -591,7 +594,7 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
                               onSelectWindow={() => { onSelectWindow(session.name, window.name, window.id); setExpandedCard(null); }}
                               onViewHistory={() => { onViewHistory(session.name, window.name, window.id, window.claudePane); setExpandedCard(null); }}
                               renameMode={renamingWindow?.sessionName === session.name && renamingWindow?.windowId === window.id}
-                              onRenameConfirm={(name) => handleRenameWindow(session.name, window.name, name)}
+                              onRenameConfirm={(name) => handleRenameWindow(session.name, window.id, name)}
                               onRenameCancel={() => setRenamingWindow(null)}
                             />
                         ))}
@@ -620,6 +623,7 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
              onRename={() => setRenamingWindow({ sessionName: contextMenu.sessionName, windowId: contextMenu.windowId })}
              onConsole={() => { onSelectWindow(contextMenu.sessionName, contextMenu.windowName, contextMenu.windowId); }}
              onHistory={() => { onViewHistory(contextMenu.sessionName, contextMenu.windowName, contextMenu.windowId, contextMenu.claudePane); }}
+             onResetLayout={() => { tmuxResetLayout(contextMenu.sessionName, contextMenu.windowId); }}
              onDelete={() => {
                const session = sessions.find(s => s.name === contextMenu.sessionName);
                if (session) onRequestDeleteWindow(session.id, contextMenu.windowId, contextMenu.windowName);

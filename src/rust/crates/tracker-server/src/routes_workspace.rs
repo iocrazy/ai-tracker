@@ -331,9 +331,14 @@ pub(crate) async fn start_workspace(
         || req.backend_cmd.is_some()
         || req.dev_server_cmd.is_some();
 
-    // Create worktree
+    // Check if branch is the main/current branch (skip worktree creation)
     let git = workspace::GitWorktree::new(git_dir);
-    let worktree_path = if use_feature_dir {
+    let is_main_branch = is_repo_main_branch(git_dir, &req.branch).await;
+
+    let worktree_path = if is_main_branch {
+        // Use project directory directly for main branch - no worktree needed
+        git_dir.to_path_buf()
+    } else if use_feature_dir {
         match git.create_feature_dir(&req.branch, req.base_branch.as_deref()).await {
             Ok(p) => p,
             Err(e) => {
@@ -386,11 +391,13 @@ pub(crate) async fn start_workspace(
     {
         Ok(name) => name,
         Err(e) => {
-            // Cleanup on failure
-            if use_feature_dir {
-                let _ = git.cleanup_feature_dir(&req.branch, true).await;
-            } else {
-                let _ = git.remove(&req.branch, true).await;
+            // Cleanup on failure (skip for main branch - nothing to clean)
+            if !is_main_branch {
+                if use_feature_dir {
+                    let _ = git.cleanup_feature_dir(&req.branch, true).await;
+                } else {
+                    let _ = git.remove(&req.branch, true).await;
+                }
             }
             return Json(StartWorkspaceResponse {
                 success: false,
@@ -536,6 +543,24 @@ pub(crate) async fn start_workspace(
     })
 }
 
+/// Check if a branch is the main/current branch of the repo (no worktree needed)
+async fn is_repo_main_branch(git_dir: &Path, branch: &str) -> bool {
+    // Check current HEAD branch
+    if let Ok(output) = tokio::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(git_dir)
+        .output()
+        .await
+    {
+        let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if current == branch {
+            return true;
+        }
+    }
+    // Also match common main branch names
+    matches!(branch, "main" | "master")
+}
+
 /// Resume a workspace (list or attach)
 pub(crate) async fn resume_workspace(Json(req): Json<ResumeWorkspaceRequest>) -> Json<StartWorkspaceResponse> {
     let git_dir = Path::new(&req.git_dir);
@@ -593,7 +618,26 @@ pub(crate) async fn resume_workspace(Json(req): Json<ResumeWorkspaceRequest>) ->
         }
     };
 
-    // First, create the tmux window
+    // Check if window already exists — just select it instead of creating a new one
+    let actual_session = agent::TmuxAgent::find_session_public(&session_name)
+        .await
+        .unwrap_or_else(|| session_name.clone());
+    if agent::TmuxAgent::window_exists(&actual_session, &window_name).await {
+        // Window exists, just select it
+        let _ = agent::TmuxAgent::select_window_by_target(&actual_session, &window_name).await;
+        return Json(StartWorkspaceResponse {
+            success: true,
+            session_name,
+            worktree_path: worktree_path.display().to_string(),
+            message: format!("Window '{}' already exists, selected it", window_name),
+            port: None,
+            frontend_port: None,
+            backend_port: None,
+            browser_url: None,
+        });
+    }
+
+    // Create the tmux window
     match agent::TmuxAgent::simple_new_window(&session_name, &window_name).await {
         Ok(_) => {}
         Err(e) => {
@@ -613,9 +657,10 @@ pub(crate) async fn resume_workspace(Json(req): Json<ResumeWorkspaceRequest>) ->
     // Small delay to let tmux create the window
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Determine layout
+    // Determine layout — use --resume flag for Claude to continue previous conversation
     let layout_type = req.layout.as_deref().unwrap_or("default");
-    let agent_cmd = req.agent.clone().unwrap_or_else(|| "claude --dangerously-skip-permissions".to_string());
+    let base_agent = req.agent.clone().unwrap_or_else(|| "claude --dangerously-skip-permissions".to_string());
+    let agent_cmd = format!("{} --resume", base_agent);
     let layout = match layout_type {
         "workspace" => layout::LayoutTemplate::Workspace {
             agent_cmd,

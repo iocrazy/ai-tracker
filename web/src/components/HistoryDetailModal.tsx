@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { X, MessageSquare, FileText, Wrench, GitCommit, Clock, Check, XCircle, ChevronRight, Search, ChevronUp, ChevronDown } from 'lucide-react';
-import { fetchHistoryDetail, fetchSessionDetail, HistoryDetail, ConversationMessage, ToolUsageRecord, GitCommitRecord, formatDuration, TimelineEntry } from '../services/api';
+import { fetchHistoryDetail, fetchSessionDetail, fetchGroupedDetail, HistoryDetail, ConversationMessage, ToolUsageRecord, GitCommitRecord, GroupedDetailResponse, TaskSegment, GroupedMessage, formatDuration, TimelineEntry } from '../services/api';
 import { ChatTimeline, fromHistoryTimeline } from './ChatTimeline';
 import { useSearch } from '../hooks/useSearch';
 import { SearchHighlight, countMatches } from './SearchHighlight';
@@ -9,6 +9,8 @@ import { MarkdownText } from './MarkdownText';
 interface HistoryDetailModalProps {
   historyId: number;
   filePath?: string;
+  groupIds?: number[];
+  projectGitDir?: string;
   onClose: () => void;
   isOpen: boolean;
 }
@@ -25,20 +27,53 @@ const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
 export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
   historyId,
   filePath,
+  groupIds,
+  projectGitDir,
   onClose,
   isOpen,
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('messages');
   const [detail, setDetail] = useState<HistoryDetail | null>(null);
+  const [groupedDetail, setGroupedDetail] = useState<GroupedDetailResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const search = useSearch();
 
+  // Debounced search query — input stays responsive, highlighting runs after user stops typing
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  useEffect(() => {
+    if (!search.query) {
+      setDebouncedQuery('');
+      return;
+    }
+    const timer = setTimeout(() => setDebouncedQuery(search.query), 300);
+    return () => clearTimeout(timer);
+  }, [search.query]);
+
+  const isGroupedMode = !!(groupIds && groupIds.length > 0);
+
   // Collect all searchable text blocks for the current tab
   const searchableTexts = useMemo(() => {
-    if (!detail || !search.query) return [];
+    if (!debouncedQuery) return [];
+    // Grouped mode
+    if (isGroupedMode && groupedDetail) {
+      switch (activeTab) {
+        case 'messages':
+          return (groupedDetail.messages || []).filter(m => m.content.trim().length > 0).map(m => m.content);
+        case 'summary':
+          return (groupedDetail.segments || []).map(s => s.summary).filter(Boolean);
+        case 'tools':
+          return (groupedDetail.tool_usage || []).flatMap(t => [t.tool_name, t.tool_args, t.result_summary].filter(Boolean));
+        case 'commits':
+          return (groupedDetail.commits || []).flatMap(c => [c.commit_hash, c.commit_message].filter(Boolean));
+        default:
+          return [];
+      }
+    }
+    // Single entry mode
+    if (!detail) return [];
     switch (activeTab) {
       case 'messages':
         return (detail.messages || []).filter(m => m.content.trim().length > 0).map(m => m.content);
@@ -51,20 +86,56 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
       default:
         return [];
     }
-  }, [detail, activeTab, search.query]);
+  }, [detail, groupedDetail, isGroupedMode, activeTab, debouncedQuery]);
 
-  // Count total matches and update search state
-  useEffect(() => {
-    if (!search.query) {
-      search.resetMatches(0);
-      return;
+  // Pre-compute match info in a single O(n) pass — replaces the O(n²) getStartMatchIndex
+  const matchInfo = useMemo(() => {
+    if (!debouncedQuery || searchableTexts.length === 0) {
+      return { starts: [] as number[], counts: [] as number[], total: 0 };
     }
-    let total = 0;
+    const starts: number[] = [];
+    const counts: number[] = [];
+    let cumulative = 0;
     for (const text of searchableTexts) {
-      total += countMatches(text, search.query);
+      starts.push(cumulative);
+      const c = countMatches(text, debouncedQuery);
+      counts.push(c);
+      cumulative += c;
     }
-    search.resetMatches(total);
-  }, [search.query, searchableTexts]);
+    return { starts, counts, total: cumulative };
+  }, [searchableTexts, debouncedQuery]);
+
+  // Update search state with total match count
+  useEffect(() => {
+    search.resetMatches(matchInfo.total);
+  }, [matchInfo.total]);
+
+  // Find which message contains the current match — for message-level scrolling
+  const activeMessageIndex = useMemo(() => {
+    if (matchInfo.total === 0 || search.currentIndex < 0) return -1;
+    const idx = search.currentIndex;
+    for (let i = 0; i < matchInfo.starts.length; i++) {
+      if (idx < matchInfo.starts[i] + matchInfo.counts[i]) return i;
+    }
+    return -1;
+  }, [matchInfo, search.currentIndex]);
+
+  // Message-level refs for scroll navigation (instead of per-highlight refs)
+  const messageRefs = useRef<Map<number, HTMLElement>>(new Map());
+  const registerMessageRef = useCallback((index: number, el: HTMLElement | null) => {
+    if (el) messageRefs.current.set(index, el);
+    else messageRefs.current.delete(index);
+  }, []);
+
+  // Scroll to the message containing the current match
+  useEffect(() => {
+    if (activeMessageIndex >= 0) {
+      const el = messageRefs.current.get(activeMessageIndex);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, [activeMessageIndex, search.currentIndex]);
 
   // Focus search input when activated
   useEffect(() => {
@@ -81,30 +152,27 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     }
   }, [activeTab]);
 
-  // Helper: get the startMatchIndex for a given text block index
-  const getStartMatchIndex = useCallback((textIndex: number) => {
-    if (!search.query) return 0;
-    let total = 0;
-    for (let i = 0; i < textIndex; i++) {
-      total += countMatches(searchableTexts[i] || '', search.query);
-    }
-    return total;
-  }, [searchableTexts, search.query]);
-
   // Fetch detail data
   useEffect(() => {
     if (!isOpen) return;
-    // Need either filePath or historyId
-    if (!filePath && !historyId) return;
 
     const loadDetail = async () => {
       setIsLoading(true);
       setError(null);
+      setDetail(null);
+      setGroupedDetail(null);
       try {
-        const data = filePath
-          ? await fetchSessionDetail(filePath)
-          : await fetchHistoryDetail(historyId);
-        setDetail(data);
+        if (isGroupedMode && projectGitDir) {
+          // Grouped mode: fetch merged detail from multiple history entries
+          const data = await fetchGroupedDetail(projectGitDir, groupIds!);
+          setGroupedDetail(data);
+        } else if (filePath) {
+          const data = await fetchSessionDetail(filePath);
+          setDetail(data);
+        } else if (historyId) {
+          const data = await fetchHistoryDetail(historyId);
+          setDetail(data);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load detail');
       } finally {
@@ -113,7 +181,7 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     };
 
     loadDetail();
-  }, [historyId, filePath, isOpen]);
+  }, [historyId, filePath, groupIds, projectGitDir, isOpen, isGroupedMode]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -210,6 +278,98 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
 
   if (!isOpen) return null;
 
+  // Render grouped messages with task boundary dividers
+  const renderGroupedMessages = (data: GroupedDetailResponse) => {
+    if (!data.messages || data.messages.length === 0) {
+      return <div className="text-green-700 italic">暂无对话记录</div>;
+    }
+
+    const filtered = data.messages.filter(m => m.content.trim().length > 0);
+    if (filtered.length === 0) {
+      return <div className="text-green-700 italic">暂无对话记录</div>;
+    }
+
+    // Build a map from history_id to segment info
+    const segmentMap = new Map<number, TaskSegment>();
+    for (const seg of data.segments) {
+      segmentMap.set(seg.history_id, seg);
+    }
+
+    let lastHistoryId: number | null = null;
+
+    return (
+      <div className="space-y-3">
+        {filtered.map((msg, index) => {
+          const content = msg.content.length > 2000 ? msg.content.slice(0, 2000) + '...' : msg.content;
+          const hasMatch = (matchInfo.counts[index] ?? 0) > 0;
+          const isActive = index === activeMessageIndex;
+          const showDivider = msg.history_id !== lastHistoryId;
+          const segment = showDivider ? segmentMap.get(msg.history_id) : null;
+          lastHistoryId = msg.history_id;
+          const isUser = msg.role === 'user';
+
+          return (
+            <React.Fragment key={index}>
+              {showDivider && segment && (
+                <div className="flex items-center gap-3 py-2 my-2">
+                  <div className="flex-1 h-px bg-cyan-800/50"></div>
+                  <div className="text-cyan-500 text-xs font-mono flex items-center gap-2 px-3 py-1 bg-cyan-900/20 border border-cyan-800/30 rounded">
+                    <span className="text-cyan-300 font-bold">
+                      {segment.summary.length > 60 ? segment.summary.slice(0, 60) + '...' : segment.summary}
+                    </span>
+                    {segment.started_at && (
+                      <span className="text-cyan-700">
+                        {new Date(segment.started_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex-1 h-px bg-cyan-800/50"></div>
+                </div>
+              )}
+              <div
+                ref={(el) => registerMessageRef(index, el)}
+                className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-[85%] rounded-lg px-4 py-3 ${
+                    isUser
+                      ? 'bg-blue-600/25 border border-blue-500/40 rounded-br-sm'
+                      : 'bg-gray-800/60 border border-gray-700/50 rounded-bl-sm'
+                  } ${isActive ? 'ring-1 ring-yellow-400/50' : ''}`}
+                >
+                  <div className={`flex items-center gap-2 mb-1.5 ${isUser ? 'justify-end' : 'justify-start'}`}>
+                    <span
+                      className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                        isUser
+                          ? 'bg-blue-500/20 text-blue-400'
+                          : 'bg-green-500/20 text-green-400'
+                      }`}
+                    >
+                      {isUser ? 'YOU' : 'AI'}
+                    </span>
+                    {msg.created_at && (
+                      <span className="text-[10px] text-gray-500">
+                        {new Date(msg.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
+                      </span>
+                    )}
+                  </div>
+                  <div className={`text-sm font-mono leading-relaxed ${isUser ? 'text-blue-200' : 'text-green-300'}`}>
+                    <MarkdownText
+                      content={content}
+                      searchQuery={hasMatch ? debouncedQuery : undefined}
+                      searchCurrentIndex={isActive ? search.currentIndex : -1}
+                      searchStartMatchIndex={hasMatch ? (matchInfo.starts[index] ?? 0) : undefined}
+                    />
+                  </div>
+                </div>
+              </div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    );
+  };
+
   const renderMessages = (messages: ConversationMessage[]) => {
     if (!messages || messages.length === 0) {
       return <div className="text-green-700 italic">暂无对话记录</div>;
@@ -222,44 +382,50 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     }
 
     return (
-      <div className="space-y-4">
+      <div className="space-y-3">
         {filtered.map((msg, index) => {
           const content = msg.content.length > 2000 ? msg.content.slice(0, 2000) + '...' : msg.content;
-          const startIdx = getStartMatchIndex(index);
+          const hasMatch = (matchInfo.counts[index] ?? 0) > 0;
+          const isActive = index === activeMessageIndex;
+          const isUser = msg.role === 'user';
 
           return (
             <div
               key={index}
-              className={`p-4 rounded border ${
-                msg.role === 'user'
-                  ? 'bg-blue-900/20 border-blue-800/50'
-                  : 'bg-green-900/20 border-green-800/50'
-              }`}
+              ref={(el) => registerMessageRef(index, el)}
+              className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
             >
-              <div className="flex items-center gap-2 mb-2">
-                <span
-                  className={`text-xs font-bold uppercase px-2 py-0.5 rounded ${
-                    msg.role === 'user'
-                      ? 'bg-blue-500/20 text-blue-400'
-                      : 'bg-green-500/20 text-green-400'
-                  }`}
-                >
-                  {msg.role === 'user' ? 'USER' : 'ASSISTANT'}
-                </span>
-                {msg.created_at && (
-                  <span className="text-xs text-green-700">
-                    {new Date(msg.created_at).toLocaleTimeString()}
+              <div
+                className={`max-w-[85%] rounded-lg px-4 py-3 ${
+                  isUser
+                    ? 'bg-blue-600/25 border border-blue-500/40 rounded-br-sm'
+                    : 'bg-gray-800/60 border border-gray-700/50 rounded-bl-sm'
+                } ${isActive ? 'ring-1 ring-yellow-400/50' : ''}`}
+              >
+                <div className={`flex items-center gap-2 mb-1.5 ${isUser ? 'justify-end' : 'justify-start'}`}>
+                  <span
+                    className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                      isUser
+                        ? 'bg-blue-500/20 text-blue-400'
+                        : 'bg-green-500/20 text-green-400'
+                    }`}
+                  >
+                    {isUser ? 'YOU' : 'AI'}
                   </span>
-                )}
-              </div>
-              <div className="text-green-300 text-sm font-mono leading-relaxed">
-                <MarkdownText
-                  content={content}
-                  searchQuery={search.query || undefined}
-                  searchCurrentIndex={search.currentIndex}
-                  searchStartMatchIndex={startIdx}
-                  onRegisterMatch={search.query ? search.registerMatch : undefined}
-                />
+                  {msg.created_at && (
+                    <span className="text-[10px] text-gray-500">
+                      {new Date(msg.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
+                    </span>
+                  )}
+                </div>
+                <div className={`text-sm font-mono leading-relaxed ${isUser ? 'text-blue-200' : 'text-green-300'}`}>
+                  <MarkdownText
+                    content={content}
+                    searchQuery={hasMatch ? debouncedQuery : undefined}
+                    searchCurrentIndex={isActive ? search.currentIndex : -1}
+                    searchStartMatchIndex={hasMatch ? (matchInfo.starts[index] ?? 0) : undefined}
+                  />
+                </div>
               </div>
             </div>
           );
@@ -458,6 +624,60 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
     );
   };
 
+  // Render grouped summary (list of task segments)
+  const renderGroupedSummary = (data: GroupedDetailResponse) => {
+    if (!data.segments || data.segments.length === 0) {
+      return <div className="text-green-700 italic">暂无摘要</div>;
+    }
+
+    return (
+      <div className="space-y-4">
+        <div className="bg-black/40 border border-green-800/50 p-4 rounded">
+          <div className="text-green-500 font-bold mb-3 uppercase tracking-wider">
+            任务列表 ({data.segments.length} 个任务)
+          </div>
+          <div className="space-y-3">
+            {data.segments.map((seg, index) => (
+              <div key={seg.history_id} className="flex items-start gap-3 p-3 bg-green-900/10 border border-green-800/30 rounded">
+                <span className="text-cyan-500 font-mono text-sm flex-shrink-0">#{index + 1}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-green-300 text-sm">{seg.summary}</div>
+                  <div className="text-green-700 text-xs mt-1 flex items-center gap-3">
+                    <span>{new Date(seg.started_at).toLocaleString()}</span>
+                    <span>{seg.message_count} 条消息</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Aggregate stats */}
+        <div className="bg-black/40 border border-green-800/50 p-4 rounded">
+          <div className="text-green-500 font-bold mb-3 uppercase tracking-wider">统计信息</div>
+          <div className="grid grid-cols-4 gap-4">
+            <div className="text-center">
+              <div className="text-2xl font-bold text-green-400">{data.messages?.length ?? 0}</div>
+              <div className="text-xs text-green-700">消息数</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-cyan-400">{data.tool_usage?.length ?? 0}</div>
+              <div className="text-xs text-green-700">工具调用</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-yellow-400">{data.commits?.length ?? 0}</div>
+              <div className="text-xs text-green-700">Git 提交</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-green-400">{data.segments.length}</div>
+              <div className="text-xs text-green-700">任务数</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderTabContent = () => {
     if (isLoading) {
       return <div className="text-green-600 animate-pulse">LOADING...</div>;
@@ -467,6 +687,23 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
       return <div className="text-red-500">Error: {error}</div>;
     }
 
+    // Grouped mode
+    if (isGroupedMode && groupedDetail) {
+      switch (activeTab) {
+        case 'messages':
+          return renderGroupedMessages(groupedDetail);
+        case 'summary':
+          return renderGroupedSummary(groupedDetail);
+        case 'tools':
+          return renderTools(groupedDetail.tool_usage as ToolUsageRecord[]);
+        case 'commits':
+          return renderCommits(groupedDetail.commits as GitCommitRecord[]);
+        default:
+          return null;
+      }
+    }
+
+    // Single entry mode
     if (!detail) {
       return <div className="text-green-700">No data</div>;
     }
@@ -506,9 +743,21 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
         <div className="flex items-center justify-between p-4 border-b border-green-800">
           <div className="flex items-center gap-3">
             <span className="text-green-500 font-bold uppercase tracking-wider">
-              HISTORY DETAIL
+              {isGroupedMode ? 'GROUPED DETAIL' : 'HISTORY DETAIL'}
             </span>
-            {detail && (
+            {isGroupedMode && groupedDetail && groupedDetail.segments.length > 0 ? (
+              <>
+                <ChevronRight className="w-4 h-4 text-green-700" />
+                <span className="text-green-400 font-mono">
+                  {groupedDetail.segments[0].summary.length > 40
+                    ? groupedDetail.segments[0].summary.slice(0, 40) + '...'
+                    : groupedDetail.segments[0].summary}
+                </span>
+                <span className="text-cyan-600 text-sm">
+                  {groupedDetail.segments.length} 个任务
+                </span>
+              </>
+            ) : detail ? (
               <>
                 <ChevronRight className="w-4 h-4 text-green-700" />
                 <span className="text-green-400 font-mono">
@@ -521,7 +770,7 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
                   </span>
                 )}
               </>
-            )}
+            ) : null}
           </div>
           <button
             onClick={onClose}
@@ -536,10 +785,19 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
           {TABS.map((tab, index) => {
             // Get count for each tab
             const getCount = () => {
+              if (isGroupedMode && groupedDetail) {
+                switch (tab.id) {
+                  case 'messages': return groupedDetail.messages?.length ?? 0;
+                  case 'summary': return groupedDetail.segments?.length ?? 0;
+                  case 'tools': return groupedDetail.tool_usage?.length ?? 0;
+                  case 'commits': return groupedDetail.commits?.length ?? 0;
+                  default: return 0;
+                }
+              }
               if (!detail) return 0;
               switch (tab.id) {
                 case 'messages': return detail.messages?.length ?? 0;
-                case 'summary': return 1; // Summary is always 1 if detail exists
+                case 'summary': return 1;
                 case 'tools': return detail.tool_usage?.length ?? 0;
                 case 'commits': return detail.commits?.length ?? 0;
                 default: return 0;

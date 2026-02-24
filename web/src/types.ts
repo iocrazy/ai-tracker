@@ -46,6 +46,9 @@ export interface TimelineEvent {
     filePath?: string;  // Session JSONL file path (for session-based entries)
     messageCount?: number;
     duration?: number;
+    // Grouped view fields
+    groupIds?: number[];  // history IDs in this group (for grouped detail)
+    taskCount?: number;
 }
 
 export interface ConsoleLog {

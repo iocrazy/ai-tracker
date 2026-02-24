@@ -17,6 +17,21 @@ export interface ProjectInfo {
   status: string;
   tags: string;
   created_at: string;
+  tech_stack: string;
+  todos_count: number;
+}
+
+// Project todo item
+export interface ProjectTodo {
+  id: number;
+  git_dir: string;
+  title: string;
+  description: string;
+  status: 'todo' | 'in_progress' | 'done';
+  priority: number;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
 }
 
 // Fetch registered projects
@@ -26,14 +41,15 @@ export async function fetchProjects(): Promise<ProjectInfo[]> {
   return response.json();
 }
 
-// Fetch project-specific history
-export async function fetchProjectHistory(params: HistoryQueryParams = {}): Promise<HistoryResponse> {
+// Fetch project-specific history (flat or grouped by session:window)
+export async function fetchProjectHistory(params: HistoryQueryParams = {}): Promise<any> {
   const searchParams = new URLSearchParams();
   if (params.project) searchParams.set('project', params.project);
   if (params.range) searchParams.set('range', params.range);
   if (params.search) searchParams.set('search', params.search);
   if (params.page) searchParams.set('page', String(params.page));
   if (params.per_page) searchParams.set('per_page', String(params.per_page));
+  if (params.group_by) searchParams.set('group_by', params.group_by);
 
   const response = await authFetch(`${API_BASE}/projects/history?${searchParams}`);
   if (!response.ok) {
@@ -233,8 +249,23 @@ export async function deleteProject(gitDir: string) {
   return authFetch(`${API_BASE}/projects/${encodeURIComponent(gitDir)}`, { method: 'DELETE' }).then(r => r.json());
 }
 
+// Project files (CLAUDE.md, MEMORY.md, etc.)
+export interface ProjectFileEntry {
+  name: string;
+  path: string;
+  content: string;
+  exists: boolean;
+}
+
+export async function fetchProjectFiles(gitDir: string): Promise<ProjectFileEntry[]> {
+  const res = await authFetch(`${API_BASE}/projects/files?git_dir=${encodeURIComponent(gitDir)}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.files || [];
+}
+
 // Update project metadata
-export async function updateProject(gitDir: string, updates: { description?: string; status?: string; tags?: string }) {
+export async function updateProject(gitDir: string, updates: { description?: string; status?: string; tags?: string; tech_stack?: string }) {
   return authFetch(`${API_BASE}/projects/${encodeURIComponent(gitDir)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -316,4 +347,35 @@ export async function fetchProjectStatistics(sessionName: string, range = '24h')
     };
   }
   return res.json();
+}
+
+// Project Todos
+export async function fetchProjectTodos(gitDir: string): Promise<ProjectTodo[]> {
+  const res = await authFetch(`${API_BASE}/projects/todos?git_dir=${encodeURIComponent(gitDir)}`);
+  return res.ok ? res.json() : [];
+}
+
+export async function createProjectTodo(gitDir: string, title: string, description = '') {
+  return authFetch(`${API_BASE}/projects/todos`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ git_dir: gitDir, title, description }),
+  }).then(r => r.json());
+}
+
+export async function updateProjectTodo(id: number, updates: Partial<Pick<ProjectTodo, 'title' | 'description' | 'status' | 'priority' | 'sort_order'>>) {
+  return authFetch(`${API_BASE}/projects/todos/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  }).then(r => r.json());
+}
+
+export async function deleteProjectTodo(id: number) {
+  return authFetch(`${API_BASE}/projects/todos/${id}`, { method: 'DELETE' }).then(r => r.json());
+}
+
+export async function updateProjectTodoStatus(id: number, status: string) {
+  return authFetch(`${API_BASE}/projects/todos/${id}/status`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  }).then(r => r.json());
 }

@@ -4,8 +4,9 @@
 
 set -euo pipefail
 
-CONFIG_DIR="$HOME/.config/agent-tracker"
-LAUNCHD_DIR="$CONFIG_DIR/launchd"
+source "$(dirname "$0")/env.sh"
+
+LAUNCHD_DIR="$TRACKER_DATA/launchd"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 
 # Only tracker-server now (handles HTTP API + WebSocket on port 3099)
@@ -46,16 +47,16 @@ case "${1:-status}" in
 
   logs)
     echo "=== tracker-server ==="
-    tail -20 "$CONFIG_DIR/logs/tracker-server.log" 2>/dev/null || echo "(no logs)"
+    tail -20 "$TRACKER_DATA/logs/tracker-server.log" 2>/dev/null || echo "(no logs)"
     ;;
 
   logs-follow)
-    tail -f "$CONFIG_DIR/logs/tracker-server.log"
+    tail -f "$TRACKER_DATA/logs/tracker-server.log"
     ;;
 
   build)
     echo "Building Rust project..."
-    (cd "$CONFIG_DIR/src/rust" && cargo build --release)
+    (cd "$TRACKER_DATA/src/rust" && cargo build --release)
     echo "Done. Run '$0 restart' to apply changes."
     ;;
 

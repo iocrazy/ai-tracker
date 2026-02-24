@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-F="$HOME/.config/agent-tracker/run/latest_notified.txt"
+source "$(dirname "$0")/env.sh"
+
+F="$TRACKER_RUN_DIR/latest_notified.txt"
 if [[ ! -f "$F" ]]; then
   exit 0
 fi
@@ -16,20 +18,18 @@ if [[ -z "${sid:-}" || -z "${wid:-}" || -z "${pid:-}" ]]; then
   exit 0
 fi
 
-RUN_DIR="$HOME/.config/agent-tracker/run"
-mkdir -p "$RUN_DIR"
+mkdir -p "$TRACKER_RUN_DIR"
 
 # Record current location for jump-back
 current=$(tmux display-message -p "#{session_id}:::#{window_id}:::#{pane_id}" | tr -d '\r\n')
 if [[ -n "$current" ]]; then
-  printf '%s\n' "$current" > "$RUN_DIR/jump_back.txt"
+  printf '%s\n' "$current" > "$TRACKER_RUN_DIR/jump_back.txt"
 fi
 
-# Mark as viewed (acknowledged) in tracker (graceful if unavailable)
-CLIENT_BIN="$HOME/.config/agent-tracker/bin/tracker-client"
-if [[ -x "$CLIENT_BIN" ]]; then
-  "$CLIENT_BIN" command acknowledge -session-id "$sid" -window-id "$wid" -pane "$pid" >/dev/null 2>&1 || true
-fi
+# Mark as viewed (acknowledged) in tracker via HTTP API (graceful if unavailable)
+curl -s -m 2 -X POST "$TRACKER_URL/api/command" \
+  -H "Content-Type: application/json" \
+  -d "{\"command\":\"acknowledge\",\"session_id\":\"$sid\",\"window_id\":\"$wid\",\"pane\":\"$pid\"}" >/dev/null 2>&1 || true
 
 # Focus the tmux target
 tmux switch-client -t "$sid" \; select-window -t "$wid" \; select-pane -t "$pid"

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AppSettings } from '../types';
-import { Check, Download, Shield, Trash2 } from 'lucide-react';
-import { fetchAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, AlertRule, fetchBackups, createBackup, BackupEntry } from '../services/api';
+import { Check, Download, Shield, Trash2, Activity } from 'lucide-react';
+import { fetchAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, AlertRule, fetchBackups, createBackup, BackupEntry, fetchDiagnostics, adminRestart, adminClearLogs, DiagnosticComponent, DiagnosticsResult } from '../services/api';
 
 interface SettingsViewProps {
     settings: AppSettings;
@@ -105,6 +105,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
        {/* Backups */}
        <BackupSection isModern={isModern} />
 
+       {/* Diagnostics */}
+       <DiagnosticsSection isModern={isModern} />
+
        {/* About */}
        <div className={`border-2 border-green-600 p-4 sm:p-8 relative ${isModern ? 'rounded-lg' : ''}`}>
             <h3 className={`absolute -top-4 left-4 px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase ${isModern ? 'bg-[#0d1117]' : 'bg-[#050505]'}`}>
@@ -188,6 +191,106 @@ const AlertRulesSection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
                 onClick={() => addRule('session_idle', 'Session idle >1h', 3600)}
                 className="px-3 py-1.5 bg-green-900/30 border border-green-700/40 text-green-500 text-xs tracking-wider hover:bg-green-900/50 transition-colors"
               >+ SESSION IDLE</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// Diagnostics sub-component
+const DiagnosticsSection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
+  const [result, setResult] = useState<DiagnosticsResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(false);
+
+  const runCheck = async () => {
+    setLoading(true);
+    try {
+      const data = await fetchDiagnostics();
+      setResult(data);
+    } catch {
+      setResult(null);
+    }
+    setLoading(false);
+  };
+
+  const handleClearLogs = async () => {
+    const res = await adminClearLogs();
+    if (res.success) {
+      runCheck();
+    }
+  };
+
+  const handleRestart = async () => {
+    if (!confirmRestart) {
+      setConfirmRestart(true);
+      setTimeout(() => setConfirmRestart(false), 3000);
+      return;
+    }
+    await adminRestart();
+    setConfirmRestart(false);
+  };
+
+  const statusDot = (status: string) => {
+    const color = status === 'ok' ? 'bg-green-500 shadow-[0_0_6px_#4ade80]'
+      : status === 'warning' ? 'bg-yellow-500 shadow-[0_0_6px_#eab308]'
+      : 'bg-red-500 shadow-[0_0_6px_#ef4444]';
+    return <span className={`inline-block w-2.5 h-2.5 rounded-full ${color}`} />;
+  };
+
+  const overallColor = !result ? 'text-green-800'
+    : result.status === 'healthy' ? 'text-green-400'
+    : result.status === 'degraded' ? 'text-yellow-400'
+    : 'text-red-400';
+
+  return (
+    <div className={`border-2 border-green-600 p-4 sm:p-8 relative ${isModern ? 'rounded-lg' : ''}`}>
+      <h3 className={`absolute -top-4 left-4 px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase ${isModern ? 'bg-[#0d1117]' : 'bg-[#050505]'}`}>
+        <Activity className="w-4 h-4 inline mr-2" />DIAGNOSTICS
+      </h3>
+      <div className="mt-2 space-y-3">
+        {/* Action buttons */}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={runCheck}
+            disabled={loading}
+            className="px-4 py-2 bg-green-900/30 border border-green-700/40 text-green-500 text-xs font-bold tracking-wider hover:bg-green-900/50 transition-colors disabled:opacity-50"
+          >{loading ? 'CHECKING...' : 'RUN CHECK'}</button>
+          <button
+            onClick={handleClearLogs}
+            className="px-4 py-2 bg-green-900/30 border border-green-700/40 text-green-500 text-xs font-bold tracking-wider hover:bg-green-900/50 transition-colors"
+          >CLEAR LOGS</button>
+          <button
+            onClick={handleRestart}
+            className={`px-4 py-2 border text-xs font-bold tracking-wider transition-colors ${
+              confirmRestart
+                ? 'bg-red-900/40 border-red-600/60 text-red-400 hover:bg-red-900/60'
+                : 'bg-green-900/30 border-green-700/40 text-green-500 hover:bg-green-900/50'
+            }`}
+          >{confirmRestart ? 'CONFIRM RESTART?' : 'RESTART SERVER'}</button>
+        </div>
+
+        {/* Results */}
+        {!result && !loading && (
+          <div className="text-green-800 text-sm">Click RUN CHECK to diagnose system components.</div>
+        )}
+        {result && (
+          <>
+            <div className="flex items-center gap-3 text-xs font-mono">
+              <span className={`font-bold uppercase ${overallColor}`}>{result.status}</span>
+              <span className="text-green-800">{result.response_ms}ms</span>
+              <span className="text-green-800 ml-auto">{new Date(result.timestamp).toLocaleTimeString()}</span>
+            </div>
+            <div className="space-y-1.5">
+              {result.components.map(c => (
+                <div key={c.name} className="flex items-center gap-3 py-1.5 border-b border-green-900/30 font-mono text-xs">
+                  {statusDot(c.status)}
+                  <span className="text-green-400 font-bold w-20 uppercase">{c.name}</span>
+                  <span className="text-green-600 flex-1 truncate">{c.detail}</span>
+                </div>
+              ))}
             </div>
           </>
         )}

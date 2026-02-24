@@ -21,11 +21,13 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RUST_DIR="$PROJECT_DIR/src/rust"
 WEB_DIR="$PROJECT_DIR/web"
 
-# 运行时目录（XDG 标准）
-CONFIG_DIR="$HOME/.config/agent-tracker"
-DATA_DIR="$HOME/.local/share/agent-tracker"
-BIN_DIR="$HOME/.local/bin"
-LOG_DIR="$HOME/Library/Logs/agent-tracker"
+# Shared path resolution
+source "$SCRIPT_DIR/env.sh"
+
+# Standalone deploy targets (legacy layout)
+CONFIG_DIR="$TRACKER_DATA"
+BIN_DIR="$HOME/.config/agent-tracker/bin"
+LOG_DIR="$TRACKER_LOG_DIR"
 
 # 服务名称
 LAUNCHD_LABEL="com.heygo.tracker-server"
@@ -54,10 +56,10 @@ done
 create_directories() {
     echo -e "${YELLOW}[1/5] 创建目录...${NC}"
     mkdir -p "$CONFIG_DIR"
-    mkdir -p "$DATA_DIR"
+    mkdir -p "$CONFIG_DIR/data"
     mkdir -p "$BIN_DIR"
     mkdir -p "$LOG_DIR"
-    mkdir -p "$DATA_DIR/web"
+    mkdir -p "$CONFIG_DIR/web/dist"
     echo -e "${GREEN}  ✓ 目录已创建${NC}"
 }
 
@@ -107,9 +109,9 @@ install_files() {
 
     # 复制前端文件
     if [ -d "$WEB_DIR/dist" ]; then
-        rm -rf "$DATA_DIR/web"
-        cp -r "$WEB_DIR/dist" "$DATA_DIR/web"
-        echo "  ✓ 前端文件已安装到 $DATA_DIR/web"
+        rm -rf "$CONFIG_DIR/web/dist"
+        cp -r "$WEB_DIR/dist" "$CONFIG_DIR/web/dist"
+        echo "  ✓ 前端文件已安装到 $CONFIG_DIR/web/dist"
     fi
 
     # 复制配置文件模板（如果不存在）
@@ -161,5 +163,5 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 echo -e "  服务地址: ${BLUE}http://localhost:3099${NC}"
 echo -e "  日志文件: ${BLUE}$LOG_DIR/tracker-server.log${NC}"
-echo -e "  数据目录: ${BLUE}$DATA_DIR${NC}"
+echo -e "  数据目录: ${BLUE}$CONFIG_DIR${NC}"
 echo ""

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { TimelineEvent } from '../types';
 import { Search, X, RefreshCw, Download, ChevronDown, ChevronLeft, ChevronRight, MessageSquare, FileSearch } from 'lucide-react';
-import { fetchProjectHistory, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory } from '../services/api';
+import { fetchProjectHistory, HistoryQueryParams, HistoryResponse, HistoryEntry, exportHistory, WindowGroupResponse, WindowGroupEntry, WindowGroupDateGroup } from '../services/api';
 import { MarkdownText } from './MarkdownText';
 import { HistoryDetailModal } from './HistoryDetailModal';
 
@@ -102,7 +102,7 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showHelp, setShowHelp] = useState(false);
-  const [timeRange, setTimeRange] = useState<TimeRange>('today');
+  const [timeRange, setTimeRange] = useState<TimeRange>('all');
   const [showTimeRangeDropdown, setShowTimeRangeDropdown] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -116,12 +116,17 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
   const [deepSearchInput, setDeepSearchInput] = useState('');
   const [isDeepSearchOpen, setIsDeepSearchOpen] = useState(false);
 
+  // Grouped mode (default: on)
+  const [isGrouped, setIsGrouped] = useState(true);
+
   // Fetched history data
   const [historyData, setHistoryData] = useState<HistoryResponse | null>(null);
+  const [groupedData, setGroupedData] = useState<WindowGroupResponse | null>(null);
 
   // History detail modal (self-contained)
   const [detailId, setDetailId] = useState<number | null>(null);
   const [detailFilePath, setDetailFilePath] = useState<string | null>(null);
+  const [detailGroupIds, setDetailGroupIds] = useState<number[] | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const deepSearchInputRef = useRef<HTMLInputElement>(null);
@@ -129,7 +134,7 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Convert HistoryEntry to TimelineEvent
+  // Convert HistoryEntry to TimelineEvent (flat mode)
   const convertToTimelineEvent = useCallback((entry: HistoryEntry): TimelineEvent => {
     const startTime = entry.started_at ? new Date(entry.started_at) : new Date();
     const displayName = entry.session && entry.window
@@ -148,15 +153,52 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
     };
   }, []);
 
+  // Convert WindowGroupEntry to TimelineEvent (grouped mode)
+  const convertGroupToTimelineEvent = useCallback((group: WindowGroupEntry): TimelineEvent => {
+    const startTime = group.first_started ? new Date(group.first_started) : new Date();
+    const endTime = group.last_ended ? new Date(group.last_ended) : null;
+    const timeStr = startTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const endStr = endTime ? endTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+    const timeRange = endStr && endStr !== timeStr ? `${timeStr}-${endStr}` : timeStr;
+
+    // Build description from summaries (show first 3, truncate rest)
+    const maxSummaries = 3;
+    const visibleSummaries = group.summaries.slice(0, maxSummaries);
+    const remaining = group.summaries.length - maxSummaries;
+    let description = visibleSummaries.join(' | ');
+    if (remaining > 0) {
+      description += ` (+${remaining} more)`;
+    }
+
+    return {
+      id: `group-${group.group_key}`,
+      time: timeRange,
+      user: group.group_key,
+      action: `${group.task_count} TASK${group.task_count > 1 ? 'S' : ''}`,
+      description,
+      messageCount: group.total_messages,
+      duration: group.total_duration,
+      groupIds: group.entry_ids,
+      taskCount: group.task_count,
+    };
+  }, []);
+
   // View details handler
   const handleViewDetails = useCallback((event: TimelineEvent) => {
-    if (event.filePath) {
+    if (event.groupIds && event.groupIds.length > 0) {
+      // Grouped mode: open merged detail
+      setDetailGroupIds(event.groupIds);
+      setDetailId(null);
+      setDetailFilePath(null);
+    } else if (event.filePath) {
       setDetailFilePath(event.filePath);
       setDetailId(null);
+      setDetailGroupIds(null);
     } else {
       const id = event.historyId || parseInt(event.id);
       setDetailId(id);
       setDetailFilePath(null);
+      setDetailGroupIds(null);
     }
   }, []);
 
@@ -191,15 +233,24 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
       if (deepQuery) {
         params.search = deepQuery;
       }
+      if (isGrouped) {
+        params.group_by = 'window';
+      }
       const data = await fetchProjectHistory(params);
-      setHistoryData(data);
+      if (data.grouped) {
+        setGroupedData(data as WindowGroupResponse);
+        setHistoryData(null);
+      } else {
+        setHistoryData(data as HistoryResponse);
+        setGroupedData(null);
+      }
       setTotal(data.total);
     } catch (error) {
       console.error('Failed to fetch history:', error);
     } finally {
       setIsLoading(false);
     }
-  }, [timeRange, page, perPage, deepQuery, gitDir]);
+  }, [timeRange, page, perPage, deepQuery, gitDir, isGrouped]);
 
   // Initial load and refresh on filter change
   useEffect(() => {
@@ -217,15 +268,24 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
     setSelectedIndex(0);
   }, [gitDir]);
 
-  // Convert history data to events
+  // Convert history data to events (supports both grouped and flat modes)
   const events = useMemo(() => {
-    if (!historyData) return [];
-    const allEntries: HistoryEntry[] = [];
-    for (const group of historyData.groups) {
-      allEntries.push(...group.records);
+    if (groupedData) {
+      const allGroups: WindowGroupEntry[] = [];
+      for (const dateGroup of groupedData.groups) {
+        allGroups.push(...dateGroup.records);
+      }
+      return allGroups.map(convertGroupToTimelineEvent);
     }
-    return allEntries.map(convertToTimelineEvent);
-  }, [historyData, convertToTimelineEvent]);
+    if (historyData) {
+      const allEntries: HistoryEntry[] = [];
+      for (const group of historyData.groups) {
+        allEntries.push(...group.records);
+      }
+      return allEntries.map(convertToTimelineEvent);
+    }
+    return [];
+  }, [historyData, groupedData, convertToTimelineEvent, convertGroupToTimelineEvent]);
 
   // Filter events based on search query (local filter)
   const filteredEvents = useMemo(() => {
@@ -450,6 +510,17 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
               <Download className="w-4 h-4" />
             </button>
             <button
+              onClick={() => { setIsGrouped(g => !g); setPage(1); }}
+              className={`px-2 py-1 text-xs font-mono rounded transition-colors border ${
+                isGrouped
+                  ? 'text-cyan-400 border-cyan-800 bg-cyan-900/20 hover:bg-cyan-900/40'
+                  : 'text-green-600 border-green-900 hover:text-green-400 hover:border-green-700'
+              }`}
+              title={isGrouped ? '切换到逐条模式' : '切换到分组模式'}
+            >
+              {isGrouped ? '分组' : '逐条'}
+            </button>
+            <button
               onClick={() => {
                 setIsDeepSearchOpen(o => !o);
                 if (!isDeepSearchOpen) {
@@ -609,8 +680,10 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
       <HistoryDetailModal
         historyId={detailId || 0}
         filePath={detailFilePath || undefined}
-        isOpen={detailId !== null || detailFilePath !== null}
-        onClose={() => { setDetailId(null); setDetailFilePath(null); }}
+        groupIds={detailGroupIds || undefined}
+        projectGitDir={gitDir}
+        isOpen={detailId !== null || detailFilePath !== null || detailGroupIds !== null}
+        onClose={() => { setDetailId(null); setDetailFilePath(null); setDetailGroupIds(null); }}
       />
     </>
   );

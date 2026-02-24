@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-F="$HOME/.config/agent-tracker/run/jump_back.txt"
+source "$(dirname "$0")/env.sh"
+
+F="$TRACKER_RUN_DIR/jump_back.txt"
 if [[ ! -f "$F" ]]; then
   exit 0
 fi
@@ -15,4 +17,3 @@ if [[ -z "${sid:-}" || -z "${wid:-}" || -z "${pid:-}" ]]; then
 fi
 
 tmux switch-client -t "$sid" \; select-window -t "$wid" \; select-pane -t "$pid"
-

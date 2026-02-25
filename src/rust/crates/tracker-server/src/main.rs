@@ -329,7 +329,8 @@ impl AppState {
         }
     }
 
-    /// Broadcast state to all WebSocket subscribers (with tmux names)
+    /// Broadcast state to all WebSocket subscribers (with tmux names).
+    /// Uses cached tmux windows from the polling loop to avoid blocking the async runtime.
     fn broadcast_state(&self) {
         let mut state = self.get_state_response_with_tmux_names();
 
@@ -342,15 +343,19 @@ impl AppState {
             }
         }
 
-        let tmux_windows = agent::TmuxAgent::list_all_windows_sync();
+        // Use cached tmux windows from the polling loop (updated every 1s)
+        // instead of calling list_all_windows_sync() which blocks the async runtime.
+        let tmux_windows = self.last_tmux_windows.lock().unwrap().clone();
 
         // Write cache file for tmux status line
         Self::write_cache_file(&state);
 
-        // Refresh tmux status line
-        let _ = std::process::Command::new(agent::TMUX_BIN)
-            .args(["refresh-client", "-S"])
-            .status();
+        // Refresh tmux status line (fire-and-forget via thread to avoid blocking)
+        std::thread::spawn(|| {
+            let _ = std::process::Command::new(agent::TMUX_BIN)
+                .args(["-S", "/private/tmp/tmux-501/default", "refresh-client", "-S"])
+                .status();
+        });
 
         let msg = RealtimeMessage { state, tmux_windows };
         if let Err(e) = self.broadcast_tx.send(msg) {
@@ -379,10 +384,11 @@ impl AppState {
         self.broadcast_tx.subscribe()
     }
 
-    /// Get current realtime message (state + tmux windows)
+    /// Get current realtime message (state + tmux windows).
+    /// Uses cached tmux windows to avoid blocking the async runtime.
     fn get_realtime_message(&self) -> RealtimeMessage {
         let state = self.get_state_response_with_tmux_names();
-        let tmux_windows = agent::TmuxAgent::list_all_windows_sync();
+        let tmux_windows = self.last_tmux_windows.lock().unwrap().clone();
         RealtimeMessage { state, tmux_windows }
     }
 
@@ -1557,48 +1563,58 @@ async fn health_check(
     let mut checks = serde_json::Map::new();
     let mut overall = "healthy";
 
-    // Check tmux server
-    let tmux_ok = std::process::Command::new(agent::TMUX_BIN)
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output()
-        .map(|o| {
+    // Check tmux server — offload blocking Command to spawn_blocking
+    let tmux_ok = match tokio::task::spawn_blocking(|| {
+        std::process::Command::new(agent::TMUX_BIN)
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output()
+    }).await {
+        Ok(Ok(o)) => {
             let count = String::from_utf8_lossy(&o.stdout).lines().count();
             checks.insert("tmux".into(), serde_json::json!({
                 "status": if o.status.success() { "ok" } else { "error" },
                 "sessions": count,
             }));
             o.status.success()
-        })
-        .unwrap_or_else(|_| {
-            checks.insert("tmux".into(), serde_json::json!({"status": "error", "message": "tmux not found"}));
+        }
+        _ => {
+            checks.insert("tmux".into(), serde_json::json!({"status": "error", "message": "tmux check failed"}));
             false
-        });
+        }
+    };
 
-    // Check database
-    let db_ok = {
-        let server_state = state.state.lock().unwrap();
-        match server_state.db.conn.query_row("PRAGMA integrity_check", [], |row| {
+    // Check database — offload blocking SQLite + mutex lock to spawn_blocking
+    let state_ref = state.clone();
+    let db_ok = match tokio::task::spawn_blocking(move || {
+        let server_state = state_ref.state.lock().unwrap();
+        server_state.db.conn.query_row("PRAGMA integrity_check", [], |row| {
             row.get::<_, String>(0)
-        }) {
-            Ok(result) if result == "ok" => {
-                let db_path = db::default_db_path();
-                let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-                let size_str = if size > 1024 * 1024 {
-                    format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
-                } else {
-                    format!("{:.0}KB", size as f64 / 1024.0)
-                };
-                checks.insert("database".into(), serde_json::json!({"status": "ok", "size": size_str}));
-                true
-            }
-            Ok(result) => {
-                checks.insert("database".into(), serde_json::json!({"status": "degraded", "message": result}));
-                false
-            }
-            Err(e) => {
-                checks.insert("database".into(), serde_json::json!({"status": "error", "message": e.to_string()}));
-                false
-            }
+        }).map(|result| {
+            let db_path = db::default_db_path();
+            let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+            (result, size)
+        })
+    }).await {
+        Ok(Ok((result, size))) if result == "ok" => {
+            let size_str = if size > 1024 * 1024 {
+                format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
+            } else {
+                format!("{:.0}KB", size as f64 / 1024.0)
+            };
+            checks.insert("database".into(), serde_json::json!({"status": "ok", "size": size_str}));
+            true
+        }
+        Ok(Ok((result, _))) => {
+            checks.insert("database".into(), serde_json::json!({"status": "degraded", "message": result}));
+            false
+        }
+        Ok(Err(e)) => {
+            checks.insert("database".into(), serde_json::json!({"status": "error", "message": e.to_string()}));
+            false
+        }
+        Err(e) => {
+            checks.insert("database".into(), serde_json::json!({"status": "error", "message": e.to_string()}));
+            false
         }
     };
 
@@ -2484,12 +2500,26 @@ async fn main() -> Result<()> {
     let app_state = Arc::new(AppState::new(db, auth_token, allowed_origins, paths)?);
 
     // Start background task for tmux monitoring (real-time updates)
+    // Uses spawn_blocking to avoid blocking the tokio async runtime with sync tmux commands.
     let tmux_monitor_state = app_state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
         loop {
             interval.tick().await;
-            let windows = agent::TmuxAgent::list_all_windows_sync();
+            let windows = match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                tokio::task::spawn_blocking(agent::TmuxAgent::list_all_windows_sync),
+            ).await {
+                Ok(Ok(w)) => w,
+                Ok(Err(e)) => {
+                    tracing::error!("tmux monitor spawn_blocking failed: {}", e);
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!("tmux monitor: list_all_windows timed out after 5s");
+                    continue;
+                }
+            };
             tmux_monitor_state.broadcast_if_tmux_changed(windows);
         }
     });
@@ -2510,12 +2540,16 @@ async fn main() -> Result<()> {
 
     // Start background task for chat watcher (JSONL file polling → WS push)
     // Two parts: 1) poll for file changes every 500ms, 2) sync watched sessions every 5s
+    // poll() does blocking file I/O + mutex lock, so offload to spawn_blocking.
     let chat_poll_state = app_state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
         loop {
             interval.tick().await;
-            chat_poll_state.chat_watcher.poll();
+            let state_ref = chat_poll_state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                state_ref.chat_watcher.poll();
+            }).await;
         }
     });
 
@@ -2526,13 +2560,24 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            // Discover active sessions and their JSONL files
-            let active_files = discover_active_jsonl_files(&chat_sync_state);
+            // discover_active_jsonl_files runs blocking tmux commands + mutex locks,
+            // so offload to a blocking thread to avoid starving the async runtime.
+            let state_ref = chat_sync_state.clone();
+            let active_files = match tokio::task::spawn_blocking(move || {
+                discover_active_jsonl_files(&state_ref)
+            }).await {
+                Ok(files) => files,
+                Err(e) => {
+                    tracing::error!("discover_active_jsonl_files spawn_blocking failed: {}", e);
+                    continue;
+                }
+            };
             chat_sync_state.chat_watcher.sync_sessions(active_files);
         }
     });
 
     // Start background task for Claude session file scanning
+    // scan_claude_sessions does heavy file I/O (reading JSONL files), so offload to blocking thread.
     let scanner_db_path = db_path.clone();
     tokio::spawn(async move {
         // Initial delay to let server start up
@@ -2540,7 +2585,10 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            if let Err(e) = routes_history::scan_claude_sessions(&scanner_db_path) {
+            let db_path = scanner_db_path.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                routes_history::scan_claude_sessions(&db_path)
+            }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking failed: {}", e))) {
                 tracing::error!("Session scanner error: {}", e);
             }
         }
@@ -2553,20 +2601,24 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let server = alert_state.state.lock().unwrap();
-            match server.db.check_alerts() {
-                Ok(new) if !new.is_empty() => {
-                    info!("Alert check: {} new notifications", new.len());
+            let state_ref = alert_state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let server = state_ref.state.lock().unwrap();
+                match server.db.check_alerts() {
+                    Ok(new) if !new.is_empty() => {
+                        info!("Alert check: {} new notifications", new.len());
+                    }
+                    Err(e) => {
+                        debug!("Alert check error: {}", e);
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    debug!("Alert check error: {}", e);
-                }
-                _ => {}
-            }
+            }).await;
         }
     });
 
     // Background task: daily auto-backup
+    // Offloaded to spawn_blocking because backup_to does blocking SQLite I/O.
     let backup_state = app_state.clone();
     let backup_dir_str = app_state.paths.backup_dir.to_string_lossy().to_string();
     tokio::spawn(async move {
@@ -2574,34 +2626,36 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(6 * 3600));
         loop {
             interval.tick().await;
-            let backup_dir = &backup_dir_str;
+            let backup_dir = backup_dir_str.clone();
+            let state_ref = backup_state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                let today_backup = format!("{}/tracker-{}.db", backup_dir, today);
 
-            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-            let today_backup = format!("{}/tracker-{}.db", backup_dir, today);
+                if !std::path::Path::new(&today_backup).exists() {
+                    let server = state_ref.state.lock().unwrap();
+                    match server.db.backup_to(&today_backup) {
+                        Ok(_) => info!("Daily backup created: {}", today_backup),
+                        Err(e) => error!("Backup failed: {}", e),
+                    }
 
-            if !std::path::Path::new(&today_backup).exists() {
-                let server = backup_state.state.lock().unwrap();
-                match server.db.backup_to(&today_backup) {
-                    Ok(_) => info!("Daily backup created: {}", today_backup),
-                    Err(e) => error!("Backup failed: {}", e),
-                }
-
-                // Clean up backups older than 30 days
-                if let Ok(entries) = std::fs::read_dir(&backup_dir) {
-                    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
-                    for entry in entries.filter_map(|e| e.ok()) {
-                        if let Ok(meta) = entry.metadata() {
-                            if let Ok(modified) = meta.modified() {
-                                let dt: chrono::DateTime<chrono::Utc> = modified.into();
-                                if dt < cutoff {
-                                    let _ = std::fs::remove_file(entry.path());
-                                    info!("Cleaned old backup: {}", entry.path().display());
+                    // Clean up backups older than 30 days
+                    if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+                        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            if let Ok(meta) = entry.metadata() {
+                                if let Ok(modified) = meta.modified() {
+                                    let dt: chrono::DateTime<chrono::Utc> = modified.into();
+                                    if dt < cutoff {
+                                        let _ = std::fs::remove_file(entry.path());
+                                        info!("Cleaned old backup: {}", entry.path().display());
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
+            }).await;
         }
     });
 

@@ -32,7 +32,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Query, State,
     },
-    http::{header, Method, Request, StatusCode},
+    http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json},
     routing::{delete, get, post, put},
@@ -699,6 +699,109 @@ struct SendCommandRequest {
     scope: String,
     #[serde(default)]
     transcript_path: String,
+}
+
+/// Resolved tmux context from a pane ID
+#[derive(Debug, Clone, Default)]
+struct TmuxContext {
+    session_id: String,
+    session_name: String,
+    window_id: String,
+    window_name: String,
+    pane_id: String,
+}
+
+/// Resolve tmux context from a pane ID (e.g. "%42")
+/// Runs tmux display-message synchronously — call via spawn_blocking
+fn resolve_tmux_context(pane: &str) -> Option<TmuxContext> {
+    if pane.is_empty() {
+        return None;
+    }
+    let output = std::process::Command::new(agent::TMUX_BIN)
+        .args([
+            "-S", "/private/tmp/tmux-501/default",
+            "display-message",
+            "-t", pane,
+            "-p",
+            "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{pane_id}",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let parts: Vec<&str> = line.splitn(5, '|').collect();
+    if parts.len() < 5 {
+        return None;
+    }
+
+    Some(TmuxContext {
+        session_id: parts[0].to_string(),
+        session_name: parts[1].to_string(),
+        window_id: parts[2].to_string(),
+        window_name: parts[3].to_string(),
+        pane_id: parts[4].to_string(),
+    })
+}
+
+/// Extract last assistant message from a Claude Code JSONL transcript file.
+/// Reads last ~32KB, finds last type=assistant entry, extracts text content.
+/// Truncates to max_chars. Call via spawn_blocking.
+fn extract_last_assistant_message(transcript_path: &str, max_chars: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = std::fs::File::open(transcript_path) else {
+        return String::new();
+    };
+    let Ok(meta) = file.metadata() else {
+        return String::new();
+    };
+
+    // Read last 32KB
+    let size = meta.len();
+    let read_from = if size > 32768 { size - 32768 } else { 0 };
+    if read_from > 0 {
+        let _ = file.seek(SeekFrom::Start(read_from));
+    }
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() {
+        return String::new();
+    }
+
+    // Find last assistant message with text content
+    let mut last_text = String::new();
+    for line in buf.lines() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if val.get("type").and_then(|t| t.as_str()) == Some("assistant") {
+                // Extract text from message.content[] array
+                if let Some(content) = val
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    let texts: Vec<&str> = content
+                        .iter()
+                        .filter(|c| c.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+                        .collect();
+                    if !texts.is_empty() {
+                        last_text = texts.join(" ");
+                    }
+                }
+            }
+        }
+    }
+
+    // Clean up: replace newlines with spaces, truncate
+    let clean = last_text.replace('\n', " ");
+    if clean.len() > max_chars {
+        clean.chars().take(max_chars).collect()
+    } else {
+        clean
+    }
 }
 
 /// Add note request
@@ -1434,6 +1537,110 @@ async fn restore_note(
         }),
     }
 }
+// ============================================================================
+// Hook Handler (Claude Code hooks → server-side processing)
+// ============================================================================
+
+/// Handle raw Claude Code hook events.
+/// Replaces the shell pipeline: hook → jq → agent-event.sh → curl /api/command
+/// Now: hook → curl /api/hook (server does tmux resolution + transcript parsing)
+async fn handle_hook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<CommandResponse>, StatusCode> {
+    let event = headers
+        .get("x-hook-event")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let tmux_pane = headers
+        .get("x-tmux-pane")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // Parse body as JSON (best-effort, some events may have empty body)
+    let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+
+    // Resolve tmux context from pane ID
+    let pane_for_tmux = tmux_pane.clone();
+    let tmux_ctx = tokio::task::spawn_blocking(move || resolve_tmux_context(&pane_for_tmux))
+        .await
+        .unwrap_or(None)
+        .unwrap_or_default();
+
+    // Map event to command + extract summary
+    let (command, summary, transcript_path) = match event.as_str() {
+        "UserPromptSubmit" => {
+            let prompt = body_json
+                .get("prompt")
+                .and_then(|p| p.as_str())
+                .unwrap_or("working...");
+            let truncated: String = prompt.replace('\n', " ").chars().take(100).collect();
+            (commands::START_TASK, truncated, String::new())
+        }
+        "Stop" => {
+            // Extract last assistant message from transcript
+            let transcript = body_json
+                .get("transcript_path")
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tp = transcript.clone();
+            let summary = tokio::task::spawn_blocking(move || {
+                extract_last_assistant_message(&tp, 200)
+            })
+            .await
+            .unwrap_or_default();
+            (commands::FINISH_TASK, summary, transcript)
+        }
+        "PermissionRequest" => {
+            let tool = body_json
+                .get("tool")
+                .or_else(|| body_json.get("tool_name"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("权限请求");
+            let summary = format!("权限: {}", tool);
+            (commands::PAUSE_TASK, summary, String::new())
+        }
+        "Notification" => {
+            (commands::FINISH_TASK, "空闲".to_string(), String::new())
+        }
+        _ => {
+            return Ok(Json(CommandResponse {
+                success: false,
+                message: format!("Unknown hook event: {}", event),
+            }));
+        }
+    };
+
+    let cmd_req = SendCommandRequest {
+        command: command.to_string(),
+        session_id: tmux_ctx.session_id,
+        session: tmux_ctx.session_name,
+        window_id: tmux_ctx.window_id,
+        window: tmux_ctx.window_name,
+        pane: tmux_ctx.pane_id,
+        summary,
+        note_id: String::new(),
+        goal_id: String::new(),
+        scope: String::new(),
+        transcript_path,
+    };
+
+    match handle_command(&state, cmd_req).await {
+        Ok(_) => Ok(Json(CommandResponse {
+            success: true,
+            message: format!("Hook '{}' processed", event),
+        })),
+        Err(e) => Ok(Json(CommandResponse {
+            success: false,
+            message: format!("Hook '{}' failed: {}", event, e),
+        })),
+    }
+}
+
 // ============================================================================
 // Stream Handlers
 // ============================================================================
@@ -2687,6 +2894,7 @@ async fn main() -> Result<()> {
         .route("/api/goals", get(get_goals))
         // Commands
         .route("/api/command", post(send_command))
+        .route("/api/hook", post(handle_hook))
         .route("/api/notes/add", post(add_note))
         .route("/api/goals/add", post(add_goal))
         // Archive/Restore

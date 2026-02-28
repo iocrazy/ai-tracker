@@ -7,9 +7,10 @@ interface ConfirmationModalProps {
   onConfirm: () => void;
   title: string;
   message: string;
+  confirmLabel?: string;
 }
 
-export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({ isOpen, onClose, onConfirm, title, message }) => {
+export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({ isOpen, onClose, onConfirm, title, message, confirmLabel = 'CONFIRM' }) => {
     const confirmRef = useRef<HTMLButtonElement>(null);
 
     useEffect(() => {
@@ -57,7 +58,7 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({ isOpen, on
               onClick={() => { onConfirm(); onClose(); }}
               className="bg-red-900/20 text-red-500 border border-red-500 px-6 py-2 font-bold tracking-widest uppercase hover:bg-red-500 hover:text-black hover:shadow-[0_0_15px_rgba(239,68,68,0.6)] transition-all"
             >
-              CONFIRM_DELETION
+              {confirmLabel}
             </button>
           </div>
         </div>

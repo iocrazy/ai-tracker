@@ -3,7 +3,7 @@ import {
   FolderGit2, ArrowLeft, Search, Plus, Trash2, Eye, EyeOff, Save, Edit3,
   Key, GitBranch, Play, ExternalLink, X, Loader, Globe, Layers, ChevronDown,
   BarChart3, Activity, Clock, Wrench, List, FileText, Check, CheckSquare,
-  ChevronRight, ChevronLeft, AlertCircle, Circle, Minus, ArrowUp,
+  ChevronRight, ChevronLeft, AlertCircle, Circle, Minus, ArrowUp, Archive, RotateCcw,
 } from 'lucide-react';
 import { AppTab, AgentSession } from '../types';
 import { ProjectTimeline } from './ProjectTimeline';
@@ -34,6 +34,7 @@ import {
   ProjectTodo, fetchProjectTodos, createProjectTodo, updateProjectTodo, deleteProjectTodo, updateProjectTodoStatus,
 } from '../services/api';
 import { MarkdownText } from './MarkdownText';
+import { ConfirmationModal } from './ConfirmationModal';
 
 // Project templates
 interface ProjectTemplate {
@@ -161,6 +162,12 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const [editTodoDesc, setEditTodoDesc] = useState('');
   const [expandedTodoId, setExpandedTodoId] = useState<number | null>(null);
   const [showAddInput, setShowAddInput] = useState(false);
+
+  // Archive filter
+  const [showArchived, setShowArchived] = useState(false);
+
+  // Delete confirmation
+  const [deleteConfirmProject, setDeleteConfirmProject] = useState<ProjectInfo | null>(null);
 
   // Inline editing state (for OVERVIEW info card)
   const [editingField, setEditingField] = useState<string | null>(null);
@@ -316,8 +323,11 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const topLevelProjects = projects.filter(p =>
     !p.git_dir.includes('/.worktrees/') && p.git_dir.startsWith('/')
   );
+  const archivedCount = topLevelProjects.filter(p => p.status === 'archived').length;
   const filteredProjects = topLevelProjects
     .filter(p => {
+      // Hide archived unless toggled on
+      if (!showArchived && p.status === 'archived') return false;
       if (!searchQuery) return true;
       const q = searchQuery.toLowerCase();
       return p.name.toLowerCase().includes(q) || p.git_dir.toLowerCase().includes(q);
@@ -448,8 +458,14 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   };
 
   // Delete project
-  const handleDeleteProject = async (project: ProjectInfo) => {
-    await deleteProject(project.git_dir);
+  const handleDeleteProject = (project: ProjectInfo) => {
+    setDeleteConfirmProject(project);
+  };
+
+  const confirmDeleteProject = async () => {
+    if (!deleteConfirmProject) return;
+    await deleteProject(deleteConfirmProject.git_dir);
+    setDeleteConfirmProject(null);
     setSelectedProject(null);
     await loadProjects();
   };
@@ -516,6 +532,18 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                 className="pl-7 pr-2 py-1.5 bg-black/60 border border-green-900 text-green-300 text-sm font-mono focus:border-green-500 outline-none placeholder:text-green-900 w-48"
               />
             </div>
+            {archivedCount > 0 && (
+              <button
+                onClick={() => setShowArchived(!showArchived)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 border text-xs font-bold tracking-widest uppercase transition-all ${
+                  showArchived
+                    ? 'border-green-600 text-green-400 bg-green-900/30'
+                    : 'border-green-900 text-green-800 hover:border-green-700 hover:text-green-600'
+                }`}
+              >
+                <Archive className="w-3.5 h-3.5" /> {archivedCount}
+              </button>
+            )}
             <button
               onClick={() => setShowAddModal(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 border border-green-700 text-green-500 hover:bg-green-900/30 hover:border-green-500 text-xs font-bold tracking-widest uppercase transition-all"
@@ -551,7 +579,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
               return (
                 <div
                   key={project.git_dir}
-                  className="retro-border bg-black/40 hover:bg-green-900/10 transition-all cursor-pointer"
+                  className={`retro-border bg-black/40 hover:bg-green-900/10 transition-all cursor-pointer ${project.status === 'archived' ? 'opacity-60' : ''}`}
                   onClick={() => setSelectedProject(project)}
                 >
                   <div className="px-4 py-3 flex items-center justify-between flex-wrap gap-2">
@@ -559,11 +587,13 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-green-300 font-bold font-mono text-sm tracking-wider truncate">{project.name || project.git_dir.split('/').pop()}</span>
                         <span className={`text-[9px] tracking-widest uppercase px-1.5 py-0.5 border shrink-0 ${
-                          active
+                          project.status === 'archived'
+                            ? 'text-green-900 border-green-900/40 bg-green-900/10'
+                            : active
                             ? 'text-green-400 border-green-600 bg-green-900/30'
                             : 'text-green-800 border-green-900/50'
                         }`}>
-                          {active ? 'ACTIVE' : 'INACTIVE'}
+                          {project.status === 'archived' ? 'ARCHIVED' : active ? 'ACTIVE' : 'INACTIVE'}
                         </span>
                       </div>
                       <div className="text-green-700 font-mono text-xs truncate">{project.git_dir}</div>
@@ -588,26 +618,44 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      {active ? (
+                      {project.status === 'archived' ? (
                         <button
-                          onClick={e => { e.stopPropagation(); handleOpenProject(project); }}
-                          className="flex items-center gap-1 px-3 py-1.5 border border-green-700 text-green-500 hover:bg-green-900/30 hover:border-green-500 text-xs font-bold tracking-widest uppercase transition-all"
+                          onClick={e => { e.stopPropagation(); updateProject(project.git_dir, { status: 'active' }).then(loadProjects); }}
+                          className="flex items-center gap-1 px-3 py-1.5 border border-green-900 text-green-700 hover:bg-green-900/30 hover:border-green-600 hover:text-green-500 text-xs font-bold tracking-widest uppercase transition-all"
                         >
-                          <ExternalLink className="w-3 h-3" /> OPEN
+                          <RotateCcw className="w-3 h-3" /> RESTORE
                         </button>
                       ) : (
-                        <button
-                          onClick={e => { e.stopPropagation(); handleStartSession(project); }}
-                          disabled={creatingSession === project.git_dir}
-                          className="flex items-center gap-1 px-3 py-1.5 border border-green-700 text-green-500 hover:bg-green-900/30 hover:border-green-500 text-xs font-bold tracking-widest uppercase transition-all disabled:opacity-50"
-                        >
-                          {creatingSession === project.git_dir ? (
-                            <Loader className="w-3 h-3 animate-spin" />
+                        <>
+                          <button
+                            onClick={e => { e.stopPropagation(); updateProject(project.git_dir, { status: 'archived' }).then(loadProjects); }}
+                            className="flex items-center gap-1 px-2 py-1.5 border border-transparent text-green-900 hover:border-green-900 hover:text-green-700 text-xs tracking-widest uppercase transition-all"
+                            title="Archive project"
+                          >
+                            <Archive className="w-3 h-3" />
+                          </button>
+                          {active ? (
+                            <button
+                              onClick={e => { e.stopPropagation(); handleOpenProject(project); }}
+                              className="flex items-center gap-1 px-3 py-1.5 border border-green-700 text-green-500 hover:bg-green-900/30 hover:border-green-500 text-xs font-bold tracking-widest uppercase transition-all"
+                            >
+                              <ExternalLink className="w-3 h-3" /> OPEN
+                            </button>
                           ) : (
-                            <Play className="w-3 h-3" />
+                            <button
+                              onClick={e => { e.stopPropagation(); handleStartSession(project); }}
+                              disabled={creatingSession === project.git_dir}
+                              className="flex items-center gap-1 px-3 py-1.5 border border-green-700 text-green-500 hover:bg-green-900/30 hover:border-green-500 text-xs font-bold tracking-widest uppercase transition-all disabled:opacity-50"
+                            >
+                              {creatingSession === project.git_dir ? (
+                                <Loader className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Play className="w-3 h-3" />
+                              )}
+                              START
+                            </button>
                           )}
-                          START
-                        </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -1802,6 +1850,16 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
           )}
         </div>
       )}
+
+      {/* Delete project confirmation */}
+      <ConfirmationModal
+        isOpen={!!deleteConfirmProject}
+        onClose={() => setDeleteConfirmProject(null)}
+        onConfirm={confirmDeleteProject}
+        title="DELETE_PROJECT"
+        message={`Permanently delete "${deleteConfirmProject?.name || deleteConfirmProject?.git_dir.split('/').pop()}" and ALL associated data? Tasks, history, notes, goals, env vars, todos will be removed from the database. This cannot be undone.`}
+        confirmLabel="DELETE"
+      />
     </div>
   );
 };

@@ -56,6 +56,8 @@ interface WebSocketCallbacks {
 // Reconnection state
 let _retryCount = 0;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let _lastCallbacks: WebSocketCallbacks | null = null;
+let _currentWs: WebSocket | null = null;
 const BASE_DELAY = 1000;
 const MAX_DELAY = 30000;
 
@@ -64,10 +66,12 @@ export function connectWebSocket(callbacks: WebSocketCallbacks): WebSocket {
     clearTimeout(_reconnectTimer);
     _reconnectTimer = null;
   }
+  _lastCallbacks = callbacks;
 
   const token = getAuthToken();
   const wsUrl = token ? `${WS_BASE}?token=${encodeURIComponent(token)}` : WS_BASE;
   const ws = new WebSocket(wsUrl);
+  _currentWs = ws;
 
   ws.onopen = () => {
     console.log('[WS] Connected to tracker-server');
@@ -110,4 +114,15 @@ export function connectWebSocket(callbacks: WebSocketCallbacks): WebSocket {
   };
 
   return ws;
+}
+
+/** Force an immediate reconnection attempt, cancelling any pending backoff timer. */
+export function reconnectNow(): WebSocket | null {
+  if (!_lastCallbacks) return null;
+  // Close existing socket if still open
+  if (_currentWs && _currentWs.readyState <= WebSocket.OPEN) {
+    _currentWs.close();
+  }
+  _retryCount = 0;
+  return connectWebSocket(_lastCallbacks);
 }

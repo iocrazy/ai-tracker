@@ -300,6 +300,17 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
                 await tmuxSendKeys(sessionName, windowId, targetPane, String(optIdx + 1), 'Enter');
                 setSentInteractions(prev => new Set(prev).add(msgIdx));
               }}
+              onInteractionTextSubmit={async (msgIdx, text, optionCount) => {
+                if (!sessionName || !windowId) return;
+                const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
+                // Select "Other" option (options count + 1 in Claude Code's prompt)
+                await tmuxSendKeys(sessionName, windowId, targetPane, String(optionCount + 1), 'Enter');
+                // Wait for Claude Code to show text input prompt
+                await new Promise(resolve => setTimeout(resolve, 500));
+                // Send the typed text
+                await tmuxSendKeys(sessionName, windowId, targetPane, text, 'Enter');
+                setSentInteractions(prev => new Set(prev).add(msgIdx));
+              }}
               sentInteractions={sentInteractions}
             />
         </div>

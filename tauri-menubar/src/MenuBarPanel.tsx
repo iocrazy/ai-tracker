@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Monitor, Pin, Globe, LogOut, Power, ChevronRight, Eye, Server, Key, Check, X } from 'lucide-react';
+import { Monitor, Pin, Globe, LogOut, Power, ChevronRight, Eye, Server, Key, Check, X, RefreshCw } from 'lucide-react';
 import { AgentSession, AgentWindow, ClaudeStatus } from './shared/types';
 import { invoke } from '@tauri-apps/api/core';
-import { clearAuthToken, setAuthToken, API_BASE } from './shared/services/auth';
+import { clearAuthToken, setAuthToken, API_BASE, authFetch } from './shared/services/auth';
 
 interface MenuBarPanelProps {
   sessions: AgentSession[];
@@ -13,6 +13,7 @@ interface MenuBarPanelProps {
     totalCost: number;
   };
   onLogout?: () => void;
+  onReconnect?: () => void;
 }
 
 const STATUS_COLOR: Record<AgentWindow['status'], string> = {
@@ -48,15 +49,26 @@ const ClaudeDetail: React.FC<{ status: ClaudeStatus }> = ({ status }) => (
   </div>
 );
 
-const WindowItem: React.FC<{ win: AgentWindow }> = ({ win }) => {
+const selectTmuxWindow = (sessionName: string, windowName: string, windowId?: string) => {
+  authFetch(`${API_BASE}/tmux/select-window`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session: sessionName, window: windowName, window_id: windowId }),
+  }).catch(() => {});
+};
+
+const WindowItem: React.FC<{ win: AgentWindow; sessionName: string }> = ({ win, sessionName }) => {
   const color = STATUS_COLOR[win.status];
   return (
     <>
-      <div className="menu-row flex items-center pl-[40px] pr-3 py-[3px]">
+      <button
+        onClick={() => selectTmuxWindow(sessionName, win.name, win.id)}
+        className="menu-item w-full flex items-center pl-[40px] pr-3 py-[3px]"
+      >
         <span className={`text-[7px] ${color} mr-2`}>{'\u25CF'}</span>
-        <span className="text-[13px] text-gray-800 truncate flex-1">{win.name}</span>
+        <span className="text-[13px] text-gray-800 truncate flex-1 text-left">{win.name}</span>
         <span className={`text-[11px] ${color} ml-2`}>{STATUS_LABEL[win.status]}</span>
-      </div>
+      </button>
       {win.claudeStatus && (win.status === 'BUSY' || win.status === 'PAUSED') && (
         <ClaudeDetail status={win.claudeStatus} />
       )}
@@ -82,7 +94,7 @@ const SessionItem: React.FC<{ session: AgentSession }> = ({ session }) => {
         <ChevronRight className={`w-3 h-3 text-gray-400 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
       </button>
       {expanded && session.windows.map(win => (
-        <WindowItem key={win.id} win={win} />
+        <WindowItem key={win.id} win={win} sessionName={session.name} />
       ))}
     </>
   );
@@ -123,7 +135,7 @@ interface HealthInfo {
   tmuxSessions: number;
 }
 
-export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connectionStatus, stats, onLogout }) => {
+export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connectionStatus, stats, onLogout, onReconnect }) => {
   const isOnline = connectionStatus === 'connected';
   const [floatOpacity, setFloatOpacity] = useState(() => {
     const saved = localStorage.getItem(OPACITY_KEY);
@@ -228,9 +240,19 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
       <div className="flex items-center gap-2 px-3 py-[5px]">
         <span className={`text-[8px] ${isOnline ? 'text-green-500' : 'text-red-500'}`}>{'\u25CF'}</span>
         {!isOnline ? (
-          <span className="text-[13px] text-red-500">
-            {connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Offline'}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[13px] text-red-500">
+              {connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Offline'}
+            </span>
+            <button
+              onClick={onReconnect}
+              className="flex items-center gap-1 text-[11px] text-blue-500 hover:text-blue-400 px-1.5 py-0.5 rounded hover:bg-blue-500/10 transition-colors"
+              title="Reconnect now"
+            >
+              <RefreshCw className="w-3 h-3" />
+              Reconnect
+            </button>
+          </div>
         ) : (
           <span className="text-[13px] text-gray-700 tabular-nums">
             {stats.totalSessions} session{stats.totalSessions !== 1 ? 's' : ''}

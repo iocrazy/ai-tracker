@@ -943,8 +943,9 @@ const App: React.FC = () => {
                 isOpen={!!deleteTarget}
                 onClose={() => setDeleteTarget(null)}
                 onConfirm={handleConfirmDelete}
-                title="DELETION_PROTOCOL_INITIATED"
-                message={`WARNING: PERMANENTLY REMOVE ${deleteTarget?.type} "${deleteTarget?.name}"? THIS ACTION CANNOT BE REVERSED.`}
+                title="TERMINATE_SESSION"
+                message={`Close ${deleteTarget?.type?.toLowerCase()} "${deleteTarget?.name}"? All windows and panes will be terminated. Task history, notes and project data are preserved in the database.`}
+                confirmLabel="TERMINATE"
             />
           </div>
       )}

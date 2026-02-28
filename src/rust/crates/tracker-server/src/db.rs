@@ -2148,10 +2148,53 @@ impl Database {
     // =========================================================================
 
     pub fn delete_project(&self, git_dir: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM projects WHERE git_dir = ?1",
-            params![git_dir],
-        )?;
+        // Get session name from projects table for session-keyed tables
+        let session_name: Option<String> = self.conn
+            .query_row(
+                "SELECT last_session FROM projects WHERE git_dir = ?1",
+                params![git_dir],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        // 1) Delete git_dir-keyed tables
+        tx.execute("DELETE FROM project_todos WHERE git_dir = ?1", params![git_dir])?;
+        tx.execute("DELETE FROM session_index WHERE project = ?1", params![git_dir])?;
+
+        // 2) Delete session_name-keyed tables (if we have a session name)
+        if let Some(ref sn) = session_name {
+            if !sn.is_empty() {
+                // Delete history cascade: conversation_messages, tool_usage, commits via history_id
+                tx.execute(
+                    "DELETE FROM conversation_messages WHERE history_id IN (SELECT id FROM history WHERE session_id = ?1)",
+                    params![sn],
+                )?;
+                tx.execute(
+                    "DELETE FROM tool_usage WHERE history_id IN (SELECT id FROM history WHERE session_id = ?1)",
+                    params![sn],
+                )?;
+                tx.execute(
+                    "DELETE FROM commits WHERE history_id IN (SELECT id FROM history WHERE session_id = ?1)",
+                    params![sn],
+                )?;
+                tx.execute("DELETE FROM history WHERE session_id = ?1", params![sn])?;
+                tx.execute("DELETE FROM tasks WHERE session_id = ?1", params![sn])?;
+                tx.execute("DELETE FROM notes WHERE session_id = ?1", params![sn])?;
+                tx.execute("DELETE FROM goals WHERE session_id = ?1", params![sn])?;
+                tx.execute("DELETE FROM closed_windows WHERE session_id = ?1", params![sn])?;
+                tx.execute("DELETE FROM project_env_vars WHERE session_name = ?1", params![sn])?;
+                tx.execute("DELETE FROM project_services WHERE session_name = ?1", params![sn])?;
+                tx.execute("DELETE FROM worktree_slots WHERE session_name = ?1", params![sn])?;
+                tx.execute("DELETE FROM worktree_env_vars WHERE session_name = ?1", params![sn])?;
+            }
+        }
+
+        // 3) Delete the project itself
+        tx.execute("DELETE FROM projects WHERE git_dir = ?1", params![git_dir])?;
+
+        tx.commit()?;
         Ok(())
     }
 

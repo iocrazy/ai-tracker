@@ -159,15 +159,19 @@ interface ChatTimelineProps {
   items: TimelineItem[];
   /** For interactive buttons — pass session targeting info */
   onInteractionSelect?: (msgIdx: number, optionIdx: number) => void;
+  /** For free-text input on interactive questions (Claude Code's "Type something") */
+  onInteractionTextSubmit?: (msgIdx: number, text: string, optionCount: number) => void;
   sentInteractions?: Set<number>;
 }
 
 export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   items,
   onInteractionSelect,
+  onInteractionTextSubmit,
   sentInteractions = new Set(),
 }) => {
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
+  const [customTexts, setCustomTexts] = useState<Record<string, string>>({});
 
   const toggleThinking = (key: string) => {
     setExpandedThinking(prev => {
@@ -279,6 +283,42 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               </button>
                             ))}
                           </div>
+                          {/* Free text input + Chat about this (matches Claude Code's extra options) */}
+                          {!sentInteractions.has(itemIdx) && (
+                            <div className="mt-2 flex flex-col gap-1.5">
+                              <div className="flex gap-1.5">
+                                <input
+                                  type="text"
+                                  placeholder="Other..."
+                                  value={customTexts[`${itemIdx}-${qIdx}`] || ''}
+                                  onChange={(e) => setCustomTexts(prev => ({ ...prev, [`${itemIdx}-${qIdx}`]: e.target.value }))}
+                                  onKeyDown={(e) => {
+                                    const text = customTexts[`${itemIdx}-${qIdx}`]?.trim();
+                                    if (e.key === 'Enter' && text) {
+                                      onInteractionTextSubmit?.(itemIdx, text, q.options.length);
+                                    }
+                                  }}
+                                  className="flex-1 bg-black border border-green-700/50 text-green-400 px-2 py-1.5 text-xs sm:text-sm font-mono placeholder:text-green-900 focus:border-green-500 focus:outline-none"
+                                />
+                                <button
+                                  onClick={() => {
+                                    const text = customTexts[`${itemIdx}-${qIdx}`]?.trim();
+                                    if (text) onInteractionTextSubmit?.(itemIdx, text, q.options.length);
+                                  }}
+                                  className="px-3 py-1.5 border border-green-700/50 text-green-600 hover:text-green-400 hover:border-green-500 hover:bg-green-900/20 text-xs font-mono transition-colors"
+                                >
+                                  SEND
+                                </button>
+                              </div>
+                              <button
+                                onClick={() => onInteractionSelect?.(itemIdx, q.options.length + 1)}
+                                className="text-left p-2 border border-dashed border-green-900/50 text-green-700 hover:text-green-500 hover:border-green-700 text-xs font-mono transition-colors"
+                              >
+                                <span className="text-green-800 mr-2">{q.options.length + 2}.</span>
+                                Chat about this
+                              </button>
+                            </div>
+                          )}
                           {sentInteractions.has(itemIdx) && (
                             <div className="text-[10px] text-green-700 mt-1 font-mono">RESPONSE SENT</div>
                           )}

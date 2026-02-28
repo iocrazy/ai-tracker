@@ -30,6 +30,7 @@ const AuthenticatedApp: React.FC<{
       connectionStatus={trackerState.connectionStatus}
       stats={trackerState.stats}
       onLogout={onLogout}
+      onReconnect={trackerState.reconnect}
     />
   );
 };

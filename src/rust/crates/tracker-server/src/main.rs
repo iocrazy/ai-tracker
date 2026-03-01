@@ -980,9 +980,26 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
 
             // Remove completed task from memory and DB
             // Also archive to per-project DB if git_dir can be resolved
-            if let Some(task) = state.tasks.remove(&key) {
+            if let Some(mut task) = state.tasks.remove(&key) {
+                // Set completion_note from the summary (last assistant message)
+                if !req.summary.is_empty() {
+                    task.completion_note = req.summary.clone();
+                }
+                task.completed_at = Some(Utc::now());
+                if let Some(started) = task.started_at {
+                    task.duration_seconds = (Utc::now() - started).num_seconds() as f64;
+                }
+                if !req.transcript_path.is_empty() {
+                    task.transcript_path = req.transcript_path.clone();
+                }
+                task.status = TaskStatus::Completed;
+
                 if let Err(e) = state.db.delete_task(&key) {
                     error!("Failed to delete finished task: {}", e);
+                }
+                // Archive with full completion data
+                if let Err(e) = state.db.archive_to_history(&task) {
+                    error!("Failed to archive task to history: {}", e);
                 }
                 let task_clone = task.clone();
                 let session = task.session.clone();

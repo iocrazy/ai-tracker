@@ -157,6 +157,9 @@ pub(crate) struct AppState {
     start_time: std::time::Instant,
     /// Resolved paths for all server directories
     paths: paths::TrackerPaths,
+    /// Active todo mapping: pane_id → (todo_id, git_dir)
+    /// Used to link history entries to the todo that triggered them
+    active_todo_map: Mutex<HashMap<String, (i64, String)>>,
 }
 
 impl AppState {
@@ -175,6 +178,7 @@ impl AppState {
             allowed_origins,
             start_time: std::time::Instant::now(),
             paths,
+            active_todo_map: Mutex::new(HashMap::new()),
         })
     }
 
@@ -994,6 +998,14 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                 }
                 task.status = TaskStatus::Completed;
 
+                // Link to active todo if this pane has one mapped
+                if let Ok(map) = app_state.active_todo_map.lock() {
+                    if let Some((tid, _)) = map.get(&task.pane) {
+                        task.todo_id = Some(*tid);
+                        info!("FINISH_TASK: linked to todo #{}", tid);
+                    }
+                }
+
                 if let Err(e) = state.db.delete_task(&key) {
                     error!("Failed to delete finished task: {}", e);
                 }
@@ -1659,18 +1671,33 @@ async fn handle_hook(
                 let priority = if is_urgent { 2 } else if prefix == "fix" { 1 } else { 0 };
                 let todo_title = format!("[{}{}] {}", prefix, if is_urgent { "!" } else { "" }, title);
 
-                let server_state = state_ref.state.lock().unwrap();
-                let exists = server_state.db.list_project_todos(&git_dir)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|t| t.title == todo_title && t.status != "done");
-                if !exists {
-                    match server_state.db.create_project_todo(&git_dir, &todo_title, "", "todo", priority) {
-                        Ok(id) => info!("todo: created #{} '{}' p={} in {}", id, todo_title, priority, git_dir),
-                        Err(e) => warn!("todo: db error: {}", e),
+                let todo_id = {
+                    let server_state = state_ref.state.lock().unwrap();
+                    let existing = server_state.db.list_project_todos(&git_dir)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|t| t.title == todo_title && t.status != "done");
+                    if let Some(t) = existing {
+                        info!("todo: duplicate '{}', linking pane", todo_title);
+                        Some(t.id)
+                    } else {
+                        match server_state.db.create_project_todo(&git_dir, &todo_title, "", "todo", priority) {
+                            Ok(id) => {
+                                info!("todo: created #{} '{}' p={} in {}", id, todo_title, priority, git_dir);
+                                Some(id)
+                            }
+                            Err(e) => {
+                                warn!("todo: db error: {}", e);
+                                None
+                            }
+                        }
                     }
-                } else {
-                    info!("todo: duplicate '{}'", todo_title);
+                };
+                // Map pane → active todo for history linking
+                if let Some(tid) = todo_id {
+                    let mut map = state_ref.active_todo_map.lock().unwrap();
+                    map.insert(pane_for_git.clone(), (tid, git_dir));
+                    info!("todo: mapped pane '{}' → todo #{}", pane_for_git, tid);
                 }
             }).await;
         }
@@ -3121,6 +3148,7 @@ async fn main() -> Result<()> {
         .route("/api/projects/todos", get(routes_projects::list_project_todos).post(routes_projects::create_project_todo))
         .route("/api/projects/todos/:id", put(routes_projects::update_project_todo).delete(routes_projects::delete_project_todo))
         .route("/api/projects/todos/:id/status", put(routes_projects::update_project_todo_status))
+        .route("/api/projects/todos/:id/history", get(routes_projects::get_todo_history))
         .route("/api/project/env-vars", get(routes_projects::list_project_env_vars).post(routes_projects::create_project_env_var))
         .route("/api/project/env-vars/:id", put(routes_projects::update_project_env_var).delete(routes_projects::delete_project_env_var))
         .route("/api/project/services", get(routes_projects::list_project_services).post(routes_projects::create_project_service))

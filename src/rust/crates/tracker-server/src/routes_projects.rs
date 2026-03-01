@@ -2091,3 +2091,30 @@ pub(crate) async fn update_project_todo_status(
         Err(e) => Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
     }
 }
+
+/// Get history entries linked to a specific todo
+pub(crate) async fn get_todo_history(
+    State(state): State<Arc<AppState>>,
+    AxumPath(todo_id): AxumPath<i64>,
+) -> Json<serde_json::Value> {
+    let server_state = state.state.lock().unwrap();
+    match server_state.db.get_history_by_todo_id(todo_id) {
+        Ok(records) => {
+            let entries: Vec<serde_json::Value> = records
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "summary": r.summary,
+                        "completion_note": r.completion_note,
+                        "started_at": r.started_at.map(|t| t.to_rfc3339()),
+                        "completed_at": r.completed_at.map(|t| t.to_rfc3339()),
+                        "duration_seconds": r.duration_seconds,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "history": entries }))
+        }
+        Err(e) => Json(serde_json::json!({ "history": [], "error": format!("{}", e) })),
+    }
+}

@@ -32,6 +32,7 @@ import {
   ProjectFileEntry, fetchProjectFiles,
   // Project todos
   ProjectTodo, fetchProjectTodos, createProjectTodo, updateProjectTodo, deleteProjectTodo, updateProjectTodoStatus,
+  TodoHistoryEntry, fetchTodoHistory,
 } from '../services/api';
 import { MarkdownText } from './MarkdownText';
 import { ConfirmationModal } from './ConfirmationModal';
@@ -162,6 +163,8 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const [editTodoDesc, setEditTodoDesc] = useState('');
   const [expandedTodoId, setExpandedTodoId] = useState<number | null>(null);
   const [showAddInput, setShowAddInput] = useState(false);
+  const [todoHistory, setTodoHistory] = useState<Record<number, TodoHistoryEntry[]>>({});
+  const [historyTodoId, setHistoryTodoId] = useState<number | null>(null);
 
   // Archive filter
   const [showArchived, setShowArchived] = useState(false);
@@ -1138,6 +1141,18 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                 loadTodos();
               };
 
+              const toggleTodoHistory = async (todoId: number) => {
+                if (historyTodoId === todoId) {
+                  setHistoryTodoId(null);
+                  return;
+                }
+                setHistoryTodoId(todoId);
+                if (!todoHistory[todoId]) {
+                  const entries = await fetchTodoHistory(todoId);
+                  setTodoHistory(prev => ({ ...prev, [todoId]: entries }));
+                }
+              };
+
               const priorityBorderColor = (p: number) =>
                 p >= 2 ? 'border-l-red-500' : p === 1 ? 'border-l-yellow-500' : 'border-l-green-900/50';
 
@@ -1232,27 +1247,64 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                             {todo.priority >= 2 ? 'URGENT' : todo.priority === 1 ? 'HIGH' : ''}
                           </span>
                         </button>
-                        <div className="flex items-center gap-0.5">
-                          {todo.status !== 'todo' && (
-                            <button
-                              onClick={() => handleStatusChange(todo.id, prevStatus(todo.status))}
-                              className="text-green-800 hover:text-green-400 transition-colors p-0.5"
-                              title="Move back"
-                            >
-                              <ChevronLeft className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                          {todo.status !== 'done' && (
-                            <button
-                              onClick={() => handleStatusChange(todo.id, nextStatus(todo.status))}
-                              className="text-green-800 hover:text-green-400 transition-colors p-0.5"
-                              title="Move forward"
-                            >
-                              <ChevronRight className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => toggleTodoHistory(todo.id)}
+                            className={`flex items-center gap-0.5 text-[9px] font-mono transition-colors p-0.5 ${historyTodoId === todo.id ? 'text-green-400' : 'text-green-800 hover:text-green-500'}`}
+                            title="View linked history"
+                          >
+                            <Clock className="w-3 h-3" />
+                            {todoHistory[todo.id]?.length ? todoHistory[todo.id].length : ''}
+                          </button>
+                          <div className="flex items-center gap-0.5">
+                            {todo.status !== 'todo' && (
+                              <button
+                                onClick={() => handleStatusChange(todo.id, prevStatus(todo.status))}
+                                className="text-green-800 hover:text-green-400 transition-colors p-0.5"
+                                title="Move back"
+                              >
+                                <ChevronLeft className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {todo.status !== 'done' && (
+                              <button
+                                onClick={() => handleStatusChange(todo.id, nextStatus(todo.status))}
+                                className="text-green-800 hover:text-green-400 transition-colors p-0.5"
+                                title="Move forward"
+                              >
+                                <ChevronRight className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
+                      {/* History entries linked to this todo */}
+                      {historyTodoId === todo.id && (
+                        <div className="mt-2 border-t border-green-900/30 pt-2 space-y-1.5">
+                          {!todoHistory[todo.id] ? (
+                            <div className="text-green-800 text-[10px] font-mono">Loading...</div>
+                          ) : todoHistory[todo.id].length === 0 ? (
+                            <div className="text-green-900 text-[10px] font-mono">No linked history yet</div>
+                          ) : (
+                            todoHistory[todo.id].map(h => (
+                              <div key={h.id} className="bg-black/30 border border-green-900/20 p-1.5 text-[10px] font-mono space-y-0.5">
+                                <div className="text-green-500 truncate" title={h.summary}>
+                                  {h.summary}
+                                </div>
+                                {h.completion_note && (
+                                  <div className="text-green-700 truncate" title={h.completion_note}>
+                                    {h.completion_note}
+                                  </div>
+                                )}
+                                <div className="text-green-900 flex items-center gap-2">
+                                  {h.started_at && <span>{new Date(h.started_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>}
+                                  {h.duration_seconds > 0 && <span>{Math.round(h.duration_seconds / 60)}m</span>}
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>

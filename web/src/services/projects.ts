@@ -379,3 +379,19 @@ export async function updateProjectTodoStatus(id: number, status: string) {
     body: JSON.stringify({ status }),
   }).then(r => r.json());
 }
+
+export interface TodoHistoryEntry {
+  id: number;
+  summary: string;
+  completion_note: string;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number;
+}
+
+export async function fetchTodoHistory(todoId: number): Promise<TodoHistoryEntry[]> {
+  const res = await authFetch(`${API_BASE}/projects/todos/${todoId}/history`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.history || [];
+}

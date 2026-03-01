@@ -396,6 +396,7 @@ impl Database {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )"),
+            (11, "ALTER TABLE history ADD COLUMN todo_id INTEGER DEFAULT NULL"),
         ];
 
         for (version, sql) in migrations {
@@ -517,6 +518,7 @@ impl Database {
                     archived: false,
                     archived_at: None,
                     transcript_path: String::new(), // Tasks table doesn't store this
+                    todo_id: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -543,6 +545,47 @@ impl Database {
 
         let records = stmt
             .query_map([limit], |row| {
+                let started_at: Option<String> = row.get(8)?;
+                let completed_at: Option<String> = row.get(9)?;
+
+                Ok(HistoryRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    session: row.get(2)?,
+                    window_id: row.get(3)?,
+                    window: row.get(4)?,
+                    pane: row.get(5)?,
+                    summary: row.get(6)?,
+                    completion_note: row.get(7)?,
+                    started_at: started_at
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc)),
+                    completed_at: completed_at
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc)),
+                    duration_seconds: row.get(10)?,
+                    transcript_path: row.get(11)?,
+                    messages: vec![],
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    /// Get history entries linked to a specific todo
+    pub fn get_history_by_todo_id(&self, todo_id: i64) -> Result<Vec<HistoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, session, window_id, window, pane, summary,
+                    completion_note, started_at, completed_at, duration_seconds,
+                    COALESCE(transcript_path, '')
+             FROM history
+             WHERE todo_id = ?1
+             ORDER BY started_at ASC",
+        )?;
+
+        let records = stmt
+            .query_map([todo_id], |row| {
                 let started_at: Option<String> = row.get(8)?;
                 let completed_at: Option<String> = row.get(9)?;
 

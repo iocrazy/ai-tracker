@@ -42,7 +42,8 @@ pub fn archive_to_history_on(conn: &Connection, task: &Task) -> Result<i64> {
                 completion_note = CASE WHEN ?2 != '' THEN ?2 ELSE completion_note END,
                 completed_at = ?3,
                 duration_seconds = ?4,
-                transcript_path = CASE WHEN ?5 != '' THEN ?5 ELSE transcript_path END
+                transcript_path = CASE WHEN ?5 != '' THEN ?5 ELSE transcript_path END,
+                todo_id = CASE WHEN ?7 IS NOT NULL THEN ?7 ELSE todo_id END
              WHERE id = ?6",
             params![
                 task.summary,
@@ -51,6 +52,7 @@ pub fn archive_to_history_on(conn: &Connection, task: &Task) -> Result<i64> {
                 task.duration_seconds,
                 task.transcript_path,
                 id,
+                task.todo_id,
             ],
         )?;
         let _ = conn.execute("DELETE FROM conversation_messages WHERE history_id = ?", [id]);
@@ -61,8 +63,8 @@ pub fn archive_to_history_on(conn: &Connection, task: &Task) -> Result<i64> {
         conn.execute(
             "INSERT INTO history
              (session_id, session, window_id, window, pane, summary,
-              completion_note, started_at, completed_at, duration_seconds, transcript_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              completion_note, started_at, completed_at, duration_seconds, transcript_path, todo_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 task.session_id,
                 task.session,
@@ -75,6 +77,7 @@ pub fn archive_to_history_on(conn: &Connection, task: &Task) -> Result<i64> {
                 task.completed_at.map(|t| t.to_rfc3339()),
                 task.duration_seconds,
                 task.transcript_path,
+                task.todo_id,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -313,6 +316,9 @@ impl ProjectDatabase {
             "CREATE INDEX IF NOT EXISTS idx_history_completed_at ON history(completed_at)",
             [],
         )?;
+
+        // Migration: add todo_id column to history
+        let _ = conn.execute("ALTER TABLE history ADD COLUMN todo_id INTEGER DEFAULT NULL", []);
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_history_session_window_pane

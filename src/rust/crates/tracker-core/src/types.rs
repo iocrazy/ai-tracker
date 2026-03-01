@@ -63,6 +63,9 @@ pub struct Task {
     /// Path to Claude transcript JSONL file
     #[serde(default)]
     pub transcript_path: String,
+    /// Linked project todo ID (for tracing history back to a todo)
+    #[serde(default)]
+    pub todo_id: Option<i64>,
 }
 
 impl Task {
@@ -83,6 +86,7 @@ impl Task {
             archived: false,
             archived_at: None,
             transcript_path: String::new(),
+            todo_id: None,
         }
     }
 

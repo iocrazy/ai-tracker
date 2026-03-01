@@ -1670,18 +1670,28 @@ async fn handle_hook(
             (commands::START_TASK, truncated, String::new())
         }
         "Stop" => {
-            // Extract last assistant message from transcript
             let transcript = body_json
                 .get("transcript_path")
                 .and_then(|p| p.as_str())
                 .unwrap_or("")
                 .to_string();
-            let tp = transcript.clone();
-            let summary = tokio::task::spawn_blocking(move || {
-                extract_last_assistant_message(&tp, 200)
-            })
-            .await
-            .unwrap_or_default();
+
+            // Prefer last_assistant_message from event JSON (available directly),
+            // fall back to reading transcript file
+            let summary = match body_json.get("last_assistant_message").and_then(|m| m.as_str()) {
+                Some(msg) if !msg.is_empty() => {
+                    let clean = msg.replace('\n', " ");
+                    clean.chars().take(200).collect()
+                }
+                _ => {
+                    let tp = transcript.clone();
+                    tokio::task::spawn_blocking(move || {
+                        extract_last_assistant_message(&tp, 200)
+                    })
+                    .await
+                    .unwrap_or_default()
+                }
+            };
             (commands::FINISH_TASK, summary, transcript)
         }
         "PermissionRequest" => {

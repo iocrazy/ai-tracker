@@ -1541,6 +1541,61 @@ async fn restore_note(
 // Hook Handler (Claude Code hooks → server-side processing)
 // ============================================================================
 
+/// Parse conventional commit-style prefix from a prompt.
+/// Returns (prefix_type, is_urgent, title) if matched.
+/// Supports: feat, feature, fix, bug, chore, refactor, docs, perf, test, style, ci, build
+fn parse_todo_prefix(prompt: &str) -> Option<(String, bool, String)> {
+    // Match: type(!)?:  title
+    let trimmed = prompt.trim();
+    let re = regex::Regex::new(
+        r"(?i)^(feat|feature|fix|bug|chore|refactor|docs|perf|test|style|ci|build)(!)?:\s*(.+)"
+    ).ok()?;
+    let caps = re.captures(trimmed)?;
+
+    let prefix_type = caps.get(1)?.as_str().to_lowercase();
+    // Normalize: "feature" → "feat", "bug" → "fix"
+    let normalized = match prefix_type.as_str() {
+        "feature" => "feat".to_string(),
+        "bug" => "fix".to_string(),
+        other => other.to_string(),
+    };
+    let is_urgent = caps.get(2).is_some();
+    let title = caps.get(3)?.as_str().trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    Some((normalized, is_urgent, title))
+}
+
+/// Resolve git root directory from a tmux pane's current working path.
+fn resolve_git_dir_from_pane(pane_id: &str) -> Option<String> {
+    if pane_id.is_empty() {
+        return None;
+    }
+    // Get pane current path
+    let output = std::process::Command::new(agent::TMUX_BIN)
+        .args(["-S", "/private/tmp/tmux-501/default", "display-message", "-p", "-t", pane_id, "#{pane_current_path}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let cwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if cwd.is_empty() {
+        return None;
+    }
+    // Get git toplevel
+    let git_output = std::process::Command::new("git")
+        .args(["-C", &cwd, "rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !git_output.status.success() {
+        return None;
+    }
+    let git_dir = String::from_utf8_lossy(&git_output.stdout).trim().to_string();
+    if git_dir.is_empty() { None } else { Some(git_dir) }
+}
+
 /// Handle raw Claude Code hook events.
 /// Replaces the shell pipeline: hook → jq → agent-event.sh → curl /api/command
 /// Now: hook → curl /api/hook (server does tmux resolution + transcript parsing)
@@ -1569,6 +1624,40 @@ async fn handle_hook(
         .await
         .unwrap_or(None)
         .unwrap_or_default();
+
+    // Auto-capture todo from conventional commit prefixes in UserPromptSubmit
+    if event == "UserPromptSubmit" {
+        let prompt_raw = body_json.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
+        if let Some((prefix, is_urgent, title)) = parse_todo_prefix(prompt_raw) {
+            let pane_for_git = tmux_ctx.pane_id.clone();
+            let state_ref = state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let git_dir = match resolve_git_dir_from_pane(&pane_for_git) {
+                    Some(d) => d,
+                    None => {
+                        info!("todo: no git_dir for pane '{}'", pane_for_git);
+                        return;
+                    }
+                };
+                let priority = if is_urgent { 2 } else if prefix == "fix" { 1 } else { 0 };
+                let todo_title = format!("[{}{}] {}", prefix, if is_urgent { "!" } else { "" }, title);
+
+                let server_state = state_ref.state.lock().unwrap();
+                let exists = server_state.db.list_project_todos(&git_dir)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|t| t.title == todo_title && t.status != "done");
+                if !exists {
+                    match server_state.db.create_project_todo(&git_dir, &todo_title, "", "todo", priority) {
+                        Ok(id) => info!("todo: created #{} '{}' p={} in {}", id, todo_title, priority, git_dir),
+                        Err(e) => warn!("todo: db error: {}", e),
+                    }
+                } else {
+                    info!("todo: duplicate '{}'", todo_title);
+                }
+            }).await;
+        }
+    }
 
     // Map event to command + extract summary
     let (command, summary, transcript_path) = match event.as_str() {

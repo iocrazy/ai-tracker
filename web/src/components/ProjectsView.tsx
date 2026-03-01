@@ -36,6 +36,7 @@ import {
 } from '../services/api';
 import { MarkdownText } from './MarkdownText';
 import { ConfirmationModal } from './ConfirmationModal';
+import { HistoryDetailModal } from './HistoryDetailModal';
 import { DndContext, DragOverlay, useDroppable, useDraggable, DragEndEvent, DragStartEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 
 // --- Drag-and-drop primitives for kanban ---
@@ -188,6 +189,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const [showAddInput, setShowAddInput] = useState(false);
   const [todoHistory, setTodoHistory] = useState<Record<number, TodoHistoryEntry[]>>({});
   const [historyTodoId, setHistoryTodoId] = useState<number | null>(null);
+  const [viewHistoryId, setViewHistoryId] = useState<number | null>(null);
   const [activeDragId, setActiveDragId] = useState<number | null>(null);
   const activeDragTodo = useMemo(() => activeDragId != null ? projectTodos.find(t => t.id === activeDragId) ?? null : null, [activeDragId, projectTodos]);
   const pointerSensor = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
@@ -1313,7 +1315,11 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                             <div className="text-green-900 text-[10px] font-mono">No linked history yet</div>
                           ) : (
                             todoHistory[todo.id].map(h => (
-                              <div key={h.id} className="bg-black/30 border border-green-900/20 p-1.5 text-[10px] font-mono space-y-0.5">
+                              <button
+                                key={h.id}
+                                onClick={() => setViewHistoryId(h.id)}
+                                className="w-full text-left bg-black/30 border border-green-900/20 p-1.5 text-[10px] font-mono space-y-0.5 hover:border-green-700/50 hover:bg-green-900/10 transition-colors cursor-pointer"
+                              >
                                 <div className="text-green-500 truncate" title={h.summary}>
                                   {h.summary}
                                 </div>
@@ -1326,7 +1332,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                                   {h.started_at && <span>{new Date(h.started_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>}
                                   {h.duration_seconds > 0 && <span>{Math.round(h.duration_seconds / 60)}m</span>}
                                 </div>
-                              </div>
+                              </button>
                             ))
                           )}
                         </div>
@@ -1956,6 +1962,15 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
             </div>
           )}
         </div>
+      )}
+
+      {/* Todo history detail modal */}
+      {viewHistoryId !== null && (
+        <HistoryDetailModal
+          historyId={viewHistoryId}
+          isOpen={true}
+          onClose={() => setViewHistoryId(null)}
+        />
       )}
 
       {/* Delete project confirmation */}

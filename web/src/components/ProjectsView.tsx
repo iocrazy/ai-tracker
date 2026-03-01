@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   FolderGit2, ArrowLeft, Search, Plus, Trash2, Eye, EyeOff, Save, Edit3,
   Key, GitBranch, Play, ExternalLink, X, Loader, Globe, Layers, ChevronDown,
@@ -36,6 +36,29 @@ import {
 } from '../services/api';
 import { MarkdownText } from './MarkdownText';
 import { ConfirmationModal } from './ConfirmationModal';
+import { DndContext, DragOverlay, useDroppable, useDraggable, DragEndEvent, DragStartEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+
+// --- Drag-and-drop primitives for kanban ---
+const DroppableColumn: React.FC<{ id: string; children: React.ReactNode; className?: string }> = ({ id, children, className }) => {
+  const { setNodeRef, isOver } = useDroppable({ id });
+  return (
+    <div ref={setNodeRef} className={`${className ?? ''} transition-colors ${isOver ? 'ring-1 ring-inset ring-green-500/30 bg-green-900/10' : ''}`}>
+      {children}
+    </div>
+  );
+};
+
+const DraggableCard: React.FC<{ id: string; children: React.ReactNode }> = ({ id, children }) => {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id });
+  const style: React.CSSProperties | undefined = transform
+    ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`, zIndex: 50 }
+    : undefined;
+  return (
+    <div ref={setNodeRef} style={style} {...listeners} {...attributes} className={isDragging ? 'opacity-30 cursor-grabbing' : 'cursor-grab'}>
+      {children}
+    </div>
+  );
+};
 
 // Project templates
 interface ProjectTemplate {
@@ -165,6 +188,9 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   const [showAddInput, setShowAddInput] = useState(false);
   const [todoHistory, setTodoHistory] = useState<Record<number, TodoHistoryEntry[]>>({});
   const [historyTodoId, setHistoryTodoId] = useState<number | null>(null);
+  const [activeDragId, setActiveDragId] = useState<number | null>(null);
+  const activeDragTodo = useMemo(() => activeDragId != null ? projectTodos.find(t => t.id === activeDragId) ?? null : null, [activeDragId, projectTodos]);
+  const pointerSensor = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   // Archive filter
   const [showArchived, setShowArchived] = useState(false);
@@ -1203,7 +1229,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                     <>
                       {/* Row 1: ID + hover menu */}
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-green-900 text-[10px] font-mono">#{todo.id}</span>
+                        <span className="text-green-900 text-[10px] font-mono">{selectedProject?.name}#{todo.id}</span>
                         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
                             onClick={() => { setEditingTodoId(todo.id); setEditTodoTitle(todo.title); setEditTodoDesc(todo.description); }}
@@ -1334,7 +1360,20 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                     )}
                   </div>
 
-                  {/* Kanban columns */}
+                  {/* Kanban columns with drag-and-drop */}
+                  <DndContext
+                    sensors={pointerSensor}
+                    onDragStart={(e: DragStartEvent) => setActiveDragId(Number(e.active.id))}
+                    onDragEnd={(e: DragEndEvent) => {
+                      setActiveDragId(null);
+                      const todoId = Number(e.active.id);
+                      const targetColumn = e.over?.id as string | undefined;
+                      if (!targetColumn) return;
+                      const todo = projectTodos.find(t => t.id === todoId);
+                      if (!todo || todo.status === targetColumn) return;
+                      handleStatusChange(todoId, targetColumn);
+                    }}
+                  >
                   <div className="flex h-[calc(100vh-280px)] min-h-[400px] border border-green-900/30">
                     {/* TODO Column */}
                     <div className="flex-1 min-w-0 flex flex-col border-r border-green-900/50">
@@ -1366,11 +1405,13 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                           </div>
                         )}
                       </div>
-                      <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                        {todoItems.length > 0 ? todoItems.map(t => renderCard(t)) : (
+                      <DroppableColumn id="todo" className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {todoItems.length > 0 ? todoItems.map(t => (
+                          <DraggableCard key={t.id} id={String(t.id)}>{renderCard(t)}</DraggableCard>
+                        )) : (
                           <EmptyColumn message="Add your first todo above" />
                         )}
-                      </div>
+                      </DroppableColumn>
                     </div>
 
                     {/* IN PROGRESS Column */}
@@ -1382,11 +1423,13 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                           <span className="text-yellow-700 font-normal">({inProgressItems.length})</span>
                         </div>
                       </div>
-                      <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                        {inProgressItems.length > 0 ? inProgressItems.map(t => renderCard(t)) : (
+                      <DroppableColumn id="in_progress" className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {inProgressItems.length > 0 ? inProgressItems.map(t => (
+                          <DraggableCard key={t.id} id={String(t.id)}>{renderCard(t)}</DraggableCard>
+                        )) : (
                           <EmptyColumn message="Move items here when you start working" />
                         )}
-                      </div>
+                      </DroppableColumn>
                     </div>
 
                     {/* DONE Column */}
@@ -1398,13 +1441,25 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                           <span className="text-emerald-700 font-normal">({doneItems.length})</span>
                         </div>
                       </div>
-                      <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                        {doneItems.length > 0 ? doneItems.map(t => renderCard(t, true)) : (
+                      <DroppableColumn id="done" className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {doneItems.length > 0 ? doneItems.map(t => (
+                          <DraggableCard key={t.id} id={String(t.id)}>{renderCard(t, true)}</DraggableCard>
+                        )) : (
                           <EmptyColumn message="Completed items will appear here" />
                         )}
-                      </div>
+                      </DroppableColumn>
                     </div>
                   </div>
+
+                  {/* Drag overlay - ghost card following cursor */}
+                  <DragOverlay dropAnimation={null}>
+                    {activeDragTodo ? (
+                      <div className="opacity-80 rotate-2 shadow-lg shadow-green-900/50 pointer-events-none max-w-[300px]">
+                        {renderCard(activeDragTodo, activeDragTodo.status === 'done')}
+                      </div>
+                    ) : null}
+                  </DragOverlay>
+                  </DndContext>
                 </>
               );
             })()
@@ -1911,6 +1966,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
         title="DELETE_PROJECT"
         message={`Permanently delete "${deleteConfirmProject?.name || deleteConfirmProject?.git_dir.split('/').pop()}" and ALL associated data? Tasks, history, notes, goals, env vars, todos will be removed from the database. This cannot be undone.`}
         confirmLabel="DELETE"
+        confirmText={deleteConfirmProject?.name || deleteConfirmProject?.git_dir.split('/').pop() || ''}
       />
     </div>
   );

@@ -397,6 +397,7 @@ impl Database {
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )"),
             (11, "ALTER TABLE history ADD COLUMN todo_id INTEGER DEFAULT NULL"),
+            (12, "ALTER TABLE tasks ADD COLUMN todo_id INTEGER DEFAULT NULL"),
         ];
 
         for (version, sql) in migrations {
@@ -424,8 +425,8 @@ impl Database {
         self.conn.execute(
             "INSERT OR REPLACE INTO tasks
              (key, session_id, session, window_id, window, pane, status, summary,
-              completion_note, started_at, completed_at, duration_seconds, acknowledged)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              completion_note, started_at, completed_at, duration_seconds, acknowledged, todo_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 key,
                 task.session_id,
@@ -440,6 +441,7 @@ impl Database {
                 task.completed_at.map(|t| t.to_rfc3339()),
                 task.duration_seconds,
                 task.acknowledged as i32,
+                task.todo_id,
             ],
         )?;
         Ok(())
@@ -482,7 +484,8 @@ impl Database {
     pub fn load_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, session, window_id, window, pane, status, summary,
-                    completion_note, started_at, completed_at, duration_seconds, acknowledged
+                    completion_note, started_at, completed_at, duration_seconds, acknowledged,
+                    todo_id
              FROM tasks",
         )?;
 
@@ -517,8 +520,8 @@ impl Database {
                     acknowledged: row.get::<_, i32>(11)? != 0,
                     archived: false,
                     archived_at: None,
-                    transcript_path: String::new(), // Tasks table doesn't store this
-                    todo_id: None,
+                    transcript_path: String::new(),
+                    todo_id: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

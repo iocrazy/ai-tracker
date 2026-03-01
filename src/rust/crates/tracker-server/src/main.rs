@@ -1655,17 +1655,18 @@ async fn handle_hook(
         .unwrap_or_default();
 
     // Auto-capture todo from conventional commit prefixes in UserPromptSubmit
+    let mut captured_todo_id: Option<i64> = None;
     if event == "UserPromptSubmit" {
         let prompt_raw = body_json.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
         if let Some((prefix, is_urgent, title)) = parse_todo_prefix(prompt_raw) {
             let pane_for_git = tmux_ctx.pane_id.clone();
             let state_ref = state.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            captured_todo_id = tokio::task::spawn_blocking(move || {
                 let git_dir = match resolve_git_dir_from_pane(&pane_for_git) {
                     Some(d) => d,
                     None => {
                         info!("todo: no git_dir for pane '{}'", pane_for_git);
-                        return;
+                        return None;
                     }
                 };
                 let priority = if is_urgent { 2 } else if prefix == "fix" { 1 } else { 0 };
@@ -1693,13 +1694,13 @@ async fn handle_hook(
                         }
                     }
                 };
-                // Map pane → active todo for history linking
+                // Also store in active_todo_map as backup
                 if let Some(tid) = todo_id {
                     let mut map = state_ref.active_todo_map.lock().unwrap();
                     map.insert(pane_for_git.clone(), (tid, git_dir));
-                    info!("todo: mapped pane '{}' → todo #{}", pane_for_git, tid);
                 }
-            }).await;
+                todo_id
+            }).await.unwrap_or(None);
         }
     }
 
@@ -1758,6 +1759,9 @@ async fn handle_hook(
         }
     };
 
+    let pane_id = tmux_ctx.pane_id.clone();
+    let task_key = format!("{}|{}|{}", tmux_ctx.session_id, tmux_ctx.window_id, tmux_ctx.pane_id);
+
     let cmd_req = SendCommandRequest {
         command: command.to_string(),
         session_id: tmux_ctx.session_id,
@@ -1773,10 +1777,24 @@ async fn handle_hook(
     };
 
     match handle_command(&state, cmd_req).await {
-        Ok(_) => Ok(Json(CommandResponse {
-            success: true,
-            message: format!("Hook '{}' processed", event),
-        })),
+        Ok(_) => {
+            // After START_TASK, persist todo_id on the task so it survives restarts
+            if let Some(tid) = captured_todo_id {
+                let mut server_state = state.state.lock().unwrap();
+                if let Some(task) = server_state.tasks.get_mut(&task_key) {
+                    task.todo_id = Some(tid);
+                    let task_clone = task.clone();
+                    if let Err(e) = server_state.db.save_task(&task_clone) {
+                        warn!("todo: failed to persist todo_id on task: {}", e);
+                    }
+                    info!("todo: set todo_id={} on task '{}'", tid, task_key);
+                }
+            }
+            Ok(Json(CommandResponse {
+                success: true,
+                message: format!("Hook '{}' processed", event),
+            }))
+        }
         Err(e) => Ok(Json(CommandResponse {
             success: false,
             message: format!("Hook '{}' failed: {}", event, e),
@@ -2683,7 +2701,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    // Server-side heartbeat: send Ping every 30s, disconnect if no Pong within 10s
+    // Server-side heartbeat: send Ping every 30s, disconnect if no Pong within 90s
+    // Generous timeout avoids false disconnects when Tauri app is backgrounded
     let sender_ping = sender.clone();
     let ping_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -2700,7 +2719,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     // Handle incoming messages (ping/pong, close, commands)
     let mut last_pong = tokio::time::Instant::now();
     loop {
-        let timeout = tokio::time::sleep(std::time::Duration::from_secs(45));
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(90));
         tokio::select! {
             msg = receiver.next() => {
                 match msg {
@@ -2727,9 +2746,9 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                 }
             }
             _ = timeout => {
-                // No activity for 45s — connection is dead
-                if last_pong.elapsed() > std::time::Duration::from_secs(45) {
-                    warn!("WebSocket heartbeat timeout, closing connection");
+                // No activity for 90s — connection is dead
+                if last_pong.elapsed() > std::time::Duration::from_secs(90) {
+                    warn!("WebSocket heartbeat timeout ({}s since last pong), closing", last_pong.elapsed().as_secs());
                     break;
                 }
             }

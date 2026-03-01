@@ -224,6 +224,13 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
     }
   };
 
+  const handleRandomizeToken = () => {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    setTokenValue(hex);
+  };
+
   const handleCancelToken = () => {
     setEditingToken(false);
     setTokenSaved(false);
@@ -331,10 +338,13 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
               <Check className="w-4 h-4 text-green-500 shrink-0" />
             ) : (
               <>
-                <button onClick={handleSaveToken} className="p-0.5 hover:bg-black/5 rounded">
+                <button onClick={handleRandomizeToken} className="p-0.5 hover:bg-black/5 rounded" title="Generate random token">
+                  <RefreshCw className="w-3.5 h-3.5 text-orange-400" />
+                </button>
+                <button onClick={handleSaveToken} className="p-0.5 hover:bg-black/5 rounded" title="Save">
                   <Check className="w-3.5 h-3.5 text-blue-500" />
                 </button>
-                <button onClick={handleCancelToken} className="p-0.5 hover:bg-black/5 rounded">
+                <button onClick={handleCancelToken} className="p-0.5 hover:bg-black/5 rounded" title="Cancel">
                   <X className="w-3.5 h-3.5 text-gray-400" />
                 </button>
               </>

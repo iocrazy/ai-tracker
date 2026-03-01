@@ -12,7 +12,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
-use crate::{db, transcript};
+use crate::{agent, db, transcript};
 
 // ============================================================================
 // Structs — History
@@ -1724,8 +1724,8 @@ pub(crate) async fn get_claude_messages(Query(params): Query<ClaudeMessagesParam
     let (project_filters, parent_filters): (Vec<String>, Vec<String>) = if let (Some(session), Some(window)) = (&params.session, &params.window) {
         // Try all panes in the window to find one that matches a Claude project directory
         // This handles cases where the active pane is lazygit but Claude runs in another pane
-        let list_output = std::process::Command::new("tmux")
-            .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
+        let list_output = std::process::Command::new(agent::TMUX_BIN)
+            .args(["-S", "/private/tmp/tmux-501/default", "list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
             .output();
 
         let mut paths: Vec<String> = Vec::new();
@@ -1744,8 +1744,8 @@ pub(crate) async fn get_claude_messages(Query(params): Query<ClaudeMessagesParam
         // Fallback: try the active pane if list-panes failed
         if paths.is_empty() {
             let target = format!("{}:{}", session, window);
-            let output = std::process::Command::new("tmux")
-                .args(["display-message", "-p", "-t", &target, "#{pane_current_path}"])
+            let output = std::process::Command::new(agent::TMUX_BIN)
+                .args(["-S", "/private/tmp/tmux-501/default", "display-message", "-p", "-t", &target, "#{pane_current_path}"])
                 .output();
             if let Ok(out) = output {
                 if out.status.success() {

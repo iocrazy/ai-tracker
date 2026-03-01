@@ -621,13 +621,60 @@ impl TmuxAgent {
         // Activate the terminal application on macOS so it comes to foreground
         #[cfg(target_os = "macos")]
         {
+            // Detect terminal from tmux client's process ancestry
+            let terminal_app = Self::detect_terminal_app().await;
+            let script = format!("tell application \"{}\" to activate", terminal_app);
             let _ = Command::new("osascript")
-                .args(["-e", "tell application \"Terminal\" to activate"])
+                .args(["-e", &script])
                 .output()
                 .await;
         }
 
         Ok(())
+    }
+
+    /// Detect which terminal application owns the tmux client by tracing the process tree
+    #[cfg(target_os = "macos")]
+    async fn detect_terminal_app() -> String {
+        // Get tmux client PID
+        let client_pid = Command::new(TMUX_BIN)
+            .args(["-S", "/private/tmp/tmux-501/default", "display-message", "-p", "#{client_pid}"])
+            .output()
+            .await
+            .ok()
+            .and_then(|o| if o.status.success() {
+                String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok()
+            } else {
+                None
+            });
+
+        if let Some(pid) = client_pid {
+            // Walk up the process tree to find a known terminal app
+            let output = std::process::Command::new("bash")
+                .args(["-c", &format!(
+                    "PID={}; for i in 1 2 3 4 5 6; do PARENT=$(ps -p $PID -o ppid= 2>/dev/null | tr -d ' '); \
+                     [ -z \"$PARENT\" ] && break; COMM=$(ps -p $PARENT -o comm= 2>/dev/null); \
+                     echo \"$COMM\"; PID=$PARENT; done", pid
+                )])
+                .output()
+                .ok();
+
+            if let Some(out) = output {
+                let tree = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                if tree.contains("iterm") {
+                    return "iTerm".to_string();
+                } else if tree.contains("alacritty") {
+                    return "Alacritty".to_string();
+                } else if tree.contains("wezterm") {
+                    return "WezTerm".to_string();
+                } else if tree.contains("kitty") {
+                    return "kitty".to_string();
+                }
+            }
+        }
+
+        // Default fallback
+        "Terminal".to_string()
     }
 
     /// List all agent windows across all workspace sessions

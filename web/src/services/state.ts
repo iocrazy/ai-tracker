@@ -140,10 +140,18 @@ export function connectWebSocket(
     ? { onStateUpdate: callbacksOrOnMessage }
     : callbacksOrOnMessage;
 
+  let pingInterval: ReturnType<typeof setInterval> | null = null;
+
   ws.onopen = () => {
     console.log('[WS] Connected to tracker-server');
     _retryCount = 0;
     callbacks.onConnectionChange?.('connected');
+    // Client-side heartbeat: send ping every 25s to keep connection alive through proxies
+    pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send('ping');
+      }
+    }, 25000);
   };
 
   ws.onmessage = (event) => {
@@ -178,6 +186,7 @@ export function connectWebSocket(
   };
 
   ws.onclose = () => {
+    if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
     _retryCount++;
     const delay = Math.min(BASE_DELAY * Math.pow(2, _retryCount - 1), MAX_DELAY) + Math.random() * 1000;
     console.log(`[WS] Disconnected, reconnecting in ${(delay / 1000).toFixed(1)}s (attempt #${_retryCount})...`);

@@ -123,8 +123,10 @@ const App: React.FC = () => {
     const changed = msg.state.changed;
     const hasChange = (table: string) => !changed || changed.length === 0 || changed.includes(table);
 
-    // Always update sessions (tmux windows can change without DB changes)
-    setSessions(mapTmuxToSessions(msg.tmux_windows, msg.state.tasks));
+    // Update sessions when tmux data is available (skip empty to avoid clearing REST-fetched data)
+    if (msg.tmux_windows && msg.tmux_windows.length > 0) {
+      setSessions(mapTmuxToSessions(msg.tmux_windows, msg.state.tasks));
+    }
 
     // Only update other sections if their backing table changed
     if (hasChange('tasks')) {
@@ -244,14 +246,20 @@ const App: React.FC = () => {
 
     // Initial fetch (fallback if WebSocket is slow to connect)
     Promise.all([fetchState(), fetchTmuxWindows()])
-      .then(([state, tmuxWindows]) => {
+      .then(async ([state, tmuxWindows]) => {
         latestStateRef.current = state;
-        setSessions(mapTmuxToSessions(tmuxWindows, state.tasks));
+        // If tmux windows empty, retry once after 1s (server may still be initializing)
+        let windows = tmuxWindows;
+        if (windows.length === 0) {
+          await new Promise(r => setTimeout(r, 1000));
+          try { windows = await fetchTmuxWindows(); } catch { /* ignore */ }
+        }
+        setSessions(mapTmuxToSessions(windows, state.tasks));
         setTimeline(mapHistoryToTimeline(state.history));
         setConsoleLogs(generateConsoleLogs(state));
         setIsConnected(true);
         setUsingCache(false);
-        saveCache(state, tmuxWindows);
+        saveCache(state, windows);
       })
       .catch(err => {
         console.error('Failed to fetch initial state:', err);
@@ -283,7 +291,29 @@ const App: React.FC = () => {
       },
     });
 
+    // Reconnect immediately when tab becomes visible again
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && wsRef.current) {
+        const state = wsRef.current.readyState;
+        if (state === WebSocket.CLOSED || state === WebSocket.CLOSING) {
+          console.log('[WS] Tab visible, reconnecting...');
+          wsRef.current = connectWebSocket({
+            onStateUpdate: handleRealtimeUpdate,
+            onStreamChunk: handleStreamChunk,
+            onChatMessage: handleChatMessage,
+            onConnectionChange: (status, retry) => {
+              setConnStatus(status);
+              setRetryCount(retry || 0);
+              setIsConnected(status === 'connected');
+            },
+          });
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
       if (wsRef.current) {
         wsRef.current.close();
       }

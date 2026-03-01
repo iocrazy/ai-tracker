@@ -2451,7 +2451,19 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     let mut chat_rx = state.chat_watcher.subscribe();
 
     // Send initial realtime message (state + tmux windows)
-    let initial_msg = state.get_realtime_message();
+    // If cached tmux windows are empty, do a live query to ensure first client gets real data
+    let initial_msg = {
+        let mut msg = state.get_realtime_message();
+        if msg.tmux_windows.is_empty() {
+            if let Ok(windows) = tokio::task::spawn_blocking(agent::TmuxAgent::list_all_windows_sync).await {
+                if !windows.is_empty() {
+                    state.broadcast_if_tmux_changed(windows.clone());
+                    msg.tmux_windows = windows;
+                }
+            }
+        }
+        msg
+    };
     let initial_json = serde_json::to_string(&initial_msg).unwrap_or_default();
 
     {
@@ -2528,25 +2540,56 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    // Handle incoming messages (ping/pong, close, commands)
-    while let Some(msg) = receiver.next().await {
-        match msg {
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(data)) => {
-                let mut sender_guard = sender.lock().await;
-                let _ = sender_guard.send(Message::Pong(data)).await;
-            }
-            Ok(Message::Text(text)) => {
-                // Handle command from WebSocket
-                if let Ok(req) = serde_json::from_str::<SendCommandRequest>(&text) {
-                    let _ = handle_command(&state, req).await;
-                }
-            }
-            Err(e) => {
-                warn!("WebSocket error: {}", e);
+    // Server-side heartbeat: send Ping every 30s, disconnect if no Pong within 10s
+    let sender_ping = sender.clone();
+    let ping_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let mut sender_guard = sender_ping.lock().await;
+            if sender_guard.send(Message::Ping(vec![b'h', b'b'])).await.is_err() {
                 break;
             }
-            _ => {}
+        }
+    });
+
+    // Handle incoming messages (ping/pong, close, commands)
+    let mut last_pong = tokio::time::Instant::now();
+    loop {
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(45));
+        tokio::select! {
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let mut sender_guard = sender.lock().await;
+                        let _ = sender_guard.send(Message::Pong(data)).await;
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        last_pong = tokio::time::Instant::now();
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        // Any message counts as activity
+                        last_pong = tokio::time::Instant::now();
+                        if let Ok(req) = serde_json::from_str::<SendCommandRequest>(&text) {
+                            let _ = handle_command(&state, req).await;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        warn!("WebSocket error: {}", e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            _ = timeout => {
+                // No activity for 45s — connection is dead
+                if last_pong.elapsed() > std::time::Duration::from_secs(45) {
+                    warn!("WebSocket heartbeat timeout, closing connection");
+                    break;
+                }
+            }
         }
     }
 
@@ -2554,6 +2597,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     state_send_task.abort();
     stream_send_task.abort();
     chat_send_task.abort();
+    ping_task.abort();
     info!("WebSocket connection closed");
 }
 
@@ -2583,8 +2627,8 @@ fn discover_active_jsonl_files(state: &AppState) -> Vec<(String, std::path::Path
         let key = format!("{}:{}", session, window);
 
         // Directory-based lookup with two-tier filtering (exact paths first, then parents)
-        let list_output = std::process::Command::new("tmux")
-            .args(["list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
+        let list_output = std::process::Command::new(agent::TMUX_BIN)
+            .args(["-S", "/private/tmp/tmux-501/default", "list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
             .output();
 
         let mut pane_paths: Vec<String> = Vec::new();
@@ -2653,7 +2697,10 @@ fn discover_active_jsonl_files(state: &AppState) -> Vec<(String, std::path::Path
 
         let best = find_best(&exact_dirs).or_else(|| find_best(&parent_dirs));
         if let Some((path, _)) = best {
-            result.push((key, path));
+            // Use full file path as key so it matches the session_file returned by
+            // /api/claude/messages — the frontend filters WebSocket chat events by this key.
+            let file_key = path.to_string_lossy().to_string();
+            result.push((file_key, path));
         }
     }
 
@@ -2705,6 +2752,16 @@ async fn main() -> Result<()> {
 
     // Create application state
     let app_state = Arc::new(AppState::new(db, auth_token, allowed_origins, paths)?);
+
+    // Pre-populate tmux windows before accepting connections
+    // so the first WebSocket client gets actual data instead of empty list
+    {
+        let init_state = app_state.clone();
+        if let Ok(windows) = tokio::task::spawn_blocking(agent::TmuxAgent::list_all_windows_sync).await {
+            init_state.broadcast_if_tmux_changed(windows);
+            info!("Pre-populated tmux windows cache");
+        }
+    }
 
     // Start background task for tmux monitoring (real-time updates)
     // Uses spawn_blocking to avoid blocking the tokio async runtime with sync tmux commands.

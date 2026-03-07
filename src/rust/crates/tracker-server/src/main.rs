@@ -12,7 +12,6 @@ mod env_file;
 mod layout;
 mod paths;
 mod port;
-mod project_db;
 mod stream;
 mod transcript;
 mod workspace;
@@ -145,8 +144,6 @@ pub(crate) struct AppState {
     last_tmux_windows: Mutex<Vec<agent::TmuxWindowInfo>>,
     /// Stream manager for real-time pane output capture
     stream_manager: stream::StreamManager,
-    /// Per-project database connection cache
-    project_dbs: project_db::ProjectDbManager,
     /// Chat watcher for JSONL file monitoring → WS push
     chat_watcher: chat_watcher::ChatWatcher,
     /// Bearer token for API authentication
@@ -172,7 +169,6 @@ impl AppState {
             broadcast_tx,
             last_tmux_windows: Mutex::new(Vec::new()),
             stream_manager: stream::StreamManager::new(),
-            project_dbs: project_db::ProjectDbManager::new(),
             chat_watcher: chat_watcher::ChatWatcher::new(),
             auth_token,
             allowed_origins,
@@ -201,42 +197,6 @@ impl AppState {
             }
         }
         None
-    }
-
-    /// Write to project DB if git_dir can be resolved, and register project in global DB
-    fn write_to_project_db_if_possible(
-        &self,
-        git_dir: &str,
-        session: &str,
-        window: &str,
-        action: impl FnOnce(&project_db::ProjectDatabase) -> anyhow::Result<()>,
-    ) {
-        let project_name = std::path::Path::new(git_dir)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        // Write to project DB first (no global lock needed)
-        let counts = match self.project_dbs.get_or_open(git_dir) {
-            Ok(pdb) => {
-                if let Err(e) = action(&pdb) {
-                    warn!("Failed to write to project DB {}: {}", git_dir, e);
-                }
-                Some((pdb.history_count(), pdb.notes_count(), pdb.goals_count()))
-            }
-            Err(e) => {
-                warn!("Failed to open project DB {}: {}", git_dir, e);
-                None
-            }
-        };
-
-        // Single lock for all global DB updates
-        let state = self.state.lock().unwrap();
-        let _ = state.db.register_project(git_dir, &project_name);
-        let _ = state.db.update_project_activity(git_dir, session, window);
-        if let Some((h, n, g)) = counts {
-            let _ = state.db.update_project_counts(git_dir, h, n, g);
-        }
     }
 
     /// Get current state as Envelope for WebSocket broadcast
@@ -356,8 +316,8 @@ impl AppState {
 
         // Refresh tmux status line (fire-and-forget via thread to avoid blocking)
         std::thread::spawn(|| {
-            let _ = std::process::Command::new(agent::TMUX_BIN)
-                .args(["-S", "/private/tmp/tmux-501/default", "refresh-client", "-S"])
+            let _ = std::process::Command::new(agent::TMUX_BIN.as_str())
+                .args(["-S", agent::TMUX_SOCKET.as_str(), "refresh-client", "-S"])
                 .status();
         });
 
@@ -399,6 +359,17 @@ impl AppState {
     /// Broadcast if tmux windows changed
     fn broadcast_if_tmux_changed(&self, new_windows: Vec<agent::TmuxWindowInfo>) {
         let mut last = self.last_tmux_windows.lock().unwrap();
+
+        // Safety: if tmux returns empty but we previously had windows,
+        // treat it as a transient failure and skip the update.
+        // This prevents a single tmux command failure from wiping all state.
+        if new_windows.is_empty() && !last.is_empty() {
+            tracing::warn!(
+                "tmux returned 0 windows but {} were cached — ignoring transient failure",
+                last.len()
+            );
+            return;
+        }
 
         // Simple change detection: compare serialized JSON
         let old_json = serde_json::to_string(&*last).unwrap_or_default();
@@ -477,7 +448,12 @@ impl AppState {
                 old_win.session_name, old_win.window_name, old_win.window_id, working_dir, git_branch, pane_count
             );
 
-            // Save to global DB
+            // Resolve git_dir for project tagging
+            let git_dir = old_win.git_dir.clone()
+                .or_else(|| agent::TmuxAgent::find_git_root_sync(&working_dir))
+                .unwrap_or_default();
+
+            // Save to global DB with git_dir tag
             let db = &self.state.lock().unwrap().db;
             if let Err(e) = db.save_closed_window(
                 &old_win.session_id,
@@ -486,24 +462,20 @@ impl AppState {
                 &working_dir,
                 &git_branch,
                 pane_count,
+                &git_dir,
             ) {
                 warn!("Failed to auto-save closed window: {}", e);
             }
 
-            // Also save to project DB if git_dir is available
-            let git_dir = old_win.git_dir.clone()
-                .or_else(|| agent::TmuxAgent::find_git_root_sync(&working_dir));
-            if let Some(ref gd) = git_dir {
-                self.write_to_project_db_if_possible(gd, &old_win.session_name, &old_win.window_name, |pdb| {
-                    pdb.save_closed_window(
-                        &old_win.session_id,
-                        &old_win.session_name,
-                        &old_win.window_name,
-                        &working_dir,
-                        &git_branch,
-                        pane_count,
-                    )
-                });
+            // Register project in global DB if git_dir available
+            if !git_dir.is_empty() {
+                let project_name = std::path::Path::new(&git_dir)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let state = self.state.lock().unwrap();
+                let _ = state.db.register_project(&git_dir, &project_name);
+                let _ = state.db.update_project_activity(&git_dir, &old_win.session_name, &old_win.window_name);
             }
         }
     }
@@ -550,8 +522,8 @@ impl AppState {
                     "Cleaned up stale task: session={} window={} (id={}) status={}",
                     task.session, task.window, task.window_id, task.status.as_str()
                 );
-                // Archive to history before deleting
-                let _ = state.db.archive_to_history(&task);
+                // Archive to history before deleting (no git_dir for stale tasks)
+                let _ = state.db.archive_to_history(&task, "");
                 let _ = state.db.delete_task(key);
             }
         }
@@ -721,9 +693,9 @@ fn resolve_tmux_context(pane: &str) -> Option<TmuxContext> {
     if pane.is_empty() {
         return None;
     }
-    let output = std::process::Command::new(agent::TMUX_BIN)
+    let output = std::process::Command::new(agent::TMUX_BIN.as_str())
         .args([
-            "-S", "/private/tmp/tmux-501/default",
+            "-S", agent::TMUX_SOCKET.as_str(),
             "display-message",
             "-t", pane,
             "-p",
@@ -1006,28 +978,28 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                     }
                 }
 
+                // Resolve git_dir before archiving
+                let git_dir = app_state.resolve_git_dir_for_window(&task.session_id, &task.window_id)
+                    .unwrap_or_default();
+
                 if let Err(e) = state.db.delete_task(&key) {
                     error!("Failed to delete finished task: {}", e);
                 }
-                // Archive with full completion data
-                if let Err(e) = state.db.archive_to_history(&task) {
+                // Archive with full completion data and git_dir tag
+                if let Err(e) = state.db.archive_to_history(&task, &git_dir) {
                     error!("Failed to archive task to history: {}", e);
                 }
-                let task_clone = task.clone();
-                let session = task.session.clone();
-                let window = task.window.clone();
-                let session_id = task.session_id.clone();
-                let window_id = task.window_id.clone();
-                drop(state);
 
-                // Try to archive to project DB
-                let git_dir = app_state.resolve_git_dir_for_window(&session_id, &window_id);
-                if let Some(ref gd) = git_dir {
-                    app_state.write_to_project_db_if_possible(gd, &session, &window, |pdb| {
-                        pdb.archive_to_history(&task_clone)?;
-                        Ok(())
-                    });
+                // Register project activity in global DB
+                if !git_dir.is_empty() {
+                    let project_name = std::path::Path::new(&git_dir)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let _ = state.db.register_project(&git_dir, &project_name);
+                    let _ = state.db.update_project_activity(&git_dir, &task.session, &task.window);
                 }
+                drop(state);
             } else {
                 drop(state);
             }
@@ -1108,21 +1080,26 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                 archived_at: None,
             };
 
+            // Resolve git_dir for project tagging
+            let git_dir = app_state.resolve_git_dir_for_window(&req.session_id, &req.window_id)
+                .unwrap_or_default();
+
             let mut state = app_state.state.lock().unwrap();
-            if let Err(e) = state.db.save_note(&note) {
+            if let Err(e) = state.db.save_note(&note, &git_dir) {
                 error!("Failed to save note to database: {}", e);
             }
             state.notes.insert(note.id.clone(), note.clone());
-            drop(state);
 
-            // Also save to project DB
-            let git_dir = app_state.resolve_git_dir_for_window(&req.session_id, &req.window_id);
-            if let Some(ref gd) = git_dir {
-                app_state.write_to_project_db_if_possible(gd, &req.session, &req.window, |pdb| {
-                    pdb.save_note(&note)?;
-                    Ok(())
-                });
+            // Register project activity
+            if !git_dir.is_empty() {
+                let project_name = std::path::Path::new(&git_dir)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let _ = state.db.register_project(&git_dir, &project_name);
+                let _ = state.db.update_project_activity(&git_dir, &req.session, &req.window);
             }
+            drop(state);
 
             app_state.broadcast_state();
         }
@@ -1136,7 +1113,7 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                 }
 
                 let note_clone = note.clone();
-                if let Err(e) = state.db.save_note(&note_clone) {
+                if let Err(e) = state.db.save_note(&note_clone, "") {
                     error!("Failed to save note to database: {}", e);
                 }
             }
@@ -1163,7 +1140,7 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                 note.archived_at = Some(Utc::now());
 
                 let note_clone = note.clone();
-                if let Err(e) = state.db.save_note(&note_clone) {
+                if let Err(e) = state.db.save_note(&note_clone, "") {
                     error!("Failed to save note to database: {}", e);
                 }
             }
@@ -1186,7 +1163,7 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                     note.archived = false;
                     note.archived_at = None;
 
-                    if let Err(e) = state.db.save_note(&note) {
+                    if let Err(e) = state.db.save_note(&note, "") {
                         error!("Failed to save note to database: {}", e);
                     }
                     state.notes.insert(note.id.clone(), note);
@@ -1203,7 +1180,7 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                 note.completed = !note.completed;
 
                 let note_clone = note.clone();
-                if let Err(e) = state.db.save_note(&note_clone) {
+                if let Err(e) = state.db.save_note(&note_clone, "") {
                     error!("Failed to save note to database: {}", e);
                 }
             }
@@ -1225,21 +1202,26 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                 updated_at: Some(Utc::now()),
             };
 
+            // Resolve git_dir for project tagging
+            let git_dir = app_state.resolve_git_dir_for_window(&req.session_id, &req.window_id)
+                .unwrap_or_default();
+
             let mut state = app_state.state.lock().unwrap();
-            if let Err(e) = state.db.save_goal(&goal) {
+            if let Err(e) = state.db.save_goal(&goal, &git_dir) {
                 error!("Failed to save goal to database: {}", e);
             }
             state.goals.insert(goal.id.clone(), goal.clone());
-            drop(state);
 
-            // Also save to project DB
-            let git_dir = app_state.resolve_git_dir_for_window(&req.session_id, &req.window_id);
-            if let Some(ref gd) = git_dir {
-                app_state.write_to_project_db_if_possible(gd, &req.session, &req.window, |pdb| {
-                    pdb.save_goal(&goal)?;
-                    Ok(())
-                });
+            // Register project activity
+            if !git_dir.is_empty() {
+                let project_name = std::path::Path::new(&git_dir)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let _ = state.db.register_project(&git_dir, &project_name);
+                let _ = state.db.update_project_activity(&git_dir, &req.session, &req.window);
             }
+            drop(state);
 
             app_state.broadcast_state();
         }
@@ -1263,7 +1245,7 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                 goal.updated_at = Some(Utc::now());
 
                 let goal_clone = goal.clone();
-                if let Err(e) = state.db.save_goal(&goal_clone) {
+                if let Err(e) = state.db.save_goal(&goal_clone, "") {
                     error!("Failed to save goal to database: {}", e);
                 }
             }
@@ -1602,8 +1584,8 @@ fn resolve_git_dir_from_pane(pane_id: &str) -> Option<String> {
         return None;
     }
     // Get pane current path
-    let output = std::process::Command::new(agent::TMUX_BIN)
-        .args(["-S", "/private/tmp/tmux-501/default", "display-message", "-p", "-t", pane_id, "#{pane_current_path}"])
+    let output = std::process::Command::new(agent::TMUX_BIN.as_str())
+        .args(["-S", agent::TMUX_SOCKET.as_str(), "display-message", "-p", "-t", pane_id, "#{pane_current_path}"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -1933,7 +1915,7 @@ async fn health_check(
 
     // Check tmux server — offload blocking Command to spawn_blocking
     let tmux_ok = match tokio::task::spawn_blocking(|| {
-        std::process::Command::new(agent::TMUX_BIN)
+        std::process::Command::new(agent::TMUX_BIN.as_str())
             .args(["list-sessions", "-F", "#{session_name}"])
             .output()
     }).await {
@@ -2059,14 +2041,14 @@ async fn diagnostics(
 
     // 2. Tmux: server status, session count, window count
     {
-        match std::process::Command::new(agent::TMUX_BIN)
+        match std::process::Command::new(agent::TMUX_BIN.as_str())
             .args(["list-sessions", "-F", "#{session_name}"])
             .output()
         {
             Ok(o) if o.status.success() => {
                 let sessions = String::from_utf8_lossy(&o.stdout)
                     .lines().filter(|l| !l.is_empty()).count();
-                let windows = std::process::Command::new(agent::TMUX_BIN)
+                let windows = std::process::Command::new(agent::TMUX_BIN.as_str())
                     .args(["list-windows", "-a", "-F", "#{window_id}"])
                     .output()
                     .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.is_empty()).count())
@@ -2582,6 +2564,24 @@ async fn list_backups(
 // WebSocket Handler
 // ============================================================================
 
+/// Generate a short random ID for WS connection tracking
+fn rand_id() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let s = RandomState::new();
+    let mut h = s.build_hasher();
+    h.write_u64(0);
+    h.finish() % 100_000
+}
+
+/// Format a chrono Duration as human-readable string
+fn format_duration_human(d: chrono::Duration) -> String {
+    let secs = d.num_seconds();
+    if secs < 60 { return format!("{}s", secs); }
+    if secs < 3600 { return format!("{}m {}s", secs / 60, secs % 60); }
+    format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+}
+
 /// WebSocket upgrade handler
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -2599,6 +2599,10 @@ struct StreamMessage {
 
 /// Handle WebSocket connection
 async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
+    let ws_id: u64 = rand_id();
+    let connected_at = chrono::Utc::now();
+    info!("[WS-{}] Client connected", ws_id);
+
     let (sender, mut receiver) = socket.split();
     let sender = Arc::new(tokio::sync::Mutex::new(sender));
 
@@ -2723,7 +2727,14 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         tokio::select! {
             msg = receiver.next() => {
                 match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        info!("[WS-{}] Client sent Close frame: {:?}", ws_id, frame.map(|f| f.reason));
+                        break;
+                    }
+                    None => {
+                        info!("[WS-{}] Client stream ended (connection dropped)", ws_id);
+                        break;
+                    }
                     Some(Ok(Message::Ping(data))) => {
                         let mut sender_guard = sender.lock().await;
                         let _ = sender_guard.send(Message::Pong(data)).await;
@@ -2739,7 +2750,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                         }
                     }
                     Some(Err(e)) => {
-                        warn!("WebSocket error: {}", e);
+                        warn!("[WS-{}] Error: {}", ws_id, e);
                         break;
                     }
                     _ => {}
@@ -2748,7 +2759,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
             _ = timeout => {
                 // No activity for 90s — connection is dead
                 if last_pong.elapsed() > std::time::Duration::from_secs(90) {
-                    warn!("WebSocket heartbeat timeout ({}s since last pong), closing", last_pong.elapsed().as_secs());
+                    warn!("[WS-{}] Heartbeat timeout ({}s since last pong), closing", ws_id, last_pong.elapsed().as_secs());
                     break;
                 }
             }
@@ -2760,7 +2771,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     stream_send_task.abort();
     chat_send_task.abort();
     ping_task.abort();
-    info!("WebSocket connection closed");
+    let duration = chrono::Utc::now().signed_duration_since(connected_at);
+    info!("[WS-{}] Disconnected after {}", ws_id, format_duration_human(duration));
 }
 
 /// Discover active JSONL files for chat_watcher.
@@ -2789,8 +2801,8 @@ fn discover_active_jsonl_files(state: &AppState) -> Vec<(String, std::path::Path
         let key = format!("{}:{}", session, window);
 
         // Directory-based lookup with two-tier filtering (exact paths first, then parents)
-        let list_output = std::process::Command::new(agent::TMUX_BIN)
-            .args(["-S", "/private/tmp/tmux-501/default", "list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
+        let list_output = std::process::Command::new(agent::TMUX_BIN.as_str())
+            .args(["-S", agent::TMUX_SOCKET.as_str(), "list-panes", "-t", &format!("{}:{}", session, window), "-F", "#{pane_current_path}"])
             .output();
 
         let mut pane_paths: Vec<String> = Vec::new();
@@ -2871,19 +2883,27 @@ fn discover_active_jsonl_files(state: &AppState) -> Vec<(String, std::path::Path
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("tracker_server=info".parse()?),
-        )
-        .init();
-
-    // Resolve and initialize paths
+    // Resolve and initialize paths (before logging, so we know where to write logs)
     let paths = paths::TrackerPaths::resolve();
     if let Err(e) = paths.ensure_dirs() {
-        error!("Failed to create data directories: {}", e);
+        eprintln!("Failed to create data directories: {}", e);
     }
+
+    // Initialize logging to both stdout and file
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("tracker_server=info".parse()?);
+
+    let file_appender = tracing_appender::rolling::never(&paths.log_dir, "tracker-server.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(non_blocking))
+        .init();
     paths.migrate_if_needed();
 
     // Load configuration and initialize auth token
@@ -3265,7 +3285,32 @@ async fn main() -> Result<()> {
     let index_file = web_dist.join("index.html");
     let serve_dir = ServeDir::new(&web_dist).not_found_service(ServeFile::new(&index_file));
 
-    let app = app.fallback_service(serve_dir);
+    // Wrap static files with cache-control headers:
+    // - /assets/* (content-hashed) → immutable, long cache
+    // - everything else (index.html, sw.js) → no-cache, always revalidate
+    use tower::ServiceBuilder;
+    use tower_http::set_header::SetResponseHeaderLayer;
+    use axum::http::HeaderValue;
+
+    let cached_assets = ServeDir::new(web_dist.join("assets"));
+    let assets_service = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        ))
+        .service(cached_assets);
+
+    let nocache_service = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
+        .service(serve_dir);
+
+    // Mount assets with long cache, everything else with no-cache
+    let app = app
+        .nest_service("/assets", assets_service)
+        .fallback_service(nocache_service);
 
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], 3099));

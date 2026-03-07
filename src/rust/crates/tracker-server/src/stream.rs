@@ -97,7 +97,7 @@ impl StreamManager {
 
         // Start tmux pipe-pane
         let pipe_cmd = format!("cat >> {}", fifo_path_str);
-        let output = std::process::Command::new(TMUX_BIN)
+        let output = std::process::Command::new(TMUX_BIN.as_str())
             .args(["pipe-pane", "-t", &target, &pipe_cmd])
             .output()
             .map_err(|e| format!("Failed to start pipe-pane: {}", e))?;
@@ -152,7 +152,7 @@ impl StreamManager {
 
         if let Some(info) = stream_info {
             // Stop tmux pipe-pane (empty command stops it)
-            let _ = std::process::Command::new(TMUX_BIN)
+            let _ = std::process::Command::new(TMUX_BIN.as_str())
                 .args(["pipe-pane", "-t", &info.target])
                 .output();
 

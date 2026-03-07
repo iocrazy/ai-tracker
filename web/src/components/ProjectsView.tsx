@@ -3,7 +3,7 @@ import {
   FolderGit2, ArrowLeft, Search, Plus, Trash2, Eye, EyeOff, Save, Edit3,
   Key, GitBranch, Play, ExternalLink, X, Loader, Globe, Layers, ChevronDown,
   BarChart3, Activity, Clock, Wrench, List, FileText, Check, CheckSquare,
-  ChevronRight, ChevronLeft, AlertCircle, Circle, Minus, ArrowUp, Archive, RotateCcw,
+  ChevronRight, ChevronLeft, AlertCircle, Circle, Minus, ArrowUp, Archive, RotateCcw, GripVertical,
 } from 'lucide-react';
 import { AppTab, AgentSession } from '../types';
 import { ProjectTimeline } from './ProjectTimeline';
@@ -55,8 +55,16 @@ const DraggableCard: React.FC<{ id: string; children: React.ReactNode }> = ({ id
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`, zIndex: 50 }
     : undefined;
   return (
-    <div ref={setNodeRef} style={style} {...listeners} {...attributes} className={isDragging ? 'opacity-30 cursor-grabbing' : 'cursor-grab'}>
-      {children}
+    <div ref={setNodeRef} style={{ ...style, touchAction: 'none' }} className={`flex items-stretch ${isDragging ? 'opacity-30' : ''}`}>
+      <div
+        {...listeners}
+        {...attributes}
+        className={`flex items-center px-0.5 shrink-0 text-green-900 hover:text-green-600 transition-colors ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+        title="Drag to move"
+      >
+        <GripVertical className="w-3.5 h-3.5" />
+      </div>
+      <div className="flex-1 min-w-0">{children}</div>
     </div>
   );
 };
@@ -841,7 +849,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
         <div className="flex">
           {([
             { id: 'overview' as DetailTab, label: 'OVERVIEW', icon: Activity },
-            { id: 'todos' as DetailTab, label: `TODOS${selectedProject.todos_count ? ` (${selectedProject.todos_count})` : ''}`, icon: CheckSquare },
+            { id: 'todos' as DetailTab, label: `TODOS${(() => { const c = projectTodos.length > 0 ? projectTodos.filter(t => t.status !== 'done').length : selectedProject.todos_count; return c > 0 ? ` (${c})` : ''; })()}`, icon: CheckSquare },
             { id: 'timeline' as DetailTab, label: `TIMELINE${selectedProject.history_count > 0 ? ` (${selectedProject.history_count})` : ''}`, icon: List },
             { id: 'docs' as DetailTab, label: 'DOCS', icon: FileText },
             { id: 'env-vars' as DetailTab, label: 'ENV VARS', icon: Key },
@@ -1250,7 +1258,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                         </div>
                       </div>
                       {/* Row 2: Title */}
-                      <div className={`text-sm font-mono leading-tight truncate ${isDone ? 'line-through opacity-60 text-green-600' : 'text-green-300'}`}>
+                      <div className={`text-sm font-mono leading-tight break-words ${isDone ? 'line-through opacity-60 text-green-600' : 'text-green-300'}`}>
                         {todo.title}
                       </div>
                       {/* Row 3: Description preview */}

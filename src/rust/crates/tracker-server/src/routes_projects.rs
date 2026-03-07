@@ -534,7 +534,7 @@ fn create_bare_session(
 ) -> Json<CreateSessionResponse> {
     use crate::agent::TMUX_BIN;
 
-    let result = std::process::Command::new(TMUX_BIN)
+    let result = std::process::Command::new(TMUX_BIN.as_str())
         .args(["new-session", "-d", "-s", session_name, "-c", git_dir])
         .output();
 
@@ -774,7 +774,7 @@ pub(crate) async fn get_projects(
     Json(server_state.db.list_projects().unwrap_or_default())
 }
 
-/// Get project history (reads from project's .aitracker/tracker.db)
+/// Get project history (filtered by git_dir from global DB)
 ///
 /// Supports `group_by=window` to group entries by session:window.
 pub(crate) async fn get_project_history(
@@ -786,18 +786,6 @@ pub(crate) async fn get_project_history(
     let project = match params.project {
         Some(ref p) if !p.is_empty() => p.clone(),
         _ => {
-            return Json(HistoryResponse {
-                groups: vec![],
-                total: 0,
-            })
-            .into_response();
-        }
-    };
-
-    let pdb = match state.project_dbs.get_or_open(&project) {
-        Ok(db) => db,
-        Err(e) => {
-            error!("Failed to open project DB {}: {}", project, e);
             return Json(HistoryResponse {
                 groups: vec![],
                 total: 0,
@@ -847,7 +835,9 @@ pub(crate) async fn get_project_history(
 
     // ── Grouped mode: group_by=window ──
     if params.group_by.as_deref() == Some("window") {
-        let (entries, total) = match pdb.load_history_grouped(
+        let server_state = state.state.lock().unwrap();
+        let (entries, total) = match server_state.db.load_project_history_grouped(
+            &project,
             limit,
             offset,
             start_date.as_deref(),
@@ -865,6 +855,7 @@ pub(crate) async fn get_project_history(
                 .into_response();
             }
         };
+        drop(server_state);
 
         // Convert to response entries
         let entries: Vec<WindowGroupEntryResponse> = entries
@@ -952,7 +943,9 @@ pub(crate) async fn get_project_history(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let (entries, total) = match pdb.load_history_paginated(
+    let server_state = state.state.lock().unwrap();
+    let (entries, total) = match server_state.db.load_project_history_paginated(
+        &project,
         limit,
         offset,
         start_date.as_deref(),
@@ -969,8 +962,9 @@ pub(crate) async fn get_project_history(
             .into_response();
         }
     };
+    drop(server_state);
 
-    // Convert project_db::HistoryEntry to main HistoryEntry
+    // Convert ProjectHistoryEntry to HistoryEntry
     let entries: Vec<HistoryEntry> = entries
         .into_iter()
         .map(|e| HistoryEntry {
@@ -1105,9 +1099,8 @@ pub(crate) struct GroupedDetailResponse {
 
 /// Get merged detail for multiple history entries (same session:window)
 ///
-/// IDs come from the per-project DB. We try loading detail data (messages, tools,
-/// commits) from the per-project DB first, then fall back to the main DB by
-/// matching on started_at timestamp.
+/// IDs come from the global DB (filtered by git_dir). Detail data (messages, tools,
+/// commits) is loaded from the global DB, with transcript parsing as fallback.
 pub(crate) async fn get_grouped_detail(
     State(state): State<Arc<AppState>>,
     Query(params): Query<GroupedDetailParams>,
@@ -1121,14 +1114,6 @@ pub(crate) async fn get_grouped_detail(
         })
     };
 
-    let pdb = match state.project_dbs.get_or_open(&params.project) {
-        Ok(db) => db,
-        Err(e) => {
-            error!("Failed to open project DB: {}", e);
-            return empty();
-        }
-    };
-
     let ids: Vec<i64> = params
         .ids
         .split(',')
@@ -1139,8 +1124,8 @@ pub(crate) async fn get_grouped_detail(
         return empty();
     }
 
-    // Step 1: Get segments from per-project DB
-    let pconn = pdb.conn();
+    // Step 1: Get segments from global DB
+    let server_state = state.state.lock().unwrap();
     let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let segment_sql = format!(
         "SELECT id, COALESCE(summary, ''), COALESCE(started_at, ''), COALESCE(completed_at, '')
@@ -1151,8 +1136,7 @@ pub(crate) async fn get_grouped_detail(
     let id_refs: Vec<&dyn rusqlite::ToSql> = id_params.iter().map(|p| p.as_ref()).collect();
 
     let mut segments: Vec<TaskSegment> = vec![];
-    let mut started_ats: Vec<String> = vec![]; // For main DB fallback lookup
-    if let Ok(mut stmt) = pconn.prepare(&segment_sql) {
+    if let Ok(mut stmt) = server_state.db.conn.prepare(&segment_sql) {
         if let Ok(rows) = stmt.query_map(id_refs.as_slice(), |row| {
             Ok((
                 row.get::<_, i64>(0).unwrap_or(0),
@@ -1162,7 +1146,6 @@ pub(crate) async fn get_grouped_detail(
             ))
         }) {
             for row in rows.flatten() {
-                started_ats.push(row.2.clone());
                 segments.push(TaskSegment {
                     history_id: row.0,
                     summary: row.1,
@@ -1176,11 +1159,11 @@ pub(crate) async fn get_grouped_detail(
     }
 
     if segments.is_empty() {
-        drop(pconn);
+        drop(server_state);
         return empty();
     }
 
-    // Step 2: Try loading messages from per-project DB first
+    // Step 2: Try loading messages from global DB
     let msg_sql = format!(
         "SELECT cm.role, cm.content, COALESCE(cm.created_at, ''), cm.history_id
          FROM conversation_messages cm
@@ -1191,7 +1174,7 @@ pub(crate) async fn get_grouped_detail(
         placeholders
     );
     let mut messages: Vec<GroupedMessage> = vec![];
-    if let Ok(mut stmt) = pconn.prepare(&msg_sql) {
+    if let Ok(mut stmt) = server_state.db.conn.prepare(&msg_sql) {
         if let Ok(rows) = stmt.query_map(id_refs.as_slice(), |row| {
             Ok(GroupedMessage {
                 role: row.get(0).unwrap_or_default(),
@@ -1206,7 +1189,7 @@ pub(crate) async fn get_grouped_detail(
         }
     }
 
-    // Load tool usage from per-project DB
+    // Load tool usage from global DB
     let tool_sql = format!(
         "SELECT tu.id, tu.tool_name, COALESCE(tu.tool_args, ''), COALESCE(tu.result_summary, ''), tu.success, COALESCE(tu.timestamp, ''), tu.history_id
          FROM tool_usage tu
@@ -1216,7 +1199,7 @@ pub(crate) async fn get_grouped_detail(
         placeholders
     );
     let mut tool_usage: Vec<GroupedToolUsage> = vec![];
-    if let Ok(mut stmt) = pconn.prepare(&tool_sql) {
+    if let Ok(mut stmt) = server_state.db.conn.prepare(&tool_sql) {
         if let Ok(rows) = stmt.query_map(id_refs.as_slice(), |row| {
             Ok(GroupedToolUsage {
                 id: row.get(0).unwrap_or(0),
@@ -1234,7 +1217,7 @@ pub(crate) async fn get_grouped_detail(
         }
     }
 
-    // Load commits from per-project DB
+    // Load commits from global DB
     let commit_sql = format!(
         "SELECT c.id, c.commit_hash, c.commit_message, c.files_changed, COALESCE(c.timestamp, ''), c.history_id
          FROM commits c
@@ -1244,7 +1227,7 @@ pub(crate) async fn get_grouped_detail(
         placeholders
     );
     let mut commits: Vec<GroupedCommit> = vec![];
-    if let Ok(mut stmt) = pconn.prepare(&commit_sql) {
+    if let Ok(mut stmt) = server_state.db.conn.prepare(&commit_sql) {
         if let Ok(rows) = stmt.query_map(id_refs.as_slice(), |row| {
             Ok(GroupedCommit {
                 id: row.get(0).unwrap_or(0),
@@ -1260,10 +1243,10 @@ pub(crate) async fn get_grouped_detail(
             }
         }
     }
-    drop(pconn);
+    drop(server_state);
 
     // Step 3: On-demand transcript parsing from Claude JSONL session files
-    // This is the primary data source — per-project DB and main DB rarely have cached messages
+    // This is the primary data source — global DB rarely has cached messages
     if messages.is_empty() {
         use std::io::{BufRead, BufReader};
         use chrono::{DateTime, Utc};
@@ -1820,18 +1803,38 @@ fn get_project_stats_from_db(
     cutoff_str: &str,
     hours: i64,
 ) -> (TaskStats, AgentTimeStats, Vec<ToolUsage>, Vec<HourlyActivity>) {
-    // Try to open the project-specific DB
-    let aitracker_dir = std::path::Path::new(git_dir).join(".aitracker");
-    let db_path = aitracker_dir.join("tracker.db");
+    // Query project stats from global DB filtered by git_dir
+    let conn = &server_state.db.conn;
 
-    if db_path.exists() {
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-            return query_stats_from_conn(&conn, cutoff_str, hours);
-        }
-    }
+    let completed: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM history WHERE completed_at >= ?1 AND git_dir = ?2",
+        rusqlite::params![cutoff_str, git_dir],
+        |row| row.get(0),
+    ).unwrap_or(0);
 
-    // Fallback to central DB stats
-    get_stats_from_central_db(server_state, "", cutoff_str, hours)
+    let total_duration: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(duration_seconds), 0) FROM history WHERE completed_at >= ?1 AND git_dir = ?2",
+        rusqlite::params![cutoff_str, git_dir],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    let tasks = TaskStats {
+        completed,
+        in_progress: 0,
+        failed: 0,
+        total: completed,
+        completion_rate: if completed > 0 { 100.0 } else { 0.0 },
+    };
+
+    let agent_time = AgentTimeStats {
+        total_seconds: total_duration,
+        busy_seconds: total_duration * 0.75,
+        idle_seconds: total_duration * 0.25,
+    };
+
+    let activity = get_hourly_activity(conn, cutoff_str, "", hours);
+
+    (tasks, agent_time, Vec::new(), activity)
 }
 
 fn get_stats_from_central_db(

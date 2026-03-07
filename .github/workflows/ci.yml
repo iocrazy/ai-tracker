@@ -62,3 +62,46 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  tauri-linux:
+    name: Tauri Build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tauri-menubar/src-tauri/target
+          key: ${{ runner.os }}-tauri-cargo-${{ hashFiles('tauri-menubar/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-tauri-cargo-
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        working-directory: web
+        run: npm ci && npm run build
+
+      - name: Install Tauri deps
+        working-directory: tauri-menubar
+        run: npm ci
+
+      - name: Build Tauri
+        working-directory: tauri-menubar
+        run: npx tauri build

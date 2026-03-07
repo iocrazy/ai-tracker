@@ -158,9 +158,9 @@ export function fromHistoryTimeline(entries: TimelineEntry[]): TimelineItem[] {
 interface ChatTimelineProps {
   items: TimelineItem[];
   /** For interactive buttons — pass session targeting info */
-  onInteractionSelect?: (msgIdx: number, optionIdx: number) => void;
+  onInteractionSelect?: (msgIdx: number, optionIdx: number, multiSelect: boolean, totalOptions: number) => void;
   /** For free-text input on interactive questions (Claude Code's "Type something") */
-  onInteractionTextSubmit?: (msgIdx: number, text: string, optionCount: number) => void;
+  onInteractionTextSubmit?: (msgIdx: number, text: string, optionCount: number, multiSelect: boolean) => void;
   sentInteractions?: Set<number>;
 }
 
@@ -265,14 +265,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                         <div key={qIdx} className="mt-2">
                           {q.header && <div className="text-[10px] sm:text-xs text-green-600 font-mono mb-1 uppercase tracking-wider">{q.header}</div>}
                           <div className="text-xs sm:text-sm text-green-400 mb-2">{q.question}</div>
+                          {/* Multi-select indicator */}
+                          {q.multi_select && (
+                            <div className="text-[10px] text-green-700 font-mono mb-1">[MULTI-SELECT]</div>
+                          )}
                           <div className="flex flex-col gap-1.5">
                             {q.options.map((opt, optIdx) => (
                               <button
                                 key={optIdx}
-                                disabled={sentInteractions.has(itemIdx)}
-                                onClick={() => onInteractionSelect?.(itemIdx, optIdx)}
+                                disabled={sentInteractions.has(itemIdx) || !onInteractionSelect}
+                                onClick={() => onInteractionSelect?.(itemIdx, optIdx, q.multi_select ?? false, q.options.length)}
                                 className={`text-left p-2 border font-mono text-xs sm:text-sm transition-colors ${
-                                  sentInteractions.has(itemIdx)
+                                  sentInteractions.has(itemIdx) || !onInteractionSelect
                                     ? 'border-green-900/50 text-green-800 cursor-default'
                                     : 'border-green-700/50 text-green-400 hover:border-green-500 hover:bg-green-900/20 cursor-pointer'
                                 }`}
@@ -284,7 +288,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             ))}
                           </div>
                           {/* Free text input + Chat about this (matches Claude Code's extra options) */}
-                          {!sentInteractions.has(itemIdx) && (
+                          {!sentInteractions.has(itemIdx) && onInteractionSelect && (
                             <div className="mt-2 flex flex-col gap-1.5">
                               <div className="flex gap-1.5">
                                 <input
@@ -295,7 +299,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   onKeyDown={(e) => {
                                     const text = customTexts[`${itemIdx}-${qIdx}`]?.trim();
                                     if (e.key === 'Enter' && text) {
-                                      onInteractionTextSubmit?.(itemIdx, text, q.options.length);
+                                      onInteractionTextSubmit?.(itemIdx, text, q.options.length, q.multi_select ?? false);
                                     }
                                   }}
                                   className="flex-1 bg-black border border-green-700/50 text-green-400 px-2 py-1.5 text-xs sm:text-sm font-mono placeholder:text-green-900 focus:border-green-500 focus:outline-none"
@@ -303,7 +307,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 <button
                                   onClick={() => {
                                     const text = customTexts[`${itemIdx}-${qIdx}`]?.trim();
-                                    if (text) onInteractionTextSubmit?.(itemIdx, text, q.options.length);
+                                    if (text) onInteractionTextSubmit?.(itemIdx, text, q.options.length, q.multi_select ?? false);
                                   }}
                                   className="px-3 py-1.5 border border-green-700/50 text-green-600 hover:text-green-400 hover:border-green-500 hover:bg-green-900/20 text-xs font-mono transition-colors"
                                 >
@@ -311,7 +315,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 </button>
                               </div>
                               <button
-                                onClick={() => onInteractionSelect?.(itemIdx, q.options.length + 1)}
+                                onClick={() => onInteractionSelect?.(itemIdx, q.options.length + 1, q.multi_select ?? false, q.options.length)}
                                 className="text-left p-2 border border-dashed border-green-900/50 text-green-700 hover:text-green-500 hover:border-green-700 text-xs font-mono transition-colors"
                               >
                                 <span className="text-green-800 mr-2">{q.options.length + 2}.</span>

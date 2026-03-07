@@ -17,7 +17,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
-import { fetchState, connectWebSocket, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, consumeTokenFromURL, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
+import { fetchState, connectWebSocket, disconnectWebSocket, getCurrentWs, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, consumeTokenFromURL, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 // localStorage cache keys
@@ -117,6 +117,9 @@ const App: React.FC = () => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
+  // Track time of last WS update (for staleness detection)
+  const lastWsUpdateRef = useRef<number>(Date.now());
+
   // Handle realtime updates from WebSocket (state + tmux_windows in one message)
   // Uses `changed` field to skip re-rendering unchanged sections
   const handleRealtimeUpdate = useCallback((msg: RealtimeMessage) => {
@@ -139,6 +142,7 @@ const App: React.FC = () => {
     setIsConnected(true);
     setUsingCache(false);
     latestStateRef.current = msg.state;
+    lastWsUpdateRef.current = Date.now();
 
     // Cache for offline use
     saveCache(msg.state, msg.tmux_windows);
@@ -278,45 +282,71 @@ const App: React.FC = () => {
     fetchProjects().then(p => setAllProjects(p))
       .catch(() => {});
 
-    // WebSocket for real-time updates (state + stream + chat)
-    wsRef.current = connectWebSocket({
+    // Shared WS callbacks
+    const wsCallbacks = {
       onStateUpdate: handleRealtimeUpdate,
       onStreamChunk: handleStreamChunk,
       onChatMessage: handleChatMessage,
-      onConnectionChange: (status, retry) => {
+      onConnectionChange: (status: ConnectionStatus, retry?: number) => {
         setConnStatus(status);
         setRetryCount(retry || 0);
-        if (status === 'connected') setIsConnected(true);
-        else setIsConnected(false);
+        setIsConnected(status === 'connected');
       },
-    });
+    };
 
-    // Reconnect immediately when tab becomes visible again
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && wsRef.current) {
-        const state = wsRef.current.readyState;
-        if (state === WebSocket.CLOSED || state === WebSocket.CLOSING) {
-          console.log('[WS] Tab visible, reconnecting...');
-          wsRef.current = connectWebSocket({
-            onStateUpdate: handleRealtimeUpdate,
-            onStreamChunk: handleStreamChunk,
-            onChatMessage: handleChatMessage,
-            onConnectionChange: (status, retry) => {
-              setConnStatus(status);
-              setRetryCount(retry || 0);
-              setIsConnected(status === 'connected');
-            },
-          });
+    // WebSocket for real-time updates (state + stream + chat)
+    wsRef.current = connectWebSocket(wsCallbacks);
+
+    // REST refresh helper — fetches fresh state + tmux windows from API
+    const refreshFromRest = async () => {
+      try {
+        const [state, tmuxWindows] = await Promise.all([fetchState(), fetchTmuxWindows()]);
+        latestStateRef.current = state;
+        if (tmuxWindows.length > 0) {
+          setSessions(mapTmuxToSessions(tmuxWindows, state.tasks));
+          saveCache(state, tmuxWindows);
         }
+        setTimeline(mapHistoryToTimeline(state.history));
+        setConsoleLogs(generateConsoleLogs(state));
+        setIsConnected(true);
+        setUsingCache(false);
+      } catch (err) {
+        console.error('[REST] Refresh failed:', err);
+      }
+    };
+
+    // Reconnect WS + refresh data when tab becomes visible
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+
+      // Always do a REST fetch to ensure fresh data when returning to the tab
+      refreshFromRest();
+
+      // Reconnect WS if needed (getCurrentWs checks the module-level tracked WS)
+      const currentWs = getCurrentWs();
+      if (!currentWs || currentWs.readyState === WebSocket.CLOSED || currentWs.readyState === WebSocket.CLOSING) {
+        console.log('[WS] Tab visible, reconnecting...');
+        wsRef.current = connectWebSocket(wsCallbacks);
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
+    // Staleness check: if no WS update for 60s, do a REST refresh as fallback
+    // NOTE: only does REST fetch here — WS reconnection is handled by onclose auto-reconnect
+    // and handleVisibility. Doing both caused a race condition (two connectWebSocket calls
+    // in quick succession, each killing the other's connection).
+    const stalenessInterval = setInterval(() => {
+      const elapsed = Date.now() - lastWsUpdateRef.current;
+      if (elapsed > 60_000) {
+        console.log(`[Staleness] No WS update for ${(elapsed / 1000).toFixed(0)}s, refreshing from REST`);
+        refreshFromRest();
+      }
+    }, 30_000);
+
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      clearInterval(stalenessInterval);
+      disconnectWebSocket();
     };
   }, [isAuthenticated, handleRealtimeUpdate, handleStreamChunk, handleChatMessage]);
 
@@ -632,7 +662,7 @@ const App: React.FC = () => {
   const fetchModalMessages = useCallback(async (sessionName: string, windowName: string, claudePane?: string) => {
     const session = sessions.find(s => s.name === sessionName);
     const win = session?.windows.find(w => w.name === windowName);
-    const isActive = win?.status === 'BUSY' || win?.status === 'PAUSED';
+    const isActive = !!win && win.status !== 'OFFLINE';
 
     const data = await fetchClaudeMessages(50, { session: sessionName, window: windowName, pane: claudePane || win?.claudePane });
     const messages: ChatMessage[] = data.messages.map(m => ({

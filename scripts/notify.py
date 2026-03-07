@@ -145,23 +145,6 @@ def main() -> int:
         except Exception:
             pass
 
-    args = [
-        "terminal-notifier",
-        "-title",
-        title,
-        "-subtitle",
-        subtitle,
-        "-message",
-        message,
-        "-sound",
-        "Blow",
-        "-group",
-        "codex",
-        "-ignoreDnD",
-        "-activate",
-        "com.googlecode.iterm2",
-    ]
-
     # Before showing the banner: tell the tracker server we responded,
     # attaching the assistant's response text as the completion note.
     if tmux_ids is not None and assistant_message:
@@ -190,17 +173,45 @@ def main() -> int:
         except Exception:
             pass
 
-    # On click: focus iTerm2 and switch tmux to the originating pane
-    if tmux_ids is not None:
-        sid, wid, pid = [s.strip() for s in tmux_ids]
-        switch_cmd = (
-            f"{shlex.quote(tmux_path)} switch-client -t {shlex.quote(sid)}"
-            f" && {shlex.quote(tmux_path)} select-window -t {shlex.quote(wid)}"
-            f" && {shlex.quote(tmux_path)} select-pane -t {shlex.quote(pid)}"
-        )
-        args += ["-execute", "sh -lc " + shlex.quote(switch_cmd)]
+    # Send desktop notification (platform-specific)
+    if sys.platform == "darwin":
+        args = [
+            "terminal-notifier",
+            "-title",
+            title,
+            "-subtitle",
+            subtitle,
+            "-message",
+            message,
+            "-sound",
+            "Blow",
+            "-group",
+            "codex",
+            "-ignoreDnD",
+            "-activate",
+            "com.googlecode.iterm2",
+        ]
 
-    subprocess.check_output(args)
+        # On click: focus iTerm2 and switch tmux to the originating pane
+        if tmux_ids is not None:
+            sid, wid, pid = [s.strip() for s in tmux_ids]
+            switch_cmd = (
+                f"{shlex.quote(tmux_path)} switch-client -t {shlex.quote(sid)}"
+                f" && {shlex.quote(tmux_path)} select-window -t {shlex.quote(wid)}"
+                f" && {shlex.quote(tmux_path)} select-pane -t {shlex.quote(pid)}"
+            )
+            args += ["-execute", "sh -lc " + shlex.quote(switch_cmd)]
+
+        subprocess.check_output(args)
+    else:
+        # Linux: use notify-send (libnotify)
+        notify_send = shutil.which("notify-send")
+        if notify_send:
+            body = f"{subtitle}\n{message}" if subtitle else message
+            subprocess.run(
+                [notify_send, "-a", "Agent Tracker", title, body],
+                check=False,
+            )
 
     return 0
 

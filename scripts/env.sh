@@ -15,7 +15,7 @@ TRACKER_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   3. ~/.config/agent-tracker/ (legacy/standalone)
 if [[ -n "${TRACKER_DATA_DIR:-}" ]]; then
     TRACKER_DATA="${TRACKER_DATA_DIR}"
-elif [[ -f "$HOME/Library/Application Support/com.agent-tracker.menubar/data/tracker.db" ]]; then
+elif [[ "$(uname)" == "Darwin" ]] && [[ -f "$HOME/Library/Application Support/com.agent-tracker.menubar/data/tracker.db" ]]; then
     TRACKER_DATA="$HOME/Library/Application Support/com.agent-tracker.menubar"
 else
     TRACKER_DATA="$HOME/.config/agent-tracker"

@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Tracker Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.config/agent-tracker/bin/tracker-server
+Environment=TRACKER_DATA_DIR=%h/.config/agent-tracker
+WorkingDirectory=%h/.config/agent-tracker
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

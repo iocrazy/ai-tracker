@@ -321,7 +321,7 @@ impl LayoutRenderer {
     /// Split window with percentage
     async fn split_window(target: &str, working_dir: &str, direction: &str, percent: u32) -> Result<()> {
         let dir_flag = if direction == "h" { "-h" } else { "-v" };
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "split-window",
                 dir_flag,
@@ -347,7 +347,7 @@ impl LayoutRenderer {
     /// Send keys to a pane using position specifier
     async fn send_keys_to_pane(target: &str, position: &str, cmd: &str) -> Result<()> {
         let pane_target = format!("{}.{}", target, position);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["send-keys", "-t", &pane_target, cmd, "Enter"])
             .output()
             .await
@@ -364,7 +364,7 @@ impl LayoutRenderer {
     /// Send keys to a pane by index
     async fn send_keys_to_pane_index(target: &str, index: u32, cmd: &str) -> Result<()> {
         let pane_target = format!("{}.{}", target, index);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["send-keys", "-t", &pane_target, cmd, "Enter"])
             .output()
             .await
@@ -381,7 +381,7 @@ impl LayoutRenderer {
     /// Select a pane using position specifier
     async fn select_pane(target: &str, position: &str) -> Result<()> {
         let pane_target = format!("{}.{}", target, position);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["select-pane", "-t", &pane_target])
             .output()
             .await
@@ -398,7 +398,7 @@ impl LayoutRenderer {
     /// Select a pane by index
     async fn select_pane_index(target: &str, index: u32) -> Result<()> {
         let pane_target = format!("{}.{}", target, index);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["select-pane", "-t", &pane_target])
             .output()
             .await

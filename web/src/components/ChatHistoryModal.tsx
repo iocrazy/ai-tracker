@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { X, MessageSquare, Send, Paperclip, XCircle } from 'lucide-react';
-import { tmuxSendKeys, sendImages, ToolInteraction, ToolCallInfo, ToolResultInfo } from '../services/api';
+import { tmuxSendKeys, tmuxSendRawKeys, sendImages, ToolInteraction, ToolCallInfo, ToolResultInfo } from '../services/api';
 import { ClaudeStatus } from '../types';
 import { ChatTimeline, fromLiveChatMessages } from './ChatTimeline';
 
@@ -37,6 +37,8 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const inputRef = useRef<HTMLInputElement>(null);
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
+  // Detect if session is live (has active Claude) vs archived (no Claude running)
+  const isLive = !subtitle?.includes('ARCHIVE');
   const [sendStatus, setSendStatus] = useState<SendStatus>('idle');
   const [isAtBottom, setIsAtBottom] = useState(true);  // Track if user is at bottom
   const [pendingImages, setPendingImages] = useState<{ file: File; preview: string }[]>([]);
@@ -294,29 +296,82 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
             )}
             <ChatTimeline
               items={fromLiveChatMessages(messages)}
-              onInteractionSelect={async (msgIdx, optIdx) => {
+              onInteractionSelect={isLive ? async (msgIdx, optIdx, multiSelect, totalOptions) => {
                 if (!sessionName || !windowId) return;
                 const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
-                await tmuxSendKeys(sessionName, windowId, targetPane, String(optIdx + 1), 'Enter');
-                setSentInteractions(prev => new Set(prev).add(msgIdx));
-              }}
-              onInteractionTextSubmit={async (msgIdx, text, optionCount) => {
+
+                try {
+                  if (multiSelect) {
+                    // Multi-select TUI: navigate with arrow keys + Space to toggle + Submit
+                    // Claude Code's multi-select layout (cursor starts at first option):
+                    //   pos 0..N-1: user options (with [ ] checkboxes)
+                    //   pos N:      "Type something"
+                    //   pos N+1:    Submit
+                    //   pos N+2:    "Chat about this"
+                    const keys: string[] = [];
+
+                    if (optIdx === totalOptions + 1) {
+                      // "Chat about this" — navigate to pos N+2 and Enter
+                      for (let i = 0; i < totalOptions + 2; i++) keys.push('Down');
+                      keys.push('Enter');
+                    } else {
+                      // Regular option: navigate to it, toggle, then navigate to Submit
+                      for (let i = 0; i < optIdx; i++) keys.push('Down');
+                      keys.push('Space');
+                      // Navigate from current pos to Submit (pos N+1)
+                      const stepsToSubmit = totalOptions + 1 - optIdx;
+                      for (let i = 0; i < stepsToSubmit; i++) keys.push('Down');
+                      keys.push('Enter');
+                    }
+
+                    await tmuxSendRawKeys(sessionName, windowId, targetPane, keys);
+                  } else {
+                    // Single-select: send option number + Enter
+                    await tmuxSendKeys(sessionName, windowId, targetPane, String(optIdx + 1), 'Enter');
+                  }
+
+                  setSentInteractions(prev => new Set(prev).add(msgIdx));
+                } catch (err) {
+                  console.error('Failed to send interaction:', err);
+                }
+              } : undefined}
+              onInteractionTextSubmit={isLive ? async (msgIdx, text, optionCount, multiSelect) => {
                 if (!sessionName || !windowId) return;
                 const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
-                // Select "Other" option (options count + 1 in Claude Code's prompt)
-                await tmuxSendKeys(sessionName, windowId, targetPane, String(optionCount + 1), 'Enter');
-                // Wait for Claude Code to show text input prompt
-                await new Promise(resolve => setTimeout(resolve, 500));
-                // Send the typed text
-                await tmuxSendKeys(sessionName, windowId, targetPane, text, 'Enter');
-                setSentInteractions(prev => new Set(prev).add(msgIdx));
-              }}
+
+                try {
+                  if (multiSelect) {
+                    // Multi-select: navigate to "Type something" (pos N), toggle, go to Submit, Enter
+                    const keys: string[] = [];
+                    for (let i = 0; i < optionCount; i++) keys.push('Down');
+                    keys.push('Space');  // Toggle "Type something"
+                    keys.push('Down');   // Move to Submit
+                    keys.push('Enter');  // Press Submit
+                    await tmuxSendRawKeys(sessionName, windowId, targetPane, keys);
+                    // Wait for Claude Code to show text input prompt
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    // Send the typed text
+                    await tmuxSendKeys(sessionName, windowId, targetPane, text, 'Enter');
+                  } else {
+                    // Single-select: select "Other" option (options count + 1 in Claude Code's prompt)
+                    await tmuxSendKeys(sessionName, windowId, targetPane, String(optionCount + 1), 'Enter');
+                    // Wait for Claude Code to show text input prompt
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    // Send the typed text
+                    await tmuxSendKeys(sessionName, windowId, targetPane, text, 'Enter');
+                  }
+
+                  setSentInteractions(prev => new Set(prev).add(msgIdx));
+                } catch (err) {
+                  console.error('Failed to send interaction text:', err);
+                }
+              } : undefined}
               sentInteractions={sentInteractions}
             />
         </div>
 
-        {/* Input Area */}
-        {sessionName && windowId && (
+        {/* Input Area — only shown for live sessions */}
+        {isLive && sessionName && windowId && (
           <div className="p-2 sm:p-3 border-t border-green-800 bg-green-900/10 flex-shrink-0">
             {/* Image previews */}
             {pendingImages.length > 0 && (

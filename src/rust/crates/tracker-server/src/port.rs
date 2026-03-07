@@ -196,7 +196,7 @@ impl PortManager {
     /// Get the tmux window index for a given session and window
     pub async fn get_window_index(session: &str, window: &str) -> Result<u32> {
         let target = format!("{}:{}", session, window);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["display-message", "-t", &target, "-p", "#{window_index}"])
             .output()
             .await

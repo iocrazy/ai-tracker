@@ -7,6 +7,7 @@
 //! Handles creating tmux sessions, windows, and panes for agent workspaces.
 
 use std::path::Path;
+use std::sync::LazyLock;
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -14,8 +15,32 @@ use tokio::process::Command;
 
 use crate::config::{AgentDef, LayoutConfig, PaneConfig};
 
-/// tmux binary path (Homebrew on macOS)
-pub const TMUX_BIN: &str = "/opt/homebrew/bin/tmux";
+/// tmux binary path — resolved at first use via $PATH, with platform fallback
+pub static TMUX_BIN: LazyLock<String> = LazyLock::new(|| {
+    if let Ok(output) = std::process::Command::new("which").arg("tmux").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    if cfg!(target_os = "macos") {
+        "/opt/homebrew/bin/tmux".to_string()
+    } else {
+        "/usr/bin/tmux".to_string()
+    }
+});
+
+/// Default tmux socket path — resolved per platform using current UID
+pub static TMUX_SOCKET: LazyLock<String> = LazyLock::new(|| {
+    let uid = unsafe { libc::getuid() };
+    if cfg!(target_os = "macos") {
+        format!("/private/tmp/tmux-{}/default", uid)
+    } else {
+        format!("/tmp/tmux-{}/default", uid)
+    }
+});
 
 /// Information about an active agent window (branch)
 #[derive(Debug, Clone, Serialize)]
@@ -81,7 +106,7 @@ impl TmuxAgent {
     /// Find the actual tmux session name by workspace label
     /// Handles numbered prefix from tmux session manager (e.g., "5-workspace")
     async fn find_session(workspace: &str) -> Option<String> {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["list-sessions", "-F", "#{session_name}"])
             .output()
             .await
@@ -118,7 +143,7 @@ impl TmuxAgent {
 
     /// Check if a window exists in a session
     pub async fn window_exists(session: &str, window: &str) -> bool {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "list-windows",
                 "-t",
@@ -195,7 +220,7 @@ impl TmuxAgent {
         }
 
         // Create session with empty shell first
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "new-session",
                 "-d", // detached
@@ -290,7 +315,7 @@ impl TmuxAgent {
         }
 
         // Create new window with empty shell
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "new-window",
                 "-t",
@@ -381,7 +406,7 @@ impl TmuxAgent {
     ) -> Result<()> {
         let dir_flag = if direction == "h" { "-h" } else { "-v" };
         let percent_str = format!("{}", percent);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "split-window",
                 dir_flag,
@@ -406,7 +431,7 @@ impl TmuxAgent {
 
     /// Send keys to a pane (like tmux send-keys)
     async fn send_keys(target: &str, cmd: &str) -> Result<()> {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["send-keys", "-t", target, cmd, "Enter"])
             .output()
             .await
@@ -422,7 +447,7 @@ impl TmuxAgent {
 
     /// Select a pane
     async fn select_pane(target: &str) -> Result<()> {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["select-pane", "-t", target])
             .output()
             .await
@@ -440,7 +465,7 @@ impl TmuxAgent {
     async fn send_keys_to_position(window_target: &str, position: &str, cmd: &str) -> Result<()> {
         // Format: session:window.{position}
         let target = format!("{}.{{{}}}", window_target, position);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["send-keys", "-t", &target, cmd, "Enter"])
             .output()
             .await
@@ -457,7 +482,7 @@ impl TmuxAgent {
     /// Select a pane using relative position
     async fn select_pane_position(window_target: &str, position: &str) -> Result<()> {
         let target = format!("{}.{{{}}}", window_target, position);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["select-pane", "-t", &target])
             .output()
             .await
@@ -478,7 +503,7 @@ impl TmuxAgent {
             .await
             .unwrap_or_else(|| session.to_string());
 
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["new-window", "-t", &actual_session, "-n", name])
             .output()
             .await
@@ -498,7 +523,7 @@ impl TmuxAgent {
             .await
             .unwrap_or_else(|| session.to_string());
 
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["new-window", "-t", &actual_session, "-n", name, "-c", working_dir])
             .output()
             .await
@@ -524,7 +549,7 @@ impl TmuxAgent {
         let target = format!("{}:{}", session_name, window_name);
 
         // Kill the window
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["kill-window", "-t", &target])
             .output()
             .await
@@ -546,7 +571,7 @@ impl TmuxAgent {
             None => bail!("Session for workspace '{}' not found", workspace),
         };
 
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["kill-session", "-t", &session_name])
             .output()
             .await
@@ -574,7 +599,7 @@ impl TmuxAgent {
 
         // Use switch-client to switch to the target session:window
         // This works across sessions (unlike select-window which only works within current session)
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["switch-client", "-t", &target])
             .output()
             .await
@@ -607,7 +632,7 @@ impl TmuxAgent {
         };
 
         // Use switch-client to switch to the target session:window
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["switch-client", "-t", &target])
             .output()
             .await
@@ -637,8 +662,8 @@ impl TmuxAgent {
     #[cfg(target_os = "macos")]
     async fn detect_terminal_app() -> String {
         // Get tmux client PID
-        let client_pid = Command::new(TMUX_BIN)
-            .args(["-S", "/private/tmp/tmux-501/default", "display-message", "-p", "#{client_pid}"])
+        let client_pid = Command::new(TMUX_BIN.as_str())
+            .args(["-S", TMUX_SOCKET.as_str(), "display-message", "-p", "#{client_pid}"])
             .output()
             .await
             .ok()
@@ -679,7 +704,7 @@ impl TmuxAgent {
 
     /// List all agent windows across all workspace sessions
     pub async fn list_windows() -> Result<Vec<AgentSession>> {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "list-windows",
                 "-a", // all sessions
@@ -777,7 +802,7 @@ impl TmuxAgent {
             args.push("C-m");  // C-m is the correct way to send Enter in tmux
         }
 
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(&args)
             .output()
             .await
@@ -818,32 +843,35 @@ impl TmuxAgent {
         };
 
         // Step 0: Exit copy-mode if active (prevents / from triggering search in copy-mode-vi)
-        let _ = Command::new(TMUX_BIN)
+        let _ = Command::new(TMUX_BIN.as_str())
             .args(["send-keys", "-t", &target, "-X", "cancel"])
             .output()
             .await;
 
         // Step 1: Send text with -l flag (literal mode, no special char interpretation)
+        // Skip when keys is empty (e.g., raw key-only sends like Down/Space/Enter)
         tracing::info!("send_keys_with_suffix: target={}, keys={}, suffix={:?}", target, keys, suffix_key);
 
-        let output = Command::new(TMUX_BIN)
-            .args(["send-keys", "-t", &target, "-l", keys])
-            .output()
-            .await
-            .context("Failed to send keys to tmux pane")?;
+        if !keys.is_empty() {
+            let output = Command::new(TMUX_BIN.as_str())
+                .args(["send-keys", "-t", &target, "-l", keys])
+                .output()
+                .await
+                .context("Failed to send keys to tmux pane")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tmux send-keys (text) failed: {}", stderr);
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("tmux send-keys (text) failed: {}", stderr);
+            }
+            tracing::info!("send_keys_with_suffix: text sent successfully");
         }
-        tracing::info!("send_keys_with_suffix: text sent successfully");
 
         // Step 2: Send suffix key separately (if provided)
         // Add small delay to ensure text is processed before sending key
         if let Some(key) = suffix_key {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-            let output = Command::new(TMUX_BIN)
+            let output = Command::new(TMUX_BIN.as_str())
                 .args(["send-keys", "-t", &target, key])
                 .output()
                 .await
@@ -889,7 +917,7 @@ impl TmuxAgent {
             args.push(format!("-{}", n)); // -S -N means start N lines from end
         }
 
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(&args)
             .output()
             .await
@@ -961,7 +989,7 @@ impl TmuxAgent {
         };
 
         // List panes with their current command and pane ID
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["list-panes", "-t", &target, "-F", "#{pane_id} #{pane_current_command}"])
             .output()
             .await
@@ -1006,7 +1034,7 @@ impl TmuxAgent {
         window_name: &str,
     ) -> Option<String> {
         // List all windows to find the one matching by name
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "list-windows", "-t", actual_session,
                 "-F", "#{window_id} #{window_name}",
@@ -1031,7 +1059,7 @@ impl TmuxAgent {
 
         // Now list panes using window ID (safe, no dot issues)
         let target = format!("{}:{}", actual_session, window_id);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["list-panes", "-t", &target, "-F", "#{pane_id} #{pane_current_command}"])
             .output()
             .await
@@ -1228,7 +1256,7 @@ impl TmuxAgent {
 
     /// List all tmux sessions with their windows
     pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "list-sessions",
                 "-F",
@@ -1269,7 +1297,7 @@ impl TmuxAgent {
 
         let target = format!("{}:{}", actual_session, window);
 
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "list-panes",
                 "-t",
@@ -1317,7 +1345,7 @@ impl TmuxAgent {
         let mut window_map = std::collections::HashMap::new();
 
         // Get session mappings: session_id -> session_name
-        if let Ok(output) = std::process::Command::new(TMUX_BIN)
+        if let Ok(output) = std::process::Command::new(TMUX_BIN.as_str())
             .args(["list-sessions", "-F", "#{session_id}:#{session_name}"])
             .output()
         {
@@ -1332,7 +1360,7 @@ impl TmuxAgent {
         }
 
         // Get window mappings: window_id -> window_name
-        if let Ok(output) = std::process::Command::new(TMUX_BIN)
+        if let Ok(output) = std::process::Command::new(TMUX_BIN.as_str())
             .args([
                 "list-windows",
                 "-a",
@@ -1357,9 +1385,9 @@ impl TmuxAgent {
     /// List all tmux windows with full details (session_id, window_id, names)
     pub async fn list_all_windows() -> Result<Vec<TmuxWindowInfo>> {
         // Use pipe separator and explicit socket path for launchd compatibility
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
-                "-S", "/private/tmp/tmux-501/default",
+                "-S", TMUX_SOCKET.as_str(),
                 "list-windows",
                 "-a",
                 "-F",
@@ -1445,9 +1473,9 @@ impl TmuxAgent {
             let src_target = format!("{}:{}", session, current);
             let dst_target = format!("{}:{}", session, next);
 
-            let output = Command::new(TMUX_BIN)
+            let output = Command::new(TMUX_BIN.as_str())
                 .args([
-                    "-S", "/private/tmp/tmux-501/default",
+                    "-S", TMUX_SOCKET.as_str(),
                     "swap-window",
                     "-s", &src_target,
                     "-t", &dst_target,
@@ -1469,9 +1497,9 @@ impl TmuxAgent {
 
     /// Set a built-in tmux window option (e.g. automatic-rename, allow-rename)
     pub async fn set_builtin_window_option(target: &str, key: &str, value: &str) -> Result<()> {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
-                "-S", "/private/tmp/tmux-501/default",
+                "-S", TMUX_SOCKET.as_str(),
                 "set-option", "-w", "-t", target, key, value,
             ])
             .output()
@@ -1498,9 +1526,9 @@ impl TmuxAgent {
         }
 
         // Fall back to first pane's current path
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
-                "-S", "/private/tmp/tmux-501/default",
+                "-S", TMUX_SOCKET.as_str(),
                 "display-message",
                 "-t", &format!("{}:0.0", session_id),
                 "-p",
@@ -1524,7 +1552,7 @@ impl TmuxAgent {
     /// Find git root directory from a given path
     async fn find_git_root(path: &str) -> Option<String> {
         // Use --show-toplevel first, then check if we're in a worktree.
-        // For worktrees, resolve to the main repo root so .aitracker is shared.
+        // For worktrees, resolve to the main repo root so git_dir is consistent.
         let output = Command::new("git")
             .args(["-C", path, "rev-parse", "--show-toplevel"])
             .output()
@@ -1565,9 +1593,9 @@ impl TmuxAgent {
     pub fn list_all_windows_sync() -> Vec<TmuxWindowInfo> {
         // Use pipe separator instead of tab to avoid shell escaping issues
         // Use explicit socket path with /private/tmp to work with launchd
-        let output = std::process::Command::new(TMUX_BIN)
+        let output = std::process::Command::new(TMUX_BIN.as_str())
             .args([
-                "-S", "/private/tmp/tmux-501/default",
+                "-S", TMUX_SOCKET.as_str(),
                 "list-windows",
                 "-a",
                 "-F",
@@ -1581,7 +1609,7 @@ impl TmuxAgent {
                 let stderr_str = String::from_utf8_lossy(&out.stderr);
                 // Log first line to see the format
                 if let Some(first_line) = stdout_str.lines().next() {
-                    tracing::info!("tmux list-windows: status={}, first_line={:?}, stderr={}",
+                    tracing::debug!("tmux list-windows: status={}, first_line={:?}, stderr={}",
                         out.status, first_line, stderr_str);
                 }
             }
@@ -1643,16 +1671,27 @@ impl TmuxAgent {
                     })
                     .collect()
             }
-            _ => Vec::new(),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!(
+                    "tmux list-windows failed: exit={}, stderr={}",
+                    output.status, stderr
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::error!("tmux list-windows command error: {}", e);
+                Vec::new()
+            }
         }
     }
 
     /// Synchronous version of get_session_git_dir
     fn get_session_git_dir_sync(session_id: &str) -> Option<String> {
         // Get first pane's current path
-        let output = std::process::Command::new(TMUX_BIN)
+        let output = std::process::Command::new(TMUX_BIN.as_str())
             .args([
-                "-S", "/private/tmp/tmux-501/default",
+                "-S", TMUX_SOCKET.as_str(),
                 "display-message",
                 "-t", &format!("{}:0.0", session_id),
                 "-p",
@@ -1713,7 +1752,7 @@ impl TmuxAgent {
     /// Format: tmux set-option -w -t {target} @{key} "{value}"
     pub async fn set_window_option(target: &str, key: &str, value: &str) -> Result<()> {
         let option_name = format!("@{}", key);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["set-option", "-w", "-t", target, &option_name, value])
             .output()
             .await
@@ -1733,7 +1772,7 @@ impl TmuxAgent {
     /// Returns None if option is not set
     pub async fn get_window_option(target: &str, key: &str) -> Result<Option<String>> {
         let format_str = format!("#{{@{}}}", key);
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["display-message", "-t", target, "-p", &format_str])
             .output()
             .await
@@ -1765,7 +1804,7 @@ impl TmuxAgent {
     /// Rename a tmux window
     /// Format: tmux rename-window -t {target} "{name}"
     pub async fn rename_window(target: &str, name: &str) -> Result<()> {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["rename-window", "-t", target, name])
             .output()
             .await
@@ -1782,7 +1821,7 @@ impl TmuxAgent {
     /// Rename a tmux session
     /// Format: tmux rename-session -t {target} "{name}"
     pub async fn rename_session(target: &str, name: &str) -> Result<()> {
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args(["rename-session", "-t", target, name])
             .output()
             .await
@@ -1852,7 +1891,7 @@ impl TmuxAgent {
 
     /// Get window name synchronously (for fallback)
     fn get_window_name_sync(target: &str) -> String {
-        std::process::Command::new(TMUX_BIN)
+        std::process::Command::new(TMUX_BIN.as_str())
             .args(["display-message", "-t", target, "-p", "#{window_name}"])
             .output()
             .ok()
@@ -1938,7 +1977,7 @@ impl TmuxAgent {
         };
 
         // List panes with pane_id, command, and current_path
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "list-panes", "-t", &target,
                 "-F", "#{pane_id} #{pane_current_command} #{pane_current_path}",
@@ -1987,7 +2026,7 @@ impl TmuxAgent {
         // Kill all panes except the agent pane
         for (id, _, _) in &panes {
             if *id != agent_pane_id {
-                let _ = Command::new(TMUX_BIN)
+                let _ = Command::new(TMUX_BIN.as_str())
                     .args(["kill-pane", "-t", id])
                     .output()
                     .await;
@@ -2002,7 +2041,7 @@ impl TmuxAgent {
         // Split to create the default layout: left 30% (yazi + lazygit), right 70% (agent)
 
         // Create left pane: split horizontally, new pane to the left (-b), 30% width
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "split-window", "-h", "-b", "-p", "30",
                 "-t", &target,
@@ -2020,7 +2059,7 @@ impl TmuxAgent {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Split the left pane vertically: top for yazi, bottom for lazygit
-        let output = Command::new(TMUX_BIN)
+        let output = Command::new(TMUX_BIN.as_str())
             .args([
                 "split-window", "-v", "-p", "50",
                 "-t", &format!("{}.{{left}}", target),
@@ -2038,19 +2077,19 @@ impl TmuxAgent {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Start yazi in top-left
-        let _ = Command::new(TMUX_BIN)
+        let _ = Command::new(TMUX_BIN.as_str())
             .args(["send-keys", "-t", &format!("{}.{{top-left}}", target), "yazi", "Enter"])
             .output()
             .await;
 
         // Start lazygit in bottom-left
-        let _ = Command::new(TMUX_BIN)
+        let _ = Command::new(TMUX_BIN.as_str())
             .args(["send-keys", "-t", &format!("{}.{{bottom-left}}", target), "lazygit", "Enter"])
             .output()
             .await;
 
         // Focus on the agent pane (right)
-        let _ = Command::new(TMUX_BIN)
+        let _ = Command::new(TMUX_BIN.as_str())
             .args(["select-pane", "-t", &format!("{}.{{right}}", target)])
             .output()
             .await;

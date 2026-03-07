@@ -9,11 +9,145 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
-use tracing::info;
+use tracing::{info, debug, warn};
 
 use tracker_core::{ConversationMessage, GitCommit, Goal, HistoryRecord, Note, NoteScope, Task, TaskStatus, ToolUsage};
 
-use crate::project_db;
+// =============================================================================
+// Shared free functions (used by Database methods)
+// =============================================================================
+
+/// Archive a completed task to history (with 60-min merge window).
+/// The `git_dir` parameter tags the record for project-filtered queries.
+pub fn archive_to_history_on(conn: &Connection, task: &Task, git_dir: &str) -> Result<i64> {
+    let recent_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM history
+             WHERE session_id = ?1 AND window_id = ?2 AND pane = ?3
+               AND completed_at > datetime('now', '-60 minutes')
+             ORDER BY id DESC LIMIT 1",
+            params![task.session_id, task.window_id, task.pane],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(id) = recent_id {
+        conn.execute(
+            "UPDATE history SET
+                summary = CASE WHEN LENGTH(?1) > LENGTH(summary) THEN ?1 ELSE summary END,
+                completion_note = CASE WHEN ?2 != '' THEN ?2 ELSE completion_note END,
+                completed_at = ?3,
+                duration_seconds = ?4,
+                transcript_path = CASE WHEN ?5 != '' THEN ?5 ELSE transcript_path END,
+                todo_id = CASE WHEN ?7 IS NOT NULL THEN ?7 ELSE todo_id END,
+                git_dir = CASE WHEN ?8 != '' THEN ?8 ELSE git_dir END
+             WHERE id = ?6",
+            params![
+                task.summary,
+                task.completion_note,
+                task.completed_at.map(|t| t.to_rfc3339()),
+                task.duration_seconds,
+                task.transcript_path,
+                id,
+                task.todo_id,
+                git_dir,
+            ],
+        )?;
+        let _ = conn.execute("DELETE FROM conversation_messages WHERE history_id = ?", [id]);
+        let _ = conn.execute("DELETE FROM tool_usage WHERE history_id = ?", [id]);
+        let _ = conn.execute("DELETE FROM commits WHERE history_id = ?", [id]);
+        Ok(id)
+    } else {
+        conn.execute(
+            "INSERT INTO history
+             (session_id, session, window_id, window, pane, summary,
+              completion_note, started_at, completed_at, duration_seconds, transcript_path, todo_id, git_dir)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                task.session_id,
+                task.session,
+                task.window_id,
+                task.window,
+                task.pane,
+                task.summary,
+                task.completion_note,
+                task.started_at.map(|t| t.to_rfc3339()),
+                task.completed_at.map(|t| t.to_rfc3339()),
+                task.duration_seconds,
+                task.transcript_path,
+                task.todo_id,
+                git_dir,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+}
+
+/// Save conversation messages for a history entry.
+pub fn save_conversation_messages_on(
+    conn: &Connection,
+    history_id: i64,
+    messages: &[ConversationMessage],
+) -> Result<()> {
+    for msg in messages {
+        conn.execute(
+            "INSERT INTO conversation_messages (history_id, role, content, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                history_id,
+                msg.role,
+                msg.content,
+                msg.created_at.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Save tool usage records for a history entry.
+pub fn save_tool_usage_on(
+    conn: &Connection,
+    history_id: i64,
+    tool_usages: &[ToolUsage],
+) -> Result<()> {
+    for usage in tool_usages {
+        conn.execute(
+            "INSERT INTO tool_usage (history_id, tool_name, tool_args, result_summary, success, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                history_id,
+                usage.tool_name,
+                usage.tool_args,
+                usage.result_summary,
+                usage.success as i32,
+                usage.timestamp.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Save git commit records for a history entry.
+pub fn save_commits_on(
+    conn: &Connection,
+    history_id: i64,
+    commits: &[GitCommit],
+) -> Result<()> {
+    for commit in commits {
+        conn.execute(
+            "INSERT INTO commits (history_id, commit_hash, commit_message, files_changed, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                history_id,
+                commit.commit_hash,
+                commit.commit_message,
+                commit.files_changed,
+                commit.timestamp.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+    }
+    Ok(())
+}
 
 /// Database wrapper with SQLite change tracking
 pub struct Database {
@@ -36,7 +170,7 @@ impl Database {
         let changed = Arc::new(Mutex::new(HashSet::new()));
         let changed_clone = changed.clone();
         conn.update_hook(Some(move |_action: rusqlite::hooks::Action, _db: &str, table: &str, _rowid: i64| {
-            if matches!(table, "tasks" | "notes" | "goals") {
+            if matches!(table, "tasks" | "notes" | "goals" | "history" | "closed_windows") {
                 if let Ok(mut set) = changed_clone.lock() {
                     set.insert(table.to_string());
                 }
@@ -398,6 +532,16 @@ impl Database {
             )"),
             (11, "ALTER TABLE history ADD COLUMN todo_id INTEGER DEFAULT NULL"),
             (12, "ALTER TABLE tasks ADD COLUMN todo_id INTEGER DEFAULT NULL"),
+            // Phase: Merge per-project DBs into global DB — add git_dir columns
+            (13, "ALTER TABLE history ADD COLUMN git_dir TEXT DEFAULT ''"),
+            (14, "ALTER TABLE notes ADD COLUMN git_dir TEXT DEFAULT ''"),
+            (15, "ALTER TABLE goals ADD COLUMN git_dir TEXT DEFAULT ''"),
+            (16, "ALTER TABLE closed_windows ADD COLUMN git_dir TEXT DEFAULT ''"),
+            // Indexes for project-filtered queries
+            (17, "CREATE INDEX IF NOT EXISTS idx_history_git_dir ON history(git_dir)"),
+            (18, "CREATE INDEX IF NOT EXISTS idx_notes_git_dir ON notes(git_dir)"),
+            (19, "CREATE INDEX IF NOT EXISTS idx_goals_git_dir ON goals(git_dir)"),
+            (20, "CREATE INDEX IF NOT EXISTS idx_closed_windows_git_dir ON closed_windows(git_dir)"),
         ];
 
         for (version, sql) in migrations {
@@ -411,7 +555,204 @@ impl Database {
             }
         }
 
-        info!("Database schema initialized");
+        debug!("Database schema initialized");
+
+        // Backfill git_dir from per-project .aitracker DBs (one-time migration)
+        self.backfill_from_project_dbs()?;
+
+        Ok(())
+    }
+
+    /// One-time migration: import data from existing .aitracker/tracker.db files
+    /// into the global DB with proper git_dir set. Skips if already done (checks
+    /// for schema_version 100 marker).
+    fn backfill_from_project_dbs(&self) -> Result<()> {
+        // Check if backfill already completed
+        let done: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM schema_version WHERE version = 100",
+            [], |row| row.get(0),
+        ).unwrap_or(false);
+        if done { return Ok(()); }
+
+        // Get all known project git_dirs
+        let mut stmt = self.conn.prepare("SELECT git_dir FROM projects")?;
+        let git_dirs: Vec<String> = stmt.query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        let mut total_imported = 0;
+
+        for git_dir in &git_dirs {
+            let db_path = std::path::Path::new(git_dir).join(".aitracker/tracker.db");
+            if !db_path.exists() { continue; }
+
+            let pconn = match Connection::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Backfill: failed to open {}: {}", db_path.display(), e);
+                    continue;
+                }
+            };
+
+            // Import history records (deduplicate by started_at + session_id)
+            if let Ok(mut pstmt) = pconn.prepare(
+                "SELECT session_id, COALESCE(session, ''), window_id, COALESCE(window, ''),
+                        COALESCE(pane, ''), COALESCE(summary, ''), COALESCE(completion_note, ''),
+                        started_at, completed_at, duration_seconds, COALESCE(transcript_path, ''),
+                        COALESCE(todo_id, 0)
+                 FROM history"
+            ) {
+                if let Ok(rows) = pstmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0).unwrap_or_default(),
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, String>(2).unwrap_or_default(),
+                        row.get::<_, String>(3).unwrap_or_default(),
+                        row.get::<_, String>(4).unwrap_or_default(),
+                        row.get::<_, String>(5).unwrap_or_default(),
+                        row.get::<_, String>(6).unwrap_or_default(),
+                        row.get::<_, String>(7).unwrap_or_default(),
+                        row.get::<_, String>(8).unwrap_or_default(),
+                        row.get::<_, f64>(9).unwrap_or(0.0),
+                        row.get::<_, String>(10).unwrap_or_default(),
+                        row.get::<_, i64>(11).unwrap_or(0),
+                    ))
+                }) {
+                    for row in rows.flatten() {
+                        // Check if this record already exists in global DB
+                        let exists: bool = self.conn.query_row(
+                            "SELECT COUNT(*) > 0 FROM history
+                             WHERE session_id = ?1 AND started_at = ?2",
+                            params![row.0, row.7],
+                            |r| r.get(0),
+                        ).unwrap_or(true);
+
+                        if !exists {
+                            let _ = self.conn.execute(
+                                "INSERT INTO history
+                                 (session_id, session, window_id, window, pane, summary,
+                                  completion_note, started_at, completed_at, duration_seconds,
+                                  transcript_path, todo_id, git_dir)
+                                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                                params![row.0, row.1, row.2, row.3, row.4, row.5,
+                                        row.6, row.7, row.8, row.9, row.10, row.11,
+                                        git_dir],
+                            );
+                            total_imported += 1;
+                        } else {
+                            // Update git_dir if empty on existing record
+                            let _ = self.conn.execute(
+                                "UPDATE history SET git_dir = ?1
+                                 WHERE session_id = ?2 AND started_at = ?3
+                                   AND (git_dir IS NULL OR git_dir = '')",
+                                params![git_dir, row.0, row.7],
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Import notes (deduplicate by id)
+            if let Ok(mut pstmt) = pconn.prepare(
+                "SELECT id, session_id, scope, content, archived, completed, created_at, updated_at
+                 FROM notes"
+            ) {
+                if let Ok(rows) = pstmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0).unwrap_or_default(),
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, String>(2).unwrap_or_default(),
+                        row.get::<_, String>(3).unwrap_or_default(),
+                        row.get::<_, i32>(4).unwrap_or(0),
+                        row.get::<_, i32>(5).unwrap_or(0),
+                        row.get::<_, String>(6).unwrap_or_default(),
+                        row.get::<_, String>(7).unwrap_or_default(),
+                    ))
+                }) {
+                    for row in rows.flatten() {
+                        // Update git_dir on existing note if empty
+                        let updated = self.conn.execute(
+                            "UPDATE notes SET git_dir = ?1
+                             WHERE id = ?2 AND (git_dir IS NULL OR git_dir = '')",
+                            params![git_dir, row.0],
+                        ).unwrap_or(0);
+                        if updated == 0 {
+                            // Check if exists at all
+                            let exists: bool = self.conn.query_row(
+                                "SELECT COUNT(*) > 0 FROM notes WHERE id = ?1",
+                                params![row.0], |r| r.get(0),
+                            ).unwrap_or(false);
+                            if !exists {
+                                let _ = self.conn.execute(
+                                    "INSERT INTO notes (id, session_id, scope, content, archived,
+                                     completed, created_at, updated_at, git_dir)
+                                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                                    params![row.0, row.1, row.2, row.3, row.4,
+                                            row.5, row.6, row.7, git_dir],
+                                );
+                                total_imported += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Import goals (deduplicate by id)
+            if let Ok(mut pstmt) = pconn.prepare(
+                "SELECT id, session_id, content, completed, created_at, updated_at
+                 FROM goals"
+            ) {
+                if let Ok(rows) = pstmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0).unwrap_or_default(),
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, String>(2).unwrap_or_default(),
+                        row.get::<_, i32>(3).unwrap_or(0),
+                        row.get::<_, String>(4).unwrap_or_default(),
+                        row.get::<_, String>(5).unwrap_or_default(),
+                    ))
+                }) {
+                    for row in rows.flatten() {
+                        let updated = self.conn.execute(
+                            "UPDATE goals SET git_dir = ?1
+                             WHERE id = ?2 AND (git_dir IS NULL OR git_dir = '')",
+                            params![git_dir, row.0],
+                        ).unwrap_or(0);
+                        if updated == 0 {
+                            let exists: bool = self.conn.query_row(
+                                "SELECT COUNT(*) > 0 FROM goals WHERE id = ?1",
+                                params![row.0], |r| r.get(0),
+                            ).unwrap_or(false);
+                            if !exists {
+                                let _ = self.conn.execute(
+                                    "INSERT INTO goals (id, session_id, content, completed,
+                                     created_at, updated_at, git_dir)
+                                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                                    params![row.0, row.1, row.2, row.3,
+                                            row.4, row.5, git_dir],
+                                );
+                                total_imported += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!("Backfill: processed {}", db_path.display());
+        }
+
+        // Mark backfill as completed
+        self.conn.execute(
+            "INSERT INTO schema_version (version) VALUES (100)",
+            [],
+        )?;
+        if total_imported > 0 {
+            info!("Backfill complete: imported {} records from per-project DBs", total_imported);
+        } else {
+            info!("Backfill complete: no new records to import");
+        }
+
         Ok(())
     }
 
@@ -530,8 +871,8 @@ impl Database {
     }
 
     /// Archive a completed task to history (upsert: merge with recent entry for same session/window/pane)
-    pub fn archive_to_history(&self, task: &Task) -> Result<i64> {
-        project_db::archive_to_history_on(&self.conn, task)
+    pub fn archive_to_history(&self, task: &Task, git_dir: &str) -> Result<i64> {
+        archive_to_history_on(&self.conn, task, git_dir)
     }
 
     /// Get recent history entries
@@ -621,19 +962,31 @@ impl Database {
     // Note operations
     // =========================================================================
 
-    /// Save a note (insert or update)
-    pub fn save_note(&self, note: &Note) -> Result<()> {
+    /// Save a note (insert or update). `git_dir` tags the note for project-filtered queries.
+    /// Pass empty string to preserve the existing git_dir on updates.
+    pub fn save_note(&self, note: &Note, git_dir: &str) -> Result<()> {
         let scope_str = match note.scope {
             NoteScope::Window => "window",
             NoteScope::Session => "session",
             NoteScope::All => "all",
         };
 
+        // Preserve existing git_dir when the passed value is empty (for update-only calls)
+        let effective_git_dir = if git_dir.is_empty() {
+            self.conn.query_row(
+                "SELECT COALESCE(git_dir, '') FROM notes WHERE id = ?1",
+                params![note.id],
+                |row| row.get::<_, String>(0),
+            ).unwrap_or_default()
+        } else {
+            git_dir.to_string()
+        };
+
         self.conn.execute(
             "INSERT OR REPLACE INTO notes
              (id, scope, session_id, session, window_id, window, pane, summary,
-              completed, archived, created_at, archived_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              completed, archived, created_at, archived_at, git_dir)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 note.id,
                 scope_str,
@@ -647,6 +1000,7 @@ impl Database {
                 note.archived as i32,
                 note.created_at.map(|t| t.to_rfc3339()),
                 note.archived_at.map(|t| t.to_rfc3339()),
+                effective_git_dir,
             ],
         )?;
         Ok(())
@@ -755,12 +1109,23 @@ impl Database {
     // Goal operations
     // =========================================================================
 
-    /// Save a goal (insert or update)
-    pub fn save_goal(&self, goal: &Goal) -> Result<()> {
+    /// Save a goal (insert or update). `git_dir` tags the goal for project-filtered queries.
+    /// Pass empty string to preserve the existing git_dir on updates.
+    pub fn save_goal(&self, goal: &Goal, git_dir: &str) -> Result<()> {
+        let effective_git_dir = if git_dir.is_empty() {
+            self.conn.query_row(
+                "SELECT COALESCE(git_dir, '') FROM goals WHERE id = ?1",
+                params![goal.id],
+                |row| row.get::<_, String>(0),
+            ).unwrap_or_default()
+        } else {
+            git_dir.to_string()
+        };
+
         self.conn.execute(
             "INSERT OR REPLACE INTO goals
-             (id, session_id, session, summary, completed, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (id, session_id, session, summary, completed, created_at, updated_at, git_dir)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 goal.id,
                 goal.session_id,
@@ -769,6 +1134,7 @@ impl Database {
                 goal.completed as i32,
                 goal.created_at.map(|t| t.to_rfc3339()),
                 goal.updated_at.map(|t| t.to_rfc3339()),
+                effective_git_dir,
             ],
         )?;
         Ok(())
@@ -863,7 +1229,7 @@ impl Database {
 
     /// Save conversation messages for a history record
     pub fn save_conversation_messages(&self, history_id: i64, messages: &[ConversationMessage]) -> Result<()> {
-        project_db::save_conversation_messages_on(&self.conn, history_id, messages)
+        save_conversation_messages_on(&self.conn, history_id, messages)
     }
 
     /// Load conversation messages for a history record
@@ -904,7 +1270,7 @@ impl Database {
 
     /// Save tool usage records for a history entry
     pub fn save_tool_usage(&self, history_id: i64, tool_usages: &[ToolUsage]) -> Result<()> {
-        project_db::save_tool_usage_on(&self.conn, history_id, tool_usages)
+        save_tool_usage_on(&self.conn, history_id, tool_usages)
     }
 
     /// Load tool usage records for a history entry
@@ -942,7 +1308,7 @@ impl Database {
 
     /// Save git commit records for a history entry
     pub fn save_commits(&self, history_id: i64, commits: &[GitCommit]) -> Result<()> {
-        project_db::save_commits_on(&self.conn, history_id, commits)
+        save_commits_on(&self.conn, history_id, commits)
     }
 
     /// Load git commit records for a history entry
@@ -1124,6 +1490,7 @@ impl Database {
         working_dir: &str,
         git_branch: &str,
         pane_count: i32,
+        git_dir: &str,
     ) -> Result<()> {
         // Delete any existing record with the same session_name + window_name to prevent duplicates
         self.conn.execute(
@@ -1132,8 +1499,8 @@ impl Database {
         )?;
         self.conn.execute(
             "INSERT INTO closed_windows
-             (session_id, session_name, window_name, working_dir, git_branch, pane_count, closed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (session_id, session_name, window_name, working_dir, git_branch, pane_count, closed_at, git_dir)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 session_id,
                 session_name,
@@ -1142,6 +1509,7 @@ impl Database {
                 git_branch,
                 pane_count,
                 Utc::now().to_rfc3339(),
+                git_dir,
             ],
         )?;
         Ok(())
@@ -1197,6 +1565,265 @@ impl Database {
             params![session_name, window_name],
         )?;
         Ok(())
+    }
+
+    // =========================================================================
+    // Project-filtered query methods (replaces per-project DB reads)
+    // =========================================================================
+
+    /// Load project history with pagination and filtering (filtered by git_dir)
+    pub fn load_project_history_paginated(
+        &self,
+        git_dir: &str,
+        limit: i32,
+        offset: i32,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<(Vec<ProjectHistoryEntry>, i32)> {
+        let mut conditions: Vec<String> = vec!["git_dir = ?".to_string()];
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(git_dir.to_string())];
+
+        if let Some(start) = start_date {
+            conditions.push("started_at >= ?".to_string());
+            params_vec.push(Box::new(start.to_string()));
+        }
+        if let Some(end) = end_date {
+            conditions.push("started_at <= ?".to_string());
+            params_vec.push(Box::new(end.to_string()));
+        }
+        if let Some(q) = search {
+            conditions.push("(summary LIKE ? OR completion_note LIKE ?)".to_string());
+            let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+        // Get total count
+        let count_sql = format!("SELECT COUNT(*) FROM history {}", where_clause);
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let total: i32 = self.conn
+            .prepare(&count_sql)?
+            .query_row(params_refs.as_slice(), |row| row.get(0))
+            .unwrap_or(0);
+
+        // Query with pagination
+        let select_sql = format!(
+            "SELECT id, COALESCE(NULLIF(session, ''), session_id) as session,
+                    COALESCE(NULLIF(window, ''), window_id) as window,
+                    summary, completion_note,
+                    duration_seconds, started_at, completed_at, COALESCE(transcript_path, '')
+             FROM history {} ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            where_clause
+        );
+
+        params_vec.push(Box::new(limit));
+        params_vec.push(Box::new(offset));
+        let all_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = self.conn.prepare(&select_sql)?;
+        let entries: Vec<ProjectHistoryEntry> = stmt
+            .query_map(all_refs.as_slice(), |row| {
+                Ok(ProjectHistoryEntry {
+                    id: row.get(0)?,
+                    session: row.get::<_, String>(1).unwrap_or_default(),
+                    window: row.get::<_, String>(2).unwrap_or_default(),
+                    summary: row.get::<_, String>(3).unwrap_or_default(),
+                    completion_note: row.get::<_, String>(4).unwrap_or_default(),
+                    duration_seconds: row.get::<_, f64>(5).unwrap_or(0.0),
+                    started_at: row.get::<_, String>(6).unwrap_or_default(),
+                    ended_at: row.get::<_, String>(7).unwrap_or_default(),
+                    message_count: 0,
+                    file_path: None,
+                    project: None,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok((entries, total))
+    }
+
+    /// Load project history grouped by session:window (filtered by git_dir)
+    pub fn load_project_history_grouped(
+        &self,
+        git_dir: &str,
+        limit: i32,
+        offset: i32,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<(Vec<ProjectWindowGroupEntry>, i32)> {
+        let mut conditions: Vec<String> = vec!["git_dir = ?".to_string()];
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(git_dir.to_string())];
+
+        if let Some(start) = start_date {
+            conditions.push("started_at >= ?".to_string());
+            params_vec.push(Box::new(start.to_string()));
+        }
+        if let Some(end) = end_date {
+            conditions.push("started_at <= ?".to_string());
+            params_vec.push(Box::new(end.to_string()));
+        }
+        if let Some(q) = search {
+            conditions.push("(summary LIKE ? OR completion_note LIKE ?)".to_string());
+            let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+        // Count distinct groups
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM (
+                SELECT 1 FROM history {}
+                GROUP BY COALESCE(NULLIF(session, ''), session_id),
+                         COALESCE(NULLIF(window, ''), window_id)
+            )",
+            where_clause
+        );
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let total: i32 = self.conn
+            .prepare(&count_sql)?
+            .query_row(params_refs.as_slice(), |row| row.get(0))
+            .unwrap_or(0);
+
+        // Grouped query
+        let select_sql = format!(
+            "SELECT COALESCE(NULLIF(session, ''), session_id) as sess,
+                    COALESCE(NULLIF(window, ''), window_id) as win,
+                    GROUP_CONCAT(id, ',') as entry_ids,
+                    COUNT(*) as task_count,
+                    MIN(started_at) as first_started,
+                    MAX(COALESCE(completed_at, started_at)) as last_ended,
+                    SUM(duration_seconds) as total_duration,
+                    GROUP_CONCAT(COALESCE(NULLIF(summary, ''), 'No summary'), '|||') as summaries
+             FROM history {}
+             GROUP BY sess, win
+             ORDER BY MAX(started_at) DESC
+             LIMIT ? OFFSET ?",
+            where_clause
+        );
+
+        params_vec.push(Box::new(limit));
+        params_vec.push(Box::new(offset));
+        let all_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = self.conn.prepare(&select_sql)?;
+        let entries: Vec<ProjectWindowGroupEntry> = stmt
+            .query_map(all_refs.as_slice(), |row| {
+                let session: String = row.get::<_, String>(0).unwrap_or_default();
+                let window: String = row.get::<_, String>(1).unwrap_or_default();
+                let ids_str: String = row.get::<_, String>(2).unwrap_or_default();
+                let summaries_str: String = row.get::<_, String>(7).unwrap_or_default();
+
+                let entry_ids: Vec<i64> = ids_str
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+                let summaries: Vec<String> = summaries_str
+                    .split("|||")
+                    .map(|s| s.to_string())
+                    .collect();
+
+                let group_key = if session.is_empty() && window.is_empty() {
+                    "Unknown".to_string()
+                } else if session.is_empty() {
+                    window.clone()
+                } else {
+                    format!("{}:{}", session, window)
+                };
+
+                Ok(ProjectWindowGroupEntry {
+                    group_key,
+                    session,
+                    window,
+                    entry_ids,
+                    task_count: row.get::<_, i32>(3).unwrap_or(0),
+                    total_messages: 0,
+                    total_duration: row.get::<_, f64>(6).unwrap_or(0.0),
+                    first_started: row.get::<_, String>(4).unwrap_or_default(),
+                    last_ended: row.get::<_, String>(5).unwrap_or_default(),
+                    summaries,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Fill in message counts per group
+        let entries: Vec<ProjectWindowGroupEntry> = entries
+            .into_iter()
+            .map(|mut g| {
+                if !g.entry_ids.is_empty() {
+                    let placeholders: String = g.entry_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let sql = format!(
+                        "SELECT COUNT(*) FROM conversation_messages WHERE history_id IN ({})",
+                        placeholders
+                    );
+                    if let Ok(mut stmt) = self.conn.prepare(&sql) {
+                        let params: Vec<Box<dyn rusqlite::ToSql>> =
+                            g.entry_ids.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>).collect();
+                        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+                        if let Ok(count) = stmt.query_row(refs.as_slice(), |row| row.get::<_, i32>(0)) {
+                            g.total_messages = count;
+                        }
+                    }
+                }
+                g
+            })
+            .collect();
+
+        Ok((entries, total))
+    }
+
+    /// Get history detail by ID (for grouped detail view)
+    pub fn get_project_history_detail_raw(
+        &self,
+        history_id: i64,
+    ) -> Result<Option<(String, String, String, String, String, String, String, f64)>> {
+        let result = self.conn.query_row(
+            "SELECT COALESCE(NULLIF(session, ''), session_id),
+                    COALESCE(NULLIF(window, ''), window_id),
+                    summary, completion_note, started_at, completed_at,
+                    COALESCE(transcript_path, ''), duration_seconds
+             FROM history WHERE id = ?",
+            [history_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0).unwrap_or_default(),
+                    row.get::<_, String>(1).unwrap_or_default(),
+                    row.get::<_, String>(2).unwrap_or_default(),
+                    row.get::<_, String>(3).unwrap_or_default(),
+                    row.get::<_, String>(4).unwrap_or_default(),
+                    row.get::<_, String>(5).unwrap_or_default(),
+                    row.get::<_, String>(6).unwrap_or_default(),
+                    row.get::<_, f64>(7).unwrap_or_default(),
+                ))
+            },
+        );
+
+        match result {
+            Ok(data) => Ok(Some(data)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Update project counts from global DB data (replaces per-project DB count queries)
+    pub fn update_project_counts_from_global(&self, git_dir: &str) -> Result<()> {
+        let h: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM history WHERE git_dir = ?1", params![git_dir], |r| r.get(0)
+        ).unwrap_or(0);
+        let n: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM notes WHERE git_dir = ?1 AND archived = 0", params![git_dir], |r| r.get(0)
+        ).unwrap_or(0);
+        let g: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM goals WHERE git_dir = ?1", params![git_dir], |r| r.get(0)
+        ).unwrap_or(0);
+        self.update_project_counts(git_dir, h, n, g)
     }
 
     // =========================================================================
@@ -2415,6 +3042,37 @@ impl Database {
         self.conn.execute("VACUUM INTO ?1", params![path])?;
         Ok(())
     }
+}
+
+/// History entry for project-filtered queries
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectHistoryEntry {
+    pub id: i64,
+    pub session: String,
+    pub window: String,
+    pub summary: String,
+    pub completion_note: String,
+    pub duration_seconds: f64,
+    pub started_at: String,
+    pub ended_at: String,
+    pub message_count: i32,
+    pub file_path: Option<String>,
+    pub project: Option<String>,
+}
+
+/// Grouped history entry (multiple tasks in the same session:window)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectWindowGroupEntry {
+    pub group_key: String,
+    pub session: String,
+    pub window: String,
+    pub entry_ids: Vec<i64>,
+    pub task_count: i32,
+    pub total_messages: i32,
+    pub total_duration: f64,
+    pub first_started: String,
+    pub last_ended: String,
+    pub summaries: Vec<String>,
 }
 
 /// Project registry info

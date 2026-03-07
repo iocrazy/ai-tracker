@@ -508,10 +508,14 @@ pub fn run() {
                 let icon_bytes = include_bytes!("../icons/tray-icon.png");
                 tauri::image::Image::from_bytes(icon_bytes).expect("failed to load tray icon")
             };
-            let _tray = TrayIconBuilder::new()
+            let mut tray_builder = TrayIconBuilder::new()
                 .icon(tray_icon)
-                .icon_as_template(true)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(false);
+            #[cfg(target_os = "macos")]
+            {
+                tray_builder = tray_builder.icon_as_template(true);
+            }
+            let _tray = tray_builder
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
 

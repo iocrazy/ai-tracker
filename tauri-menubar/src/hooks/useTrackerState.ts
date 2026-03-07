@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { AgentSession, ClaudeStatus } from '../shared/types';
-import { connectWebSocket, reconnectNow, RealtimeMessage, ConnectionStatus } from '../shared/services/state';
+import { connectWebSocket, reconnectNow, disconnectWebSocket, RealtimeMessage, ConnectionStatus } from '../shared/services/state';
 import { mapTmuxToSessions } from '../shared/services/dataMapper';
 import { getAuthToken, API_BASE, authFetch } from '../shared/services/auth';
 
@@ -142,10 +142,8 @@ export function useTrackerState() {
     });
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      disconnectWebSocket();
+      wsRef.current = null;
     };
   }, [fetchAllClaudeStatus, computeStats]);
 

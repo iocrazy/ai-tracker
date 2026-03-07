@@ -43,12 +43,27 @@ impl TrackerPaths {
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
             .or_else(|| {
-                // Try relative to executable: ../../Resources/ (inside .app bundle)
+                // Try relative to executable: ../../Resources/ (inside .app bundle on macOS)
                 std::env::current_exe().ok().and_then(|exe| {
                     let candidate = exe
                         .parent()?       // MacOS/
                         .parent()?       // Contents/
                         .join("Resources");
+                    if candidate.join("web-dist").exists() {
+                        Some(candidate)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| {
+                // Linux FHS: ../share/agent-tracker/ relative to binary
+                std::env::current_exe().ok().and_then(|exe| {
+                    let candidate = exe
+                        .parent()?       // bin/
+                        .parent()?       // usr/ or prefix
+                        .join("share")
+                        .join("agent-tracker");
                     if candidate.join("web-dist").exists() {
                         Some(candidate)
                     } else {

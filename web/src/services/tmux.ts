@@ -85,6 +85,30 @@ export async function sendImages(
   return response.json();
 }
 
+/**
+ * Send a sequence of raw tmux key names (e.g., ["Down", "Space", "Enter"]).
+ * Each key is sent as a raw tmux key (not literal text) via the send-keys API.
+ * Used for multi-select TUI navigation where arrow keys and Space are needed.
+ * Includes inter-key delay to prevent key coalescing in TUI frameworks.
+ */
+export async function tmuxSendRawKeys(
+  session: string,
+  window: string,
+  pane: string,
+  keys: string[],
+  delayMs: number = 50,
+): Promise<void> {
+  for (const key of keys) {
+    const result = await tmuxSendKeys(session, window, pane, '', key);
+    if (!result.success) {
+      throw new Error(`Failed to send key "${key}": ${result.message}`);
+    }
+    if (delayMs > 0) {
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+}
+
 // Execute arbitrary tmux command (parse and route to appropriate API)
 export async function executeTmuxCommand(command: string): Promise<{ success: boolean; message: string }> {
   // Parse tmux send-keys command with quoted keys

@@ -119,21 +119,41 @@ interface WebSocketCallbacks {
 // Reconnection state (module-level so it persists across calls)
 let _retryCount = 0;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let _currentWs: WebSocket | null = null;
+let _intentionalClose = false;  // Suppress auto-reconnect on explicit disconnect
+let _lastConnectTime = 0;  // Debounce rapid-fire connect calls
 const BASE_DELAY = 1000;
 const MAX_DELAY = 30000;
+const CONNECT_DEBOUNCE_MS = 3000;  // Min 3s between connect attempts
 
 export function connectWebSocket(
   callbacksOrOnMessage: WebSocketCallbacks | ((msg: RealtimeMessage) => void)
 ): WebSocket {
+  // Debounce: if we just connected within 3s, return existing WS
+  const now = Date.now();
+  if (_currentWs && (now - _lastConnectTime) < CONNECT_DEBOUNCE_MS
+      && _currentWs.readyState <= WebSocket.OPEN) {
+    console.log('[WS] Debounced — already connected/connecting within 3s');
+    return _currentWs;
+  }
+  _lastConnectTime = now;
+
   // Clear any pending reconnect timer
   if (_reconnectTimer) {
     clearTimeout(_reconnectTimer);
     _reconnectTimer = null;
   }
 
+  // Close any existing WS to prevent duplicate connections
+  if (_currentWs && _currentWs.readyState <= WebSocket.OPEN) {
+    _intentionalClose = true;
+    _currentWs.close();
+  }
+
   const token = getAuthToken();
   const wsUrl = token ? `${WS_BASE}?token=${encodeURIComponent(token)}` : WS_BASE;
   const ws = new WebSocket(wsUrl);
+  _currentWs = ws;
 
   // Support both old and new callback formats
   const callbacks: WebSocketCallbacks = typeof callbacksOrOnMessage === 'function'
@@ -187,6 +207,16 @@ export function connectWebSocket(
 
   ws.onclose = () => {
     if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+
+    // Skip auto-reconnect if this was an intentional close (e.g., disconnect or replacement)
+    if (_intentionalClose) {
+      _intentionalClose = false;
+      return;
+    }
+
+    // Only auto-reconnect if this is still the current WS (avoid ghost reconnects)
+    if (_currentWs !== ws) return;
+
     _retryCount++;
     const delay = Math.min(BASE_DELAY * Math.pow(2, _retryCount - 1), MAX_DELAY) + Math.random() * 1000;
     console.log(`[WS] Disconnected, reconnecting in ${(delay / 1000).toFixed(1)}s (attempt #${_retryCount})...`);
@@ -199,6 +229,24 @@ export function connectWebSocket(
   };
 
   return ws;
+}
+
+/** Disconnect WebSocket without auto-reconnect */
+export function disconnectWebSocket(): void {
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
+  if (_currentWs) {
+    _intentionalClose = true;
+    _currentWs.close();
+    _currentWs = null;
+  }
+}
+
+/** Get current WebSocket instance (for readyState checks) */
+export function getCurrentWs(): WebSocket | null {
+  return _currentWs;
 }
 
 // Health check API (no auth required)

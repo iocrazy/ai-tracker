@@ -18,11 +18,11 @@ function mapTaskStatus(status: BackendTask['status'], acknowledged: boolean): Ag
 // Tasks are used to overlay status information
 export function mapTmuxToSessions(
   tmuxWindows: TmuxWindowInfo[],
-  tasks: BackendTask[]
+  tasks: BackendTask[] | undefined
 ): AgentSession[] {
   // Build task lookup by session_id + window_id
   const taskMap = new Map<string, BackendTask>();
-  for (const task of tasks) {
+  for (const task of (tasks || [])) {
     const key = `${task.session_id}|${task.window_id}`;
     // Keep the most recent task (or in_progress one)
     const existing = taskMap.get(key);
@@ -112,7 +112,7 @@ export function mapTmuxToSessions(
 export function mapTasksToSessions(tasks: BackendTask[]): AgentSession[] {
   const sessionMap = new Map<string, { session: string; tasks: BackendTask[] }>();
 
-  for (const task of tasks) {
+  for (const task of (tasks || [])) {
     const existing = sessionMap.get(task.session_id);
     if (existing) {
       existing.tasks.push(task);
@@ -155,8 +155,8 @@ export function mapTasksToSessions(tasks: BackendTask[]): AgentSession[] {
 }
 
 // Map backend history to frontend TimelineEvents
-export function mapHistoryToTimeline(history: BackendHistoryRecord[]): TimelineEvent[] {
-  return history.map((record, index) => {
+export function mapHistoryToTimeline(history: BackendHistoryRecord[] | undefined): TimelineEvent[] {
+  return (history || []).map((record, index) => {
     // Show session:window name like "agent:refactor" or fallback to IDs
     const sessionName = record.session || record.session_id.replace('$', 'S');
     const windowName = record.window || record.window_id.replace('@', 'W');
@@ -178,7 +178,7 @@ export function mapHistoryToTimeline(history: BackendHistoryRecord[]): TimelineE
 export function generateConsoleLogs(state: BackendState): ConsoleLog[] {
   const logs: ConsoleLog[] = [
     { id: 'sys-1', type: 'system', text: '> Connected to tracker-server' },
-    { id: 'sys-2', type: 'system', text: `> Active sessions: ${new Set(state.tasks.map(t => t.session_id)).size}` },
+    { id: 'sys-2', type: 'system', text: `> Active sessions: ${new Set((state.tasks || []).map(t => t.session_id)).size}` },
     { id: 'sys-3', type: 'system', text: '> Ready to execute tmux commands' },
     { id: 'sys-4', type: 'output', text: '> _' },
   ];

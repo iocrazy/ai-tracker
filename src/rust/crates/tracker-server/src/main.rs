@@ -1856,7 +1856,7 @@ async fn auth_middleware(
     if !path.starts_with("/api/") && !path.starts_with("/ws") {
         return next.run(req).await;
     }
-    if path == "/health" || path == "/api/health" {
+    if path == "/health" || path == "/api/health" || path == "/api/setup/status" {
         return next.run(req).await;
     }
 
@@ -1900,6 +1900,35 @@ async fn auth_middleware(
 /// Verify auth token (if middleware passes, token is valid)
 async fn verify_auth() -> Json<serde_json::Value> {
     Json(serde_json::json!({"authenticated": true}))
+}
+
+// ============================================================================
+// Setup Status (unauthenticated — for setup banner)
+// ============================================================================
+
+async fn setup_status() -> Json<serde_json::Value> {
+    let claude_hooks_configured = check_claude_hooks_configured();
+    let setup_complete = claude_hooks_configured;
+
+    Json(serde_json::json!({
+        "server_running": true,
+        "claude_hooks_configured": claude_hooks_configured,
+        "setup_complete": setup_complete,
+    }))
+}
+
+/// Check if ~/.claude/settings.json contains agent-tracker hooks
+fn check_claude_hooks_configured() -> bool {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    let settings_path = std::path::Path::new(&home).join(".claude").join("settings.json");
+    let content = match std::fs::read_to_string(&settings_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    content.contains("127.0.0.1:3099/api/hook")
 }
 
 // ============================================================================
@@ -3224,6 +3253,8 @@ async fn main() -> Result<()> {
         .route("/api/auth/verify", get(verify_auth))
         // Health check (no auth required — bypassed in auth_middleware)
         .route("/api/health", get(health_check))
+        // Setup status (no auth required — for setup banner)
+        .route("/api/setup/status", get(setup_status))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/logs", get(get_logs))
         // Admin

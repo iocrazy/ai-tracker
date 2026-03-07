@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AppSettings } from '../types';
-import { Check, Download, Shield, Trash2, Activity } from 'lucide-react';
-import { fetchAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, AlertRule, fetchBackups, createBackup, BackupEntry, fetchDiagnostics, adminRestart, adminClearLogs, DiagnosticComponent, DiagnosticsResult } from '../services/api';
+import { Check, Download, Shield, Trash2, Activity, Terminal, Copy, Eye, EyeOff } from 'lucide-react';
+import { fetchAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, AlertRule, fetchBackups, createBackup, BackupEntry, fetchDiagnostics, adminRestart, adminClearLogs, DiagnosticComponent, DiagnosticsResult, fetchSetupStatus, SetupStatus, getAuthToken } from '../services/api';
 
 interface SettingsViewProps {
     settings: AppSettings;
@@ -99,6 +99,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
        </div>
        )}
 
+       {/* Setup */}
+       <SetupSection isModern={isModern} />
+
        {/* Alert Rules */}
        <AlertRulesSection isModern={isModern} />
 
@@ -119,6 +122,131 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
                 <p>© 2026 HEYGO</p>
             </div>
        </div>
+    </div>
+  );
+};
+
+// Setup sub-component
+const SETUP_COMMAND = 'curl -fsSL https://raw.githubusercontent.com/iocrazy/ai-tracker/main/scripts/setup.sh | bash';
+
+const SetupSection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
+  const [status, setStatus] = useState<SetupStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showToken, setShowToken] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
+
+  const token = getAuthToken() || '';
+
+  const checkStatus = async () => {
+    setLoading(true);
+    try {
+      const s = await fetchSetupStatus();
+      setStatus(s);
+    } catch {
+      setStatus(null);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { checkStatus(); }, []);
+
+  const copyCmd = async () => {
+    await navigator.clipboard.writeText(SETUP_COMMAND);
+    setCopiedCmd(true);
+    setTimeout(() => setCopiedCmd(false), 2000);
+  };
+
+  const copyToken = async () => {
+    await navigator.clipboard.writeText(token);
+    setCopiedToken(true);
+    setTimeout(() => setCopiedToken(false), 2000);
+  };
+
+  const statusDot = (ok: boolean) => {
+    const color = ok
+      ? 'bg-green-500 shadow-[0_0_6px_#4ade80]'
+      : 'bg-yellow-500 shadow-[0_0_6px_#eab308]';
+    return <span className={`inline-block w-2.5 h-2.5 rounded-full ${color}`} />;
+  };
+
+  const maskedToken = token ? `${token.slice(0, 8)}${'*'.repeat(Math.min(token.length - 8, 24))}` : '(none)';
+
+  return (
+    <div className={`border-2 border-green-600 p-4 sm:p-8 relative ${isModern ? 'rounded-lg' : ''}`}>
+      <h3 className={`absolute -top-4 left-4 px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase ${isModern ? 'bg-[#0d1117]' : 'bg-[#050505]'}`}>
+        <Terminal className="w-4 h-4 inline mr-2" />SETUP
+      </h3>
+      <div className="mt-2 space-y-4">
+        {/* Status indicators */}
+        <div className="space-y-2">
+          <div className="flex items-center gap-3 font-mono text-xs">
+            {statusDot(true)}
+            <span className="text-green-400 font-bold w-28 uppercase">Server</span>
+            <span className="text-green-600">Running</span>
+          </div>
+          <div className="flex items-center gap-3 font-mono text-xs">
+            {statusDot(status?.claude_hooks_configured ?? false)}
+            <span className="text-green-400 font-bold w-28 uppercase">Hooks</span>
+            <span className="text-green-600">
+              {status === null ? (loading ? 'Checking...' : 'Unknown') : status.claude_hooks_configured ? 'Configured' : 'Not configured'}
+            </span>
+          </div>
+          <div className="flex items-center gap-3 font-mono text-xs">
+            {statusDot(!!token)}
+            <span className="text-green-400 font-bold w-28 uppercase">Token</span>
+            <span className="text-green-600">{token ? 'Set' : 'Missing'}</span>
+          </div>
+        </div>
+
+        {/* Auth token display */}
+        <div className="space-y-1.5">
+          <div className="text-green-500 text-xs font-bold tracking-wider uppercase">Auth Token</div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 bg-black/40 border border-green-900/40 px-2 py-1.5 rounded font-mono text-xs text-green-400 truncate">
+              {showToken ? token : maskedToken}
+            </code>
+            <button
+              onClick={() => setShowToken(!showToken)}
+              className="p-1.5 bg-green-900/30 border border-green-700/40 rounded hover:bg-green-900/50 transition-colors"
+              title={showToken ? 'Hide token' : 'Show token'}
+            >
+              {showToken ? <EyeOff className="w-3.5 h-3.5 text-green-500" /> : <Eye className="w-3.5 h-3.5 text-green-500" />}
+            </button>
+            <button
+              onClick={copyToken}
+              className="p-1.5 bg-green-900/30 border border-green-700/40 rounded hover:bg-green-900/50 transition-colors"
+              title="Copy token"
+            >
+              {copiedToken ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5 text-green-500" />}
+            </button>
+          </div>
+        </div>
+
+        {/* Setup command */}
+        <div className="space-y-1.5">
+          <div className="text-green-500 text-xs font-bold tracking-wider uppercase">Setup Command</div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 bg-black/40 border border-green-900/40 px-2 py-1.5 rounded font-mono text-[10px] text-green-400 break-all select-all">
+              {SETUP_COMMAND}
+            </code>
+            <button
+              onClick={copyCmd}
+              className="p-1.5 bg-green-900/30 border border-green-700/40 rounded hover:bg-green-900/50 transition-colors flex-shrink-0"
+              title="Copy command"
+            >
+              {copiedCmd ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5 text-green-500" />}
+            </button>
+          </div>
+        </div>
+
+        {/* Refresh button */}
+        <button
+          onClick={checkStatus}
+          disabled={loading}
+          className="px-4 py-2 bg-green-900/30 border border-green-700/40 text-green-500 text-xs font-bold tracking-wider hover:bg-green-900/50 transition-colors disabled:opacity-50"
+        >{loading ? 'CHECKING...' : 'REFRESH STATUS'}</button>
+      </div>
     </div>
   );
 };

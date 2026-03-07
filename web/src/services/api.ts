@@ -11,3 +11,4 @@ export * from './git';
 export * from './projects';
 export * from './helpers';
 export * from './diagnostics';
+export * from './setup';

@@ -14,6 +14,7 @@ import { CloseWindowModal, CloseAction } from './components/CloseWindowModal';
 import { LoginView } from './components/LoginView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { CommandPalette } from './components/CommandPalette';
+import { SetupBanner } from './components/SetupBanner';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
@@ -892,6 +893,9 @@ const App: React.FC = () => {
                 OFFLINE — showing cached data
               </div>
             )}
+
+            {/* Setup banner — shown when hooks not configured */}
+            <SetupBanner />
 
             {/* Main Content Area - Add bottom padding for fixed nav on mobile */}
             <main className="flex-1 overflow-y-auto min-h-0 animate-[fadeIn_0.3s_ease-out] pb-24 xl:pb-10 px-2 md:px-4">

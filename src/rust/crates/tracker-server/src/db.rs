@@ -547,6 +547,14 @@ impl Database {
                 credential_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )"),
+            (102, "CREATE TABLE IF NOT EXISTS totp_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                encrypted_secret TEXT NOT NULL,
+                encryption_key_hash TEXT NOT NULL,
+                activated INTEGER NOT NULL DEFAULT 0,
+                last_used_step INTEGER,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"),
         ];
 
         for (version, sql) in migrations {
@@ -3087,6 +3095,68 @@ impl Database {
             })
             .unwrap_or(0)
             > 0
+    }
+
+    // =========================================================================
+    // TOTP
+    // =========================================================================
+
+    pub fn save_totp_config(&self, encrypted_secret: &str, key_hash: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO totp_config (id, encrypted_secret, encryption_key_hash, activated)
+             VALUES (1, ?1, ?2, 0)",
+            params![encrypted_secret, key_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn activate_totp(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE totp_config SET activated = 1 WHERE id = 1",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_totp_config(&self) -> Result<Option<(String, String, bool, Option<i64>)>> {
+        match self.conn.query_row(
+            "SELECT encrypted_secret, encryption_key_hash, activated, last_used_step FROM totp_config WHERE id = 1",
+            [],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            )),
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn has_totp_active(&self) -> bool {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM totp_config WHERE id = 1 AND activated = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0
+    }
+
+    pub fn update_totp_last_step(&self, step: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE totp_config SET last_used_step = ?1 WHERE id = 1",
+            params![step],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_totp_config(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM totp_config WHERE id = 1", [])?;
+        Ok(())
     }
 }
 

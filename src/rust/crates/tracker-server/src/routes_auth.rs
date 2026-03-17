@@ -266,7 +266,7 @@ struct Claims {
     iat: usize,
 }
 
-fn issue_jwt(secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
+pub(crate) fn issue_jwt(secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

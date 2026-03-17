@@ -55,3 +55,7 @@ webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"]
 webauthn-rs-proto = "0.5"
 jsonwebtoken = "10"
 url = "2"
+totp-rs = { version = "5", features = ["otpauth", "gen_secret"] }
+aes-gcm = "0.10"
+sha2 = "0.10"
+rand = "0.8"

@@ -232,6 +232,70 @@ export async function loginWithPasskey(): Promise<boolean> {
   return true;
 }
 
+// ============================================================================
+// TOTP
+// ============================================================================
+
+/** Check if TOTP is enabled */
+export async function checkTotpStatus(): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}/auth/totp/status`);
+    if (!response.ok) return false;
+    const data = await response.json();
+    return data.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Login with TOTP code → returns JWT or throws */
+export async function loginWithTotp(code: string): Promise<string> {
+  const response = await fetch(`${API_BASE}/auth/totp/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  });
+  if (response.status === 429) {
+    throw new Error('Too many attempts. Please wait.');
+  }
+  const data = await response.json();
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || 'TOTP login failed');
+  }
+  return data.token;
+}
+
+/** Start TOTP setup → returns otpauth URI and secret */
+export async function setupTotp(): Promise<{ otpauth_uri: string; secret_base32: string }> {
+  const response = await authFetch(`${API_BASE}/auth/totp/setup`, { method: 'POST' });
+  const data = await response.json();
+  if (!data.success) {
+    throw new Error(data.error || 'TOTP setup failed');
+  }
+  return { otpauth_uri: data.otpauth_uri, secret_base32: data.secret_base32 };
+}
+
+/** Confirm TOTP setup with a verification code */
+export async function confirmTotp(code: string): Promise<boolean> {
+  const response = await authFetch(`${API_BASE}/auth/totp/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  });
+  const data = await response.json();
+  if (!data.success) {
+    throw new Error(data.error || 'Invalid code');
+  }
+  return true;
+}
+
+/** Disable TOTP */
+export async function disableTotp(): Promise<boolean> {
+  const response = await authFetch(`${API_BASE}/auth/totp`, { method: 'DELETE' });
+  const data = await response.json();
+  return data.success === true;
+}
+
 /** Full passkey registration flow */
 export async function registerPasskey(): Promise<boolean> {
   // Step 1: Get challenge

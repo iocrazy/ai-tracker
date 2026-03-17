@@ -20,7 +20,8 @@ Add TOTP (Time-based One-Time Password) as a third Web UI login method alongside
 
 ### Dependencies (Cargo.toml)
 
-- `totp-rs` — TOTP secret generation, code verification, otpauth URI generation
+- `totp-rs = { version = "5", features = ["otpauth", "gen_secret"] }` — TOTP secret generation, code verification, otpauth URI generation
+- `aes-gcm` — AES-256-GCM encryption for secret at rest
 
 ### Database (SQLite)
 
@@ -30,7 +31,9 @@ New table via migration:
 CREATE TABLE IF NOT EXISTS totp_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),  -- single-user, max one row
     encrypted_secret TEXT NOT NULL,
+    encryption_key_hash TEXT NOT NULL,       -- SHA-256 of encryption key, for change detection
     activated INTEGER NOT NULL DEFAULT 0,    -- 0=pending confirm, 1=active
+    last_used_step INTEGER,                  -- replay protection: last successful TOTP time step
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
@@ -38,22 +41,27 @@ CREATE TABLE IF NOT EXISTS totp_config (
 ### Secret Storage
 
 - TOTP secret encrypted at rest using AES-256-GCM
-- Encryption key derived from `auth_token` via SHA-256
+- Encryption key: auto-generated 256-bit random key, stored at `{data_dir}/totp-key.bin`
+  - Separate from `auth_token` — changing the static token does NOT invalidate TOTP
+  - Generated once on first TOTP setup, persists until manually deleted
 - `encrypted_secret` stores: nonce (12 bytes) + ciphertext, base64-encoded
+- `encryption_key_hash`: SHA-256 of the key, stored in DB for corruption detection
 
 ### API Endpoints
 
 #### `POST /api/auth/totp/setup` (requires auth)
 
-1. Generate random 160-bit TOTP secret
-2. Encrypt and store in `totp_config` with `activated=0`
-3. Return `{ otpauth_uri: "otpauth://totp/AgentTracker:admin?secret=...&issuer=AgentTracker", secret_base32: "..." }`
+1. If TOTP already activated, return 409 `{ error: "TOTP already enabled. Disable first to reconfigure." }`
+2. Generate or load encryption key from `totp-key.bin`
+3. Generate random 160-bit TOTP secret
+4. Encrypt and store in `totp_config` with `activated=0`
+5. Return `{ otpauth_uri: "otpauth://totp/AgentTracker:admin?secret=...&issuer=AgentTracker", secret_base32: "..." }`
 
 #### `POST /api/auth/totp/confirm` (requires auth)
 
 Request: `{ "code": "123456" }`
 
-1. Decrypt stored secret
+1. Decrypt stored secret (if decryption fails, return 500 `{ error: "TOTP configuration corrupted" }` and log details)
 2. Verify code against current time window (allow +/- 1 step)
 3. If valid: set `activated=1`, return `{ success: true }`
 4. If invalid: return 400 `{ error: "Invalid code" }`
@@ -63,21 +71,27 @@ Request: `{ "code": "123456" }`
 Request: `{ "code": "123456" }`
 
 1. Check `totp_config` exists and `activated=1`
-2. Decrypt secret, verify code
-3. If valid: issue JWT (same 7-day expiry as passkey login), return `{ token: "eyJ..." }`
-4. If invalid: return 401, increment rate limit counter
+2. Decrypt secret (if decryption fails, return 500 and log)
+3. Verify code against current time window (+/- 1 step)
+4. **Replay protection**: reject if code's time step <= `last_used_step`
+5. If valid: update `last_used_step`, issue JWT via existing `issue_jwt()` from `routes_auth.rs`, return `{ token: "eyJ..." }`
+6. If invalid: return 401, increment rate limit counter
 
-**Rate limiting**: Max 5 attempts per 30-second window. Return 429 on exceed.
+**Rate limiting**: Global (not per-IP, single-user system). Max 10 attempts per 60-second sliding window. Return 429 on exceed. Counter resets after window expires.
 
 #### `DELETE /api/auth/totp` (requires auth)
 
 1. Delete row from `totp_config`
 2. Return `{ success: true }`
 
+Note: Since the user is already authenticated, no additional TOTP code confirmation is required for disable.
+
 #### `GET /api/auth/totp/status` (public)
 
 1. Check if `totp_config` row exists with `activated=1`
 2. Return `{ enabled: true/false }`
+
+Note: Public to allow login page UI decisions. Same pattern as existing `/api/auth/passkey/status`. Acceptable trade-off for UX — only reveals whether TOTP is configured, not secrets.
 
 ### Auth Middleware Updates
 
@@ -85,9 +99,11 @@ Add to public (no-auth) whitelist:
 - `POST /api/auth/totp/login`
 - `GET /api/auth/totp/status`
 
+New endpoints use existing CORS configuration from `allowed_origins` in AppState.
+
 ### Rate Limiting Implementation
 
-In-memory `HashMap<IpAddr, Vec<Instant>>` (same pattern as WebAuthn state maps). No persistence needed — resets on server restart is acceptable for a single-user system.
+In-memory global counter: `(Vec<Instant>, Mutex)`. Sliding window — on each attempt, prune entries older than 60s, then check count. No persistence needed — resets on server restart is acceptable for a single-user system.
 
 ## Frontend Changes
 
@@ -97,24 +113,25 @@ In-memory `HashMap<IpAddr, Vec<Instant>>` (same pattern as WebAuthn state maps).
 
 ### LoginView Updates
 
-Login page flow:
+Login page flow with visual hierarchy:
 
 ```
 Check /api/auth/passkey/status + /api/auth/totp/status
-  ├─ has_passkey=true  → Show passkey button (existing)
-  ├─ totp_enabled=true → Show "TOTP Login" section with 6-digit input
-  └─ fallback          → Show token paste input (existing)
+
+  1. Passkey button (primary, if has_passkey)
+  2. TOTP 6-digit input (secondary, if totp_enabled)
+  3. "Or use token" expandable link → token paste input (tertiary)
 ```
 
 TOTP login UI:
 - 6-digit input field (auto-focus, numeric, maxlength=6)
 - Auto-submit when 6 digits entered
-- Error display on invalid code or rate limit
+- Error display on invalid code or rate limit (429 → "Too many attempts, wait a moment")
 - Loading state during verification
 
 ### Settings / TOTP Setup UI
 
-Accessible from main app when authenticated. Could be in existing settings area or a dedicated section.
+Add a gear/settings icon in the app header (next to existing passkey management area). Opens a settings section containing TOTP setup.
 
 Setup flow:
 1. Click "Enable TOTP"
@@ -133,11 +150,14 @@ Disable flow:
 
 ## Security
 
-- **Brute force**: Rate limiting on login endpoint (5 attempts / 30s)
-- **Secret at rest**: AES-256-GCM encrypted, key derived from auth_token
+- **Brute force**: Global rate limiting on login endpoint (10 attempts / 60s sliding window)
+- **Replay protection**: Track `last_used_step` — each TOTP code accepted only once
+- **Secret at rest**: AES-256-GCM encrypted with auto-generated key file (independent of auth_token)
+- **Decryption failure**: Return 500, log details server-side. Does not auto-delete TOTP config.
 - **Time drift**: Accept codes from current window +/- 1 step (90-second total window)
 - **No recovery codes**: Passkey + static token serve as fallback
 - **Setup requires auth**: Only authenticated users can bind TOTP
+- **Public status endpoint**: Only reveals enabled/disabled, consistent with passkey status pattern
 
 ## Non-Goals
 

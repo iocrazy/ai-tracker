@@ -793,12 +793,12 @@ const App: React.FC = () => {
             <div className="text-green-500 font-mono text-lg animate-pulse tracking-widest">AUTHENTICATING...</div>
           </div>
       ) : !isAuthenticated ? (
-          <LoginView onTokenSubmit={handleTokenSubmit} onPasskeyLogin={handlePasskeyLogin} error={authError} />
+          <LoginView onTokenSubmit={handleTokenSubmit} onPasskeyLogin={handlePasskeyLogin} onTotpLogin={handlePasskeyLogin} error={authError} />
       ) : (
-          <div className="flex flex-col h-[100dvh] max-w-[1600px] mx-auto overflow-hidden">
+          <div className="flex flex-col h-[100dvh] max-w-[1600px] mx-auto overflow-hidden" style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}>
 
             {/* Header - Compact on mobile, full on desktop */}
-            <header className="flex-none justify-between items-center py-2 md:py-4 lg:py-6 mb-1 md:mb-2 flex px-2 md:px-4">
+            <header className="flex-none justify-between items-center pt-3 pb-2 md:py-4 lg:py-6 mb-1 md:mb-2 flex px-2 md:px-4">
                 <div className="flex items-center gap-2 md:gap-4">
                      <div className="flex flex-col md:flex-row md:items-baseline gap-1 md:gap-2">
                         <h1 className="text-lg sm:text-xl md:text-2xl lg:text-4xl font-black text-green-500 tracking-tight retro-text-shadow uppercase font-pixel">
@@ -904,12 +904,12 @@ const App: React.FC = () => {
             <SetupBanner />
 
             {/* Main Content Area - Add bottom padding for fixed nav on mobile */}
-            <main className="flex-1 overflow-y-auto min-h-0 animate-[fadeIn_0.3s_ease-out] pb-24 xl:pb-10 px-2 md:px-4">
+            <main className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 animate-[fadeIn_0.3s_ease-out] pb-32 xl:pb-10 px-2 md:px-4">
                 <ErrorBoundary>{renderContent()}</ErrorBoundary>
             </main>
 
             {/* Mobile/Tablet Bottom Navigation - Fixed at bottom, shown below 1280px */}
-            <nav className="xl:hidden fixed bottom-0 left-0 right-0 z-50 bg-black border-t-2 border-green-600 shadow-[0_-5px_20px_rgba(34,197,94,0.2)]" style={{ paddingBottom: 'max(8px, env(safe-area-inset-bottom, 8px))' }}>
+            <nav className="xl:hidden fixed bottom-0 left-0 right-0 z-50 bg-black border-t-2 border-green-600 shadow-[0_-5px_20px_rgba(34,197,94,0.2)]" style={{ paddingBottom: 'max(28px, env(safe-area-inset-bottom, 28px))' }}>
                 <div className="flex justify-around items-stretch max-w-[600px] mx-auto">
                     {MOBILE_TABS.map((tab) => (
                         <button

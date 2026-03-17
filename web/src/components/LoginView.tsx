@@ -1,23 +1,30 @@
 import React, { useEffect, useState } from 'react';
 import { Fingerprint, KeyRound, ArrowRight, ShieldCheck, ShieldX } from 'lucide-react';
-import { checkPasskeyStatus, loginWithPasskey } from '../services/auth';
+import { checkPasskeyStatus, loginWithPasskey, checkTotpStatus, loginWithTotp, setAuthToken } from '../services/auth';
 
 interface LoginViewProps {
   onTokenSubmit: (token: string) => void;
   onPasskeyLogin: () => void;
+  onTotpLogin?: () => void;
   error?: string;
 }
 
-export const LoginView: React.FC<LoginViewProps> = ({ onTokenSubmit, onPasskeyLogin, error }) => {
+export const LoginView: React.FC<LoginViewProps> = ({ onTokenSubmit, onPasskeyLogin, onTotpLogin, error }) => {
   const [token, setToken] = useState('');
   const [hasPasskey, setHasPasskey] = useState(false);
   const [showTokenInput, setShowTokenInput] = useState(false);
   const [passkeyError, setPasskeyError] = useState('');
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [hasTOTP, setHasTOTP] = useState(false);
+  const [totpCode, setTotpCode] = useState('');
+  const [totpError, setTotpError] = useState('');
+  const [isTotpLoading, setIsTotpLoading] = useState(false);
+
   useEffect(() => {
-    checkPasskeyStatus().then(has => {
-      setHasPasskey(has);
-      if (!has) setShowTokenInput(true);
+    Promise.all([checkPasskeyStatus(), checkTotpStatus()]).then(([hasPass, hasTotp]) => {
+      setHasPasskey(hasPass);
+      setHasTOTP(hasTotp);
+      if (!hasPass && !hasTotp) setShowTokenInput(true);
     });
   }, []);
 
@@ -44,6 +51,35 @@ export const LoginView: React.FC<LoginViewProps> = ({ onTokenSubmit, onPasskeyLo
       setIsAuthenticating(false);
     }
   };
+
+  const handleTotpLogin = async () => {
+    if (totpCode.length !== 6) return;
+    setTotpError('');
+    setIsTotpLoading(true);
+    try {
+      const totpToken = await loginWithTotp(totpCode);
+      setAuthToken(totpToken);
+      onTotpLogin?.();
+    } catch (err: any) {
+      setTotpError(err?.message || 'TOTP login failed');
+      setTotpCode('');
+    } finally {
+      setIsTotpLoading(false);
+    }
+  };
+
+  const handleTotpInput = (value: string) => {
+    const digits = value.replace(/\D/g, '').slice(0, 6);
+    setTotpCode(digits);
+    setTotpError('');
+  };
+
+  // Auto-submit when 6 digits entered
+  useEffect(() => {
+    if (totpCode.length === 6 && !isTotpLoading) {
+      handleTotpLogin();
+    }
+  }, [totpCode]);
 
   return (
     <div className="flex items-center justify-center min-h-[100dvh] p-4" style={{ background: 'linear-gradient(135deg, #0a0a0f 0%, #0d1117 50%, #0a0f1a 100%)' }}>
@@ -97,8 +133,50 @@ export const LoginView: React.FC<LoginViewProps> = ({ onTokenSubmit, onPasskeyLo
               </div>
             )}
 
+            {/* TOTP login */}
+            {hasTOTP && (
+              <div className="space-y-3">
+                {hasPasskey && (
+                  <div className="flex items-center gap-2 py-1">
+                    <div className="flex-1 h-px bg-white/[0.06]" />
+                    <span className="text-white/20 text-[11px] uppercase tracking-wider">or TOTP</span>
+                    <div className="flex-1 h-px bg-white/[0.06]" />
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={6}
+                    value={totpCode}
+                    onChange={(e) => handleTotpInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleTotpLogin(); }}
+                    className="flex-1 rounded-xl border border-white/[0.08] bg-white/[0.03] text-white/90 px-4 py-3 text-[18px] text-center tracking-[0.3em] font-mono placeholder-white/20 focus:outline-none focus:border-indigo-500/40 focus:ring-1 focus:ring-indigo-500/20 transition-all"
+                    placeholder="000000"
+                    autoFocus={!hasPasskey}
+                    autoComplete="one-time-code"
+                    disabled={isTotpLoading}
+                  />
+                  <button
+                    onClick={handleTotpLogin}
+                    disabled={totpCode.length !== 6 || isTotpLoading}
+                    className="rounded-xl px-4 py-3 border border-white/[0.08] hover:border-white/[0.15] bg-white/[0.04] hover:bg-white/[0.06] transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <ArrowRight className="w-5 h-5 text-white/80" />
+                  </button>
+                </div>
+                {totpError && (
+                  <div className="rounded-lg bg-red-500/[0.08] border border-red-500/[0.15] px-3.5 py-3 flex items-center gap-3">
+                    <ShieldX className="w-5 h-5 text-red-400 flex-shrink-0" />
+                    <span className="text-red-400/90 text-[13px]">{totpError}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Divider */}
-            {hasPasskey && !showTokenInput && (
+            {(hasPasskey || hasTOTP) && !showTokenInput && (
               <div className="relative py-1">
                 <div className="absolute inset-0 flex items-center">
                   <div className="w-full border-t border-white/[0.06]" />
@@ -118,7 +196,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onTokenSubmit, onPasskeyLo
             {/* Token input */}
             {showTokenInput && (
               <form onSubmit={handleTokenSubmit} className="space-y-3">
-                {hasPasskey && (
+                {(hasPasskey || hasTOTP) && (
                   <div className="flex items-center gap-2 py-1">
                     <div className="flex-1 h-px bg-white/[0.06]" />
                     <span className="text-white/20 text-[11px] uppercase tracking-wider">Token</span>
@@ -162,7 +240,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onTokenSubmit, onPasskeyLo
         {/* Footer */}
         <div className="mt-5 text-center">
           <p className="text-white/15 text-[11px] tracking-wide">
-            Protected by WebAuthn
+            Secure authentication
           </p>
         </div>
       </div>

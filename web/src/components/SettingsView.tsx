@@ -108,6 +108,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
        {/* Security — Passkey */}
        <SecuritySection isModern={isModern} />
 
+       {/* TOTP Authentication */}
+       <TotpSection isModern={isModern} />
+
        {/* Backups */}
        <BackupSection isModern={isModern} />
 
@@ -486,6 +489,142 @@ const BackupSection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
         )}
       </div>
 
+    </div>
+  );
+};
+
+// TOTP section component
+const TotpSection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
+  const [enabled, setEnabled] = useState(false);
+  const [setupData, setSetupData] = useState<{ otpauth_uri: string; secret_base32: string } | null>(null);
+  const [confirmCode, setConfirmCode] = useState('');
+  const [status, setStatus] = useState<'idle' | 'setting-up' | 'confirming' | 'disabling'>('idle');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    import('../services/auth').then(({ checkTotpStatus }) => {
+      checkTotpStatus().then(setEnabled);
+    });
+  }, []);
+
+  const handleSetup = async () => {
+    setStatus('setting-up');
+    setError('');
+    try {
+      const { setupTotp } = await import('../services/auth');
+      const data = await setupTotp();
+      setSetupData(data);
+      setStatus('confirming');
+    } catch (err: any) {
+      setError(err?.message || 'Setup failed');
+      setStatus('idle');
+    }
+  };
+
+  const handleConfirm = async () => {
+    if (confirmCode.length !== 6) return;
+    setError('');
+    try {
+      const { confirmTotp } = await import('../services/auth');
+      await confirmTotp(confirmCode);
+      setEnabled(true);
+      setSetupData(null);
+      setConfirmCode('');
+      setMessage('TOTP enabled successfully');
+      setStatus('idle');
+    } catch (err: any) {
+      setError(err?.message || 'Invalid code');
+    }
+  };
+
+  const handleDisable = async () => {
+    if (!confirm('Disable TOTP authentication?')) return;
+    setStatus('disabling');
+    try {
+      const { disableTotp } = await import('../services/auth');
+      await disableTotp();
+      setEnabled(false);
+      setMessage('TOTP disabled');
+      setStatus('idle');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to disable');
+      setStatus('idle');
+    }
+  };
+
+  const [QRCode, setQRCode] = useState<any>(null);
+  useEffect(() => {
+    if (setupData) {
+      import('qrcode.react').then((mod) => setQRCode(() => mod.QRCodeSVG));
+    }
+  }, [setupData]);
+
+  return (
+    <div className={`border-2 p-4 sm:p-8 relative ${isModern ? 'border-green-600 rounded-lg' : 'border-green-600'}`}>
+      <h3 className={`absolute -top-4 left-4 px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase ${isModern ? 'bg-[#0d1117]' : 'bg-[#050505]'}`}>
+        TOTP
+      </h3>
+      <div className="mt-2 space-y-4">
+        <div className="flex items-center gap-2">
+          <Shield className="w-4 h-4 text-green-600" />
+          <span className="text-green-500 font-bold text-sm uppercase tracking-wide">TOTP Authentication</span>
+        </div>
+
+        <p className="text-green-700 text-xs">
+          {enabled ? 'TOTP enabled — authenticator app login active' : 'No TOTP configured — set up authenticator app'}
+        </p>
+
+        {message && (
+          <div className="text-green-400 text-xs flex items-center gap-1">
+            <Check className="w-3 h-3" /> {message}
+          </div>
+        )}
+        {error && (
+          <div className="text-red-400 text-xs">{error}</div>
+        )}
+
+        {setupData && status === 'confirming' && (
+          <div className="space-y-3">
+            <div className="flex justify-center p-4 bg-white rounded-lg">
+              {QRCode ? <QRCode value={setupData.otpauth_uri} size={180} /> : <span className="text-black text-xs">Loading QR...</span>}
+            </div>
+            <div className="text-green-700 text-xs break-all font-mono bg-green-900/20 p-2 rounded">
+              Manual key: {setupData.secret_base32}
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                value={confirmCode}
+                onChange={(e) => setConfirmCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleConfirm(); }}
+                className="flex-1 bg-black/40 border border-green-900/30 rounded px-3 py-2 text-green-400 text-center font-mono text-lg tracking-[0.3em] placeholder-green-900/50 focus:border-green-500/50 focus:outline-none"
+                placeholder="000000"
+                autoComplete="one-time-code"
+              />
+              <button
+                onClick={handleConfirm}
+                disabled={confirmCode.length !== 6}
+                className="px-4 py-2 bg-green-900/30 border border-green-800/40 rounded text-green-500 text-xs uppercase hover:bg-green-900/50 disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                Verify
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!setupData && (
+          <button
+            onClick={enabled ? handleDisable : handleSetup}
+            disabled={status !== 'idle'}
+            className="px-3 py-1.5 bg-green-900/30 border border-green-800/40 rounded text-green-500 text-xs uppercase hover:bg-green-900/50 disabled:opacity-50"
+          >
+            {status === 'disabling' ? 'DISABLING...' : status === 'setting-up' ? 'SETTING UP...' : enabled ? 'DISABLE TOTP' : 'ENABLE TOTP'}
+          </button>
+        )}
+      </div>
     </div>
   );
 };

@@ -542,6 +542,11 @@ impl Database {
             (18, "CREATE INDEX IF NOT EXISTS idx_notes_git_dir ON notes(git_dir)"),
             (19, "CREATE INDEX IF NOT EXISTS idx_goals_git_dir ON goals(git_dir)"),
             (20, "CREATE INDEX IF NOT EXISTS idx_closed_windows_git_dir ON closed_windows(git_dir)"),
+            (101, "CREATE TABLE IF NOT EXISTS passkey_credentials (
+                id TEXT PRIMARY KEY,
+                credential_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"),
         ];
 
         for (version, sql) in migrations {
@@ -3041,6 +3046,47 @@ impl Database {
     pub fn backup_to(&self, path: &str) -> Result<()> {
         self.conn.execute("VACUUM INTO ?1", params![path])?;
         Ok(())
+    }
+
+    // ========================================================================
+    // Passkey credentials
+    // ========================================================================
+
+    pub fn save_passkey(&self, id: &str, credential_json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO passkey_credentials (id, credential_json) VALUES (?1, ?2)",
+            params![id, credential_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_passkeys(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT id, credential_json FROM passkey_credentials")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    pub fn delete_passkey(&self, id: &str) -> Result<bool> {
+        let count = self.conn.execute(
+            "DELETE FROM passkey_credentials WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn has_passkeys(&self) -> bool {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM passkey_credentials", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap_or(0)
+            > 0
     }
 }
 

@@ -46,3 +46,7 @@ base64 = { workspace = true }
 dirs = { workspace = true }
 regex = { workspace = true }
 libc = { workspace = true }
+webauthn-rs = { workspace = true }
+webauthn-rs-proto = { workspace = true }
+jsonwebtoken = { workspace = true }
+url = { workspace = true }

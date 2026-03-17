@@ -16,6 +16,7 @@ mod stream;
 mod transcript;
 mod workspace;
 
+mod routes_auth;
 mod routes_history;
 mod routes_projects;
 mod routes_tmux;
@@ -157,10 +158,25 @@ pub(crate) struct AppState {
     /// Active todo mapping: pane_id → (todo_id, git_dir)
     /// Used to link history entries to the todo that triggered them
     active_todo_map: Mutex<HashMap<String, (i64, String)>>,
+    /// WebAuthn instance (None if not configured, e.g. no HTTPS)
+    webauthn: Option<webauthn_rs::Webauthn>,
+    /// Temporary storage for in-progress WebAuthn registrations
+    webauthn_reg_states: Mutex<HashMap<String, webauthn_rs::prelude::PasskeyRegistration>>,
+    /// Temporary storage for in-progress WebAuthn authentications
+    webauthn_auth_states: Mutex<HashMap<String, webauthn_rs::prelude::PasskeyAuthentication>>,
+    /// JWT signing secret
+    jwt_secret: String,
 }
 
 impl AppState {
-    fn new(db: Database, auth_token: String, allowed_origins: Vec<String>, paths: paths::TrackerPaths) -> Result<Self> {
+    fn new(
+        db: Database,
+        auth_token: String,
+        allowed_origins: Vec<String>,
+        paths: paths::TrackerPaths,
+        webauthn: Option<webauthn_rs::Webauthn>,
+        jwt_secret: String,
+    ) -> Result<Self> {
         let (broadcast_tx, _) = broadcast::channel(16);
         let mut state = ServerState::new(db);
         state.load_from_db()?;
@@ -175,6 +191,10 @@ impl AppState {
             start_time: std::time::Instant::now(),
             paths,
             active_todo_map: Mutex::new(HashMap::new()),
+            webauthn,
+            webauthn_reg_states: Mutex::new(HashMap::new()),
+            webauthn_auth_states: Mutex::new(HashMap::new()),
+            jwt_secret,
         })
     }
 
@@ -1859,6 +1879,13 @@ async fn auth_middleware(
     if path == "/health" || path == "/api/health" || path == "/api/setup/status" {
         return next.run(req).await;
     }
+    // WebAuthn public endpoints (no auth required)
+    if path == "/api/auth/passkey/status"
+        || path == "/api/auth/webauthn/login/start"
+        || path == "/api/auth/webauthn/login/finish"
+    {
+        return next.run(req).await;
+    }
 
     let token_valid = if path.starts_with("/ws") {
         // WebSocket: extract token from query string
@@ -1874,16 +1901,32 @@ async fn auth_middleware(
                         }
                     })
             })
-            .map(|t| t == state.auth_token)
+            .map(|t| {
+                if t.starts_with("eyJ") {
+                    routes_auth::verify_jwt(&t, &state.jwt_secret)
+                } else {
+                    t == state.auth_token
+                }
+            })
             .unwrap_or(false)
     } else {
         // API: extract Bearer token from Authorization header
-        req.headers()
+        let token_str = req
+            .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|t| t == state.auth_token)
-            .unwrap_or(false)
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match token_str {
+            Some(t) if t.starts_with("eyJ") => {
+                // JWT token
+                routes_auth::verify_jwt(t, &state.jwt_secret)
+            }
+            Some(t) => {
+                // Static bearer token
+                t == state.auth_token
+            }
+            None => false,
+        }
     };
 
     if token_valid {
@@ -2935,10 +2978,10 @@ async fn main() -> Result<()> {
         .init();
     paths.migrate_if_needed();
 
-    // Load configuration and initialize auth token
+    // Load configuration and rotate auth token on startup
     let mut config = config::AgentConfig::load().unwrap_or_default();
-    if config.auth.token.is_empty() {
-        // Generate a 64-char hex token (256-bit entropy) from two UUIDs
+    {
+        // Always rotate auth token on startup
         let token = format!(
             "{}{}",
             Uuid::new_v4().as_simple(),
@@ -2946,9 +2989,9 @@ async fn main() -> Result<()> {
         );
         config.auth.token = token;
         if let Err(e) = config.save() {
-            error!("Failed to save config with generated auth token: {}", e);
+            error!("Failed to save config with rotated auth token: {}", e);
         } else {
-            info!("Generated new auth token and saved to config");
+            info!("Auth token rotated on startup");
         }
     }
     info!("Auth token loaded ({}...)", &config.auth.token[..8]);
@@ -2956,13 +2999,43 @@ async fn main() -> Result<()> {
     let auth_token = config.auth.token.clone();
     let allowed_origins = config.auth.allowed_origins.clone();
 
+    // Initialize WebAuthn
+    let rp_id = "tracker.heygo.cn";
+    let rp_origin = url::Url::parse("https://tracker.heygo.cn:88").expect("Invalid RP origin");
+    let webauthn = match webauthn_rs::WebauthnBuilder::new(rp_id, &rp_origin) {
+        Ok(builder) => match builder.build() {
+            Ok(w) => {
+                info!("WebAuthn initialized for rp_id={}", rp_id);
+                Some(w)
+            }
+            Err(e) => {
+                warn!("Failed to build WebAuthn (passkey auth disabled): {}", e);
+                None
+            }
+        },
+        Err(e) => {
+            warn!("Failed to create WebAuthn builder (passkey auth disabled): {}", e);
+            None
+        }
+    };
+
+    // Derive JWT secret from auth token
+    let jwt_secret = format!("jwt-{}", &auth_token);
+
     // Initialize database
     let db_path = db::default_db_path();
     info!("Opening database at {:?}", db_path);
     let db = Database::open(&db_path)?;
 
     // Create application state
-    let app_state = Arc::new(AppState::new(db, auth_token, allowed_origins, paths)?);
+    let app_state = Arc::new(AppState::new(
+        db,
+        auth_token,
+        allowed_origins,
+        paths,
+        webauthn,
+        jwt_secret,
+    )?);
 
     // Pre-populate tmux windows before accepting connections
     // so the first WebSocket client gets actual data instead of empty list
@@ -3251,6 +3324,12 @@ async fn main() -> Result<()> {
         .route("/api/stream/list", get(stream_list))
         // Auth
         .route("/api/auth/verify", get(verify_auth))
+        // WebAuthn Passkey routes
+        .route("/api/auth/passkey/status", get(routes_auth::passkey_status))
+        .route("/api/auth/webauthn/register/start", post(routes_auth::register_start))
+        .route("/api/auth/webauthn/register/finish", post(routes_auth::register_finish))
+        .route("/api/auth/webauthn/login/start", post(routes_auth::login_start))
+        .route("/api/auth/webauthn/login/finish", post(routes_auth::login_finish))
         // Health check (no auth required — bypassed in auth_middleware)
         .route("/api/health", get(health_check))
         // Setup status (no auth required — for setup banner)

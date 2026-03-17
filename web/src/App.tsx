@@ -445,6 +445,12 @@ const App: React.FC = () => {
       }
   };
 
+  const handlePasskeyLogin = () => {
+      // JWT already stored by loginWithPasskey() in auth.ts
+      setAuthError('');
+      setIsAuthenticated(true);
+  };
+
   const updateSetting = (key: keyof AppSettings, value: any) => {
       setSettings(prev => ({ ...prev, [key]: value }));
   };
@@ -787,7 +793,7 @@ const App: React.FC = () => {
             <div className="text-green-500 font-mono text-lg animate-pulse tracking-widest">AUTHENTICATING...</div>
           </div>
       ) : !isAuthenticated ? (
-          <LoginView onTokenSubmit={handleTokenSubmit} error={authError} />
+          <LoginView onTokenSubmit={handleTokenSubmit} onPasskeyLogin={handlePasskeyLogin} error={authError} />
       ) : (
           <div className="flex flex-col h-[100dvh] max-w-[1600px] mx-auto overflow-hidden">
 

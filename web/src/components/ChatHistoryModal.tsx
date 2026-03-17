@@ -34,7 +34,7 @@ const DEFAULT_CLAUDE_PANE = '1';
 
 export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, messages, sessionName, windowName, windowId, claudePane, claudeStatus }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
   // Detect if session is live (has active Claude) vs archived (no Claude running)
@@ -172,7 +172,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -420,15 +420,22 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
                 onChange={handleFileSelect}
                 className="hidden"
               />
-              <input
+              <textarea
                 ref={inputRef}
-                type="text"
                 value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
+                onChange={(e) => {
+                  setInputValue(e.target.value);
+                  // Auto-resize: reset then fit content (max 5 lines)
+                  const el = e.target;
+                  el.style.height = '36px';
+                  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+                }}
                 onKeyDown={handleKeyDown}
                 placeholder="Type a message..."
                 disabled={isSending}
-                className="flex-1 bg-black border border-green-800 text-green-400 px-3 py-2 text-sm font-mono placeholder-green-900 focus:outline-none focus:border-green-500 disabled:opacity-50"
+                rows={1}
+                className="flex-1 bg-black border border-green-800 text-green-400 px-3 py-2 text-sm font-mono placeholder-green-900 focus:outline-none focus:border-green-500 disabled:opacity-50 resize-none"
+                style={{ minHeight: '36px', maxHeight: '140px', lineHeight: '1.5' }}
               />
               <button
                 onClick={handleSend}

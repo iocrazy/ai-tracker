@@ -1768,17 +1768,22 @@ pub(crate) async fn get_claude_messages(Query(params): Query<ClaudeMessagesParam
                 exact_filters.push(converted);
             }
             // Also generate parent path filters as fallback
-            let mut current = path.as_str();
-            loop {
-                match current.rfind('/') {
-                    Some(pos) if pos > 0 => {
-                        current = &current[..pos];
-                        let parent = current.replace('/', "-").replace('.', "-").replace('_', "-");
-                        if !exact_filters.contains(&parent) && !parent_filters.contains(&parent) {
-                            parent_filters.push(parent);
+            // Skip parent fallback for worktree paths to prevent cross-contamination:
+            // e.g., .worktrees/storyboard should NOT fall back to the main repo's session
+            let is_worktree = path.contains("/.worktrees/") || path.contains("/worktrees/");
+            if !is_worktree {
+                let mut current = path.as_str();
+                loop {
+                    match current.rfind('/') {
+                        Some(pos) if pos > 0 => {
+                            current = &current[..pos];
+                            let parent = current.replace('/', "-").replace('.', "-").replace('_', "-");
+                            if !exact_filters.contains(&parent) && !parent_filters.contains(&parent) {
+                                parent_filters.push(parent);
+                            }
                         }
+                        _ => break,
                     }
-                    _ => break,
                 }
             }
         }

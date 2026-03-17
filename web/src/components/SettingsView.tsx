@@ -105,6 +105,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
        {/* Alert Rules */}
        <AlertRulesSection isModern={isModern} />
 
+       {/* Security — Passkey */}
+       <SecuritySection isModern={isModern} />
+
        {/* Backups */}
        <BackupSection isModern={isModern} />
 
@@ -479,6 +482,76 @@ const BackupSection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
                 <span className="text-green-800 ml-auto">{b.created}</span>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+    </div>
+  );
+};
+
+// Security section component for Passkey management
+const SecuritySection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
+  const [status, setStatus] = useState<'idle' | 'registering' | 'success' | 'error'>('idle');
+  const [hasPasskey, setHasPasskey] = useState(false);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    import('../services/auth').then(({ checkPasskeyStatus }) => {
+      checkPasskeyStatus().then(setHasPasskey);
+    });
+  }, []);
+
+  const handleRegister = async () => {
+    setStatus('registering');
+    setMessage('');
+    try {
+      const { registerPasskey } = await import('../services/auth');
+      const success = await registerPasskey();
+      if (success) {
+        setStatus('success');
+        setMessage('Passkey registered successfully');
+        setHasPasskey(true);
+      } else {
+        setStatus('error');
+        setMessage('Registration failed or cancelled');
+      }
+    } catch (err) {
+      setStatus('error');
+      setMessage('Registration error');
+    }
+  };
+
+  return (
+    <div className={`border-2 p-4 sm:p-8 relative ${isModern ? 'border-green-600 rounded-lg' : 'border-green-600'}`}>
+      <h3 className={`absolute -top-4 left-4 px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase ${isModern ? 'bg-[#0d1117]' : 'bg-[#050505]'}`}>
+        SECURITY
+      </h3>
+      <div className="mt-2 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-green-400 font-mono text-sm font-bold">PASSKEY (WebAuthn)</div>
+            <div className="text-green-800 font-mono text-xs mt-1">
+              {hasPasskey ? 'Passkey registered — biometric login enabled' : 'No passkey registered — using token auth'}
+            </div>
+          </div>
+          <button
+            onClick={handleRegister}
+            disabled={status === 'registering'}
+            className={`px-4 py-2 border-2 font-mono text-sm font-bold tracking-wider transition-all ${
+              isModern ? 'rounded-lg' : ''
+            } ${
+              hasPasskey
+                ? 'border-green-800 text-green-700 hover:border-green-600 hover:text-green-500'
+                : 'border-green-500 text-green-400 hover:bg-green-500 hover:text-black'
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            {status === 'registering' ? 'REGISTERING...' : hasPasskey ? 'ADD ANOTHER' : 'REGISTER PASSKEY'}
+          </button>
+        </div>
+        {message && (
+          <div className={`font-mono text-xs ${status === 'success' ? 'text-green-500' : 'text-red-400'}`}>
+            {'>'} {message}
           </div>
         )}
       </div>

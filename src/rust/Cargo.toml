@@ -51,3 +51,7 @@ base64 = "0.22"
 dirs = "6"
 regex = "1"
 libc = "0.2"
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs-proto = "0.5"
+jsonwebtoken = "10"
+url = "2"

@@ -54,3 +54,4 @@ totp-rs = { workspace = true }
 aes-gcm = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
+hex = { workspace = true }

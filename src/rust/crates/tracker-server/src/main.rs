@@ -17,6 +17,7 @@ mod transcript;
 mod workspace;
 
 mod routes_auth;
+mod routes_totp;
 mod routes_history;
 mod routes_projects;
 mod routes_tmux;
@@ -166,6 +167,8 @@ pub(crate) struct AppState {
     webauthn_auth_states: Mutex<HashMap<String, webauthn_rs::prelude::PasskeyAuthentication>>,
     /// JWT signing secret
     jwt_secret: String,
+    /// TOTP login rate limiter
+    totp_rate_limiter: routes_totp::TotpRateLimiter,
 }
 
 impl AppState {
@@ -195,6 +198,7 @@ impl AppState {
             webauthn_reg_states: Mutex::new(HashMap::new()),
             webauthn_auth_states: Mutex::new(HashMap::new()),
             jwt_secret,
+            totp_rate_limiter: routes_totp::TotpRateLimiter::new(),
         })
     }
 
@@ -1886,6 +1890,10 @@ async fn auth_middleware(
     {
         return next.run(req).await;
     }
+    // TOTP public endpoints (no auth required)
+    if path == "/api/auth/totp/status" || path == "/api/auth/totp/login" {
+        return next.run(req).await;
+    }
 
     let token_valid = if path.starts_with("/ws") {
         // WebSocket: extract token from query string
@@ -3330,6 +3338,12 @@ async fn main() -> Result<()> {
         .route("/api/auth/webauthn/register/finish", post(routes_auth::register_finish))
         .route("/api/auth/webauthn/login/start", post(routes_auth::login_start))
         .route("/api/auth/webauthn/login/finish", post(routes_auth::login_finish))
+        // TOTP routes
+        .route("/api/auth/totp/status", get(routes_totp::totp_status))
+        .route("/api/auth/totp/setup", post(routes_totp::totp_setup))
+        .route("/api/auth/totp/confirm", post(routes_totp::totp_confirm))
+        .route("/api/auth/totp/login", post(routes_totp::totp_login))
+        .route("/api/auth/totp", delete(routes_totp::totp_disable))
         // Health check (no auth required — bypassed in auth_middleware)
         .route("/api/health", get(health_check))
         // Setup status (no auth required — for setup banner)

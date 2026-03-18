@@ -213,9 +213,12 @@ pub(crate) async fn login_finish(
         None => return Json(serde_json::json!({"error": "WebAuthn not configured"})),
     };
 
+    info!("Passkey login_finish: auth_id='{}' received", req.auth_id);
+
     // Check if this auth_id was already successfully verified (duplicate request from proxy)
     {
         let completed = state.webauthn_completed_auths.lock().unwrap();
+        info!("Passkey login_finish: completed_auths has {} entries, checking for '{}'", completed.len(), req.auth_id);
         if let Some(cached_token) = completed.get(&req.auth_id) {
             info!("Passkey login_finish: returning cached JWT for duplicate auth_id '{}'", req.auth_id);
             return Json(serde_json::json!({
@@ -235,7 +238,7 @@ pub(crate) async fn login_finish(
     let auth_state = match auth_state {
         Some(s) => s,
         None => {
-            warn!("Passkey login_finish: auth_id '{}' not found", req.auth_id);
+            warn!("Passkey login_finish: auth_id '{}' not found in auth_states", req.auth_id);
             return Json(
                 serde_json::json!({"error": "Invalid or expired authentication session"}),
             )

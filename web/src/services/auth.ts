@@ -163,33 +163,24 @@ export async function loginPasskeyFinish(authId: string, credential: PublicKeyCr
     },
   };
 
-  // Retry up to 2 times on 502 (Synology proxy intermittent failure)
-  const bodyStr = JSON.stringify(body);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const response = await fetch(`${API_BASE}/auth/webauthn/login/finish`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: bodyStr,
-    });
-    if (response.status === 502 && attempt < 2) {
-      console.warn(`login/finish got 502, retrying (attempt ${attempt + 1})...`);
-      await new Promise(r => setTimeout(r, 500));
-      continue;
-    }
-    const text = await response.text();
-    let data: any;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      console.error('login/finish returned non-JSON:', text.substring(0, 200));
-      return null;
-    }
-    if (data.success && data.token) {
-      return data.token;
-    }
-    throw new Error(`Server response: ${JSON.stringify(data).substring(0, 200)}`);
+  // Single request — no retry (retry causes duplicate finish which invalidates auth_state)
+  const response = await fetch(`${API_BASE}/auth/webauthn/login/finish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    console.error('login/finish returned non-JSON:', text.substring(0, 200));
+    return null;
   }
-  return null;
+  if (data.success && data.token) {
+    return data.token;
+  }
+  throw new Error(`Server response: ${JSON.stringify(data).substring(0, 200)}`);
 }
 
 /** Full passkey login flow: start → browser prompt → finish → store JWT */

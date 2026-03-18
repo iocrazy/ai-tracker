@@ -47,22 +47,22 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     (async () => {
-      // Check cached token first
-      const cached = await getAuthTokenAsync();
-      if (cached) {
-        setAuthenticated(true);
-        setLoading(false);
-        return;
-      }
-      // Auto-read from local config file
+      // Always read token from config file (server may regenerate on restart)
       try {
         const localToken = await invoke<string>('read_local_token');
         if (localToken) {
           await setAuthToken(localToken);
           setAuthenticated(true);
+          setLoading(false);
+          return;
         }
       } catch {
-        // Config not found — show login
+        // Config not found — try cached token
+      }
+      // Fallback to cached token
+      const cached = await getAuthTokenAsync();
+      if (cached) {
+        setAuthenticated(true);
       }
       setLoading(false);
     })();

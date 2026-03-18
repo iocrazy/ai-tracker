@@ -115,12 +115,9 @@ export function useTrackerState() {
     };
   }, []);
 
-  // Connect WebSocket
+  // Connect WebSocket (with retry for async token loading)
   useEffect(() => {
-    const token = getAuthToken();
-    if (!token) return;
-
-    wsRef.current = connectWebSocket({
+    const callbacks = {
       onStateUpdate: async (msg: RealtimeMessage) => {
         const sessions = mapTmuxToSessions(msg.tmux_windows, msg.state.tasks);
         const enriched = await fetchAllClaudeStatus(sessions);
@@ -131,7 +128,7 @@ export function useTrackerState() {
         }));
         setStats(computeStats(enriched));
       },
-      onConnectionChange: (status, retryCount) => {
+      onConnectionChange: (status: ConnectionStatus, retryCount?: number) => {
         setState(prev => ({
           ...prev,
           connectionStatus: status,
@@ -139,7 +136,26 @@ export function useTrackerState() {
           serverOnline: status === 'connected',
         }));
       },
-    });
+    };
+
+    const tryConnect = () => {
+      const token = getAuthToken();
+      if (!token) return false;
+      wsRef.current = connectWebSocket(callbacks);
+      return true;
+    };
+
+    // Try immediately, retry every 500ms up to 10 times if token not ready
+    if (!tryConnect()) {
+      let attempts = 0;
+      const interval = setInterval(() => {
+        attempts++;
+        if (tryConnect() || attempts >= 10) {
+          clearInterval(interval);
+        }
+      }, 500);
+      return () => { clearInterval(interval); disconnectWebSocket(); wsRef.current = null; };
+    }
 
     return () => {
       disconnectWebSocket();

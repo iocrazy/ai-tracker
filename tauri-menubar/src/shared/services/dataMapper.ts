@@ -19,7 +19,7 @@ export function mapTmuxToSessions(
   tasks: BackendTask[]
 ): AgentSession[] {
   const taskMap = new Map<string, BackendTask>();
-  for (const task of tasks) {
+  for (const task of (tasks || [])) {
     const key = `${task.session_id}|${task.window_id}`;
     const existing = taskMap.get(key);
     if (!existing || task.status === 'in_progress' || task.status === 'awaiting_input') {

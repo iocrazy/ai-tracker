@@ -89,7 +89,13 @@ export function connectWebSocket(callbacks: WebSocketCallbacks): WebSocket {
   _lastCallbacks = callbacks;
 
   const token = getAuthToken();
-  const wsUrl = token ? `${WS_BASE}?token=${encodeURIComponent(token)}` : WS_BASE;
+  if (!token) {
+    // No token yet — don't connect, let caller retry later
+    console.log('[WS] No auth token available, skipping connection');
+    _lastConnectTime = 0; // Reset debounce so retry works immediately
+    return null as unknown as WebSocket;
+  }
+  const wsUrl = `${WS_BASE}?token=${encodeURIComponent(token)}`;
   const ws = new WebSocket(wsUrl);
   _currentWs = ws;
 

@@ -980,8 +980,21 @@ async fn handle_command(app_state: &AppState, req: SendCommandRequest) -> Result
                 state.tasks.insert(key, task);
             }
             drop(state);
+
+            // Also upsert a history entry so the session appears in timeline immediately
+            {
+                let git_dir = app_state.resolve_git_dir_for_window(&req.session_id, &req.window_id)
+                    .unwrap_or_default();
+                if !git_dir.is_empty() {
+                    let server = app_state.state.lock().unwrap();
+                    let _ = server.db.upsert_active_history(
+                        &req.session_id, &req.session, &req.window_id, &req.window, &req.pane,
+                        &req.summary, &git_dir,
+                    );
+                }
+            }
+
             app_state.broadcast_state();
-            // Window status icons are now handled by tmux status bar scripts
         }
 
         commands::FINISH_TASK => {

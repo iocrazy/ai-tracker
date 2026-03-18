@@ -3169,6 +3169,53 @@ impl Database {
     }
 
     // =========================================================================
+    // Active History (for timeline visibility of in-progress sessions)
+    // =========================================================================
+
+    /// Create or update a history entry for an active (in-progress) session.
+    /// This ensures the session appears in the timeline before it completes.
+    /// Uses a 60-minute merge window: if a recent entry exists for this session+window, update it.
+    pub fn upsert_active_history(
+        &self,
+        session_id: &str,
+        session: &str,
+        window_id: &str,
+        window: &str,
+        pane: &str,
+        summary: &str,
+        git_dir: &str,
+    ) -> Result<()> {
+        // Check for a recent entry (last 60 min, not completed)
+        let existing: Option<i64> = self.conn.query_row(
+            "SELECT id FROM history
+             WHERE session_id = ?1 AND window_id = ?2 AND pane = ?3
+               AND completed_at IS NULL
+               AND started_at > datetime('now', '-60 minutes')
+             ORDER BY id DESC LIMIT 1",
+            params![session_id, window_id, pane],
+            |row| row.get(0),
+        ).ok();
+
+        if let Some(id) = existing {
+            // Update summary if newer
+            if !summary.is_empty() {
+                self.conn.execute(
+                    "UPDATE history SET summary = ?1 WHERE id = ?2",
+                    params![summary, id],
+                )?;
+            }
+        } else {
+            // Create new entry
+            self.conn.execute(
+                "INSERT INTO history (session_id, session, window_id, window, pane, summary, started_at, git_dir)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), ?7)",
+                params![session_id, session, window_id, window, pane, summary, git_dir],
+            )?;
+        }
+        Ok(())
+    }
+
+    // =========================================================================
     // Hook Ingest
     // =========================================================================
 

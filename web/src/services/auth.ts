@@ -169,13 +169,14 @@ export async function loginPasskeyFinish(authId: string, credential: PublicKeyCr
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  console.log(`login/finish: HTTP ${response.status} ${response.statusText}`);
   const text = await response.text();
+  console.log(`login/finish body (first 300): ${text.substring(0, 300)}`);
   let data: any;
   try {
     data = JSON.parse(text);
   } catch {
-    console.error('login/finish returned non-JSON:', text.substring(0, 200));
-    return null;
+    throw new Error(`login/finish returned non-JSON (HTTP ${response.status}): ${text.substring(0, 100)}`);
   }
   if (data.success && data.token) {
     return data.token;
@@ -183,8 +184,25 @@ export async function loginPasskeyFinish(authId: string, credential: PublicKeyCr
   throw new Error(`Server response: ${JSON.stringify(data).substring(0, 200)}`);
 }
 
-/** Full passkey login flow: start → browser prompt → finish → store JWT */
+/** Full passkey login flow: start → browser prompt → finish → store JWT
+ *  Retries the ENTIRE flow on 502 (Synology proxy timeout) */
 export async function loginWithPasskey(): Promise<boolean> {
+  for (let flowAttempt = 0; flowAttempt < 2; flowAttempt++) {
+    try {
+      return await _loginWithPasskeyOnce();
+    } catch (e: any) {
+      if (flowAttempt === 0 && e?.message?.includes('502')) {
+        console.warn('Passkey login got 502, retrying entire flow...');
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error('Passkey login failed after retries');
+}
+
+async function _loginWithPasskeyOnce(): Promise<boolean> {
   // Step 1: Get challenge from server
   const startData = await loginPasskeyStart();
   if (!startData) throw new Error('Failed to get challenge from server');

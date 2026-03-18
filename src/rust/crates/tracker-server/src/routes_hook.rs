@@ -228,7 +228,7 @@ pub(crate) struct HookMessageRequest {
     session_id: String,
     cwd: String,
     /// Hook event type: "UserPromptSubmit", "Stop", "SubagentStop"
-    #[serde(rename = "type")]
+    #[serde(alias = "type", alias = "hook_event_name")]
     event_type: String,
     /// User prompt (for UserPromptSubmit)
     #[serde(default)]
@@ -398,7 +398,7 @@ pub(crate) struct HookSessionRequest {
     session_id: String,
     cwd: String,
     /// "SessionStart" or "SessionEnd"
-    #[serde(rename = "type")]
+    #[serde(alias = "type", alias = "hook_event_name")]
     event_type: String,
     /// Reason for session end (e.g., "user_exit", "error")
     #[serde(default)]

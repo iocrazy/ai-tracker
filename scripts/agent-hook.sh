@@ -9,14 +9,27 @@
 INPUT=$(cat)
 EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // ""' 2>/dev/null)
 
-# Load env (token, URL)
+[ -z "$EVENT" ] && exit 0
+
+# Load env.sh if available (for TRACKER_TOKEN, TRACKER_URL)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$SCRIPT_DIR/env.sh" ] && source "$SCRIPT_DIR/env.sh"
+
+# If token not set via env.sh, read directly from config files
+if [ -z "${TRACKER_TOKEN:-}" ]; then
+  for cfg in \
+    "$HOME/Library/Application Support/com.agent-tracker.menubar/agent-config.json" \
+    "$HOME/.config/agent-tracker/agent-config.json"; do
+    if [ -f "$cfg" ]; then
+      TRACKER_TOKEN=$(python3 -c "import json; print(json.load(open('$cfg')).get('auth',{}).get('token',''))" 2>/dev/null || true)
+      [ -n "$TRACKER_TOKEN" ] && break
+    fi
+  done
+fi
 
 TOKEN="${TRACKER_TOKEN:-}"
 URL="${TRACKER_URL:-http://127.0.0.1:3099}"
 
-[ -z "$EVENT" ] && exit 0
 [ -z "$TOKEN" ] && exit 0
 
 case "$EVENT" in

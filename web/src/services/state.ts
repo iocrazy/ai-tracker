@@ -106,6 +106,33 @@ export interface StreamMessage {
   chunk: StreamChunk;
 }
 
+// Hook event types (from backend WebSocket broadcasts)
+export interface HookChatMessage {
+  type: 'chat_message';
+  claude_session_id: string;
+  git_dir: string;
+  role: string;
+  content: string;
+  agent_type?: string;
+  timestamp: string;
+}
+
+export interface HookToolEvent {
+  type: 'tool_event';
+  claude_session_id: string;
+  git_dir: string;
+  tool_name: string;
+  tool_use_id: string;
+  timestamp: string;
+}
+
+export interface HookSessionUpdate {
+  type: 'hook_session_update';
+  claude_session_id: string;
+  git_dir: string;
+  event: string;
+}
+
 // WebSocket callbacks
 export type ConnectionStatus = 'connected' | 'reconnecting' | 'offline';
 
@@ -113,6 +140,9 @@ interface WebSocketCallbacks {
   onStateUpdate: (msg: RealtimeMessage) => void;
   onStreamChunk?: (chunk: StreamChunk) => void;
   onChatMessage?: (event: ChatMessageEvent) => void;
+  onHookChatMessage?: (msg: HookChatMessage) => void;
+  onHookToolEvent?: (msg: HookToolEvent) => void;
+  onHookSessionUpdate?: (msg: HookSessionUpdate) => void;
   onConnectionChange?: (status: ConnectionStatus, retryCount?: number) => void;
 }
 
@@ -187,6 +217,24 @@ export function connectWebSocket(
       // Handle chat message events
       if (data.kind === 'chat' && callbacks.onChatMessage) {
         callbacks.onChatMessage(data as ChatMessageEvent);
+        return;
+      }
+
+      // Handle hook chat messages
+      if (data.type === 'chat_message' && callbacks.onHookChatMessage) {
+        callbacks.onHookChatMessage(data as HookChatMessage);
+        return;
+      }
+
+      // Handle hook tool events
+      if (data.type === 'tool_event' && callbacks.onHookToolEvent) {
+        callbacks.onHookToolEvent(data as HookToolEvent);
+        return;
+      }
+
+      // Handle hook session updates (start/end)
+      if (data.type === 'hook_session_update' && callbacks.onHookSessionUpdate) {
+        callbacks.onHookSessionUpdate(data as HookSessionUpdate);
         return;
       }
 

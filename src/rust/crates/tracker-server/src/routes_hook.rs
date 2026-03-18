@@ -277,37 +277,40 @@ pub(crate) async fn hook_message(
 
     let agent_type = req.agent_type;
 
-    // Persist to DB
-    let db_result = {
-        let server = state.state.lock().unwrap();
-        let history_id = server.db.find_or_create_hook_history(
-            &resolved.claude_session_id,
-            &resolved.session_name,
-            &resolved.window_id,
-            &resolved.git_dir,
-        );
-        match history_id {
-            Ok(id) => server.db.insert_hook_message(id, &resolved.claude_session_id, &role, &content),
-            Err(e) => Err(e),
-        }
-    };
-
-    if let Err(e) = db_result {
-        warn!("hook/message: DB error: {}", e);
-        return Json(HookResponse::err(format!("DB error: {}", e)));
-    }
-
-    // Broadcast to WebSocket
+    // Broadcast to WebSocket immediately (frontend sees it instantly)
     let now = chrono::Utc::now().to_rfc3339();
     let event = HookEvent::ChatMessage {
-        claude_session_id: resolved.claude_session_id,
-        git_dir: resolved.git_dir,
-        role,
-        content,
+        claude_session_id: resolved.claude_session_id.clone(),
+        git_dir: resolved.git_dir.clone(),
+        role: role.clone(),
+        content: content.clone(),
         agent_type,
         timestamp: now,
     };
     let _ = state.hook_broadcast_tx.send(event);
+
+    // Persist to DB asynchronously (don't block the response)
+    let state_for_db = state.clone();
+    let resolved_for_db = resolved;
+    let role_for_db = role;
+    let content_for_db = content;
+    tokio::task::spawn_blocking(move || {
+        let server = state_for_db.state.lock().unwrap();
+        let history_id = server.db.find_or_create_hook_history(
+            &resolved_for_db.claude_session_id,
+            &resolved_for_db.session_name,
+            &resolved_for_db.window_id,
+            &resolved_for_db.git_dir,
+        );
+        match history_id {
+            Ok(id) => {
+                if let Err(e) = server.db.insert_hook_message(id, &resolved_for_db.claude_session_id, &role_for_db, &content_for_db) {
+                    warn!("hook/message: DB write error: {}", e);
+                }
+            }
+            Err(e) => warn!("hook/message: history resolution error: {}", e),
+        }
+    });
 
     Json(HookResponse::ok())
 }
@@ -348,43 +351,41 @@ pub(crate) async fn hook_tool(
         if truncated.len() < s.len() { format!("{}...", truncated) } else { s }
     }).unwrap_or_default();
 
-    // Persist to DB
-    let db_result = {
-        let server = state.state.lock().unwrap();
-        let history_id = server.db.find_or_create_hook_history(
-            &resolved.claude_session_id,
-            &resolved.session_name,
-            &resolved.window_id,
-            &resolved.git_dir,
-        );
-        match history_id {
-            Ok(id) => server.db.insert_hook_tool_usage(
-                id,
-                &resolved.claude_session_id,
-                &req.tool_name,
-                &tool_args,
-                &result_summary,
-                &tool_use_id,
-            ),
-            Err(e) => Err(e),
-        }
-    };
-
-    if let Err(e) = db_result {
-        warn!("hook/tool: DB error: {}", e);
-        return Json(HookResponse::err(format!("DB error: {}", e)));
-    }
-
-    // Broadcast to WebSocket
+    // Broadcast to WebSocket immediately
     let now = chrono::Utc::now().to_rfc3339();
     let event = HookEvent::ToolEvent {
-        claude_session_id: resolved.claude_session_id,
-        git_dir: resolved.git_dir,
-        tool_name: req.tool_name,
-        tool_use_id,
+        claude_session_id: resolved.claude_session_id.clone(),
+        git_dir: resolved.git_dir.clone(),
+        tool_name: req.tool_name.clone(),
+        tool_use_id: tool_use_id.clone(),
         timestamp: now,
     };
     let _ = state.hook_broadcast_tx.send(event);
+
+    // Persist to DB asynchronously
+    let state_for_db = state.clone();
+    let resolved_for_db = resolved;
+    let tool_name = req.tool_name;
+    tokio::task::spawn_blocking(move || {
+        let server = state_for_db.state.lock().unwrap();
+        let history_id = server.db.find_or_create_hook_history(
+            &resolved_for_db.claude_session_id,
+            &resolved_for_db.session_name,
+            &resolved_for_db.window_id,
+            &resolved_for_db.git_dir,
+        );
+        match history_id {
+            Ok(id) => {
+                if let Err(e) = server.db.insert_hook_tool_usage(
+                    id, &resolved_for_db.claude_session_id, &tool_name,
+                    &tool_args, &result_summary, &tool_use_id,
+                ) {
+                    warn!("hook/tool: DB write error: {}", e);
+                }
+            }
+            Err(e) => warn!("hook/tool: history resolution error: {}", e),
+        }
+    });
 
     Json(HookResponse::ok())
 }

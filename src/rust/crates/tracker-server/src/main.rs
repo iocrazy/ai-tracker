@@ -3027,11 +3027,19 @@ async fn main() -> Result<()> {
             Uuid::new_v4().as_simple(),
             Uuid::new_v4().as_simple()
         );
-        config.auth.token = token;
+        config.auth.token = token.clone();
         if let Err(e) = config.save() {
             error!("Failed to save config with rotated auth token: {}", e);
         } else {
             info!("Auth token rotated on startup");
+        }
+        // Sync token to Tauri store (settings.json) so menubar WebView picks it up
+        let store_path = paths.data_dir.join("settings.json");
+        let store_json = serde_json::json!({"auth-token": token});
+        if let Err(e) = std::fs::write(&store_path, store_json.to_string()) {
+            warn!("Failed to sync token to Tauri store: {}", e);
+        } else {
+            debug!("Token synced to Tauri store at {:?}", store_path);
         }
     }
     info!("Auth token loaded ({}...)", &config.auth.token[..8]);

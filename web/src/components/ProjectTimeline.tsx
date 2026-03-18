@@ -161,9 +161,13 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
     const endStr = endTime ? endTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
     const timeRange = endStr && endStr !== timeStr ? `${timeStr}-${endStr}` : timeStr;
 
-    // Build description from summaries (show first 3, truncate rest)
+    // Build description from summaries (show first 3, clean up)
+    const cleanSummary = (s: string) => s
+      .replace(/<[^>]+>/g, '')              // Strip XML/HTML tags
+      .replace(/\/Volumes\/[^\s|]*/g, (p) => p.split('/').slice(-2).join('/'))  // Shorten paths
+      .trim();
     const maxSummaries = 3;
-    const visibleSummaries = group.summaries.slice(0, maxSummaries);
+    const visibleSummaries = group.summaries.slice(0, maxSummaries).map(cleanSummary).filter(s => s.length > 0);
     const remaining = group.summaries.length - maxSummaries;
     let description = visibleSummaries.join(' | ');
     if (remaining > 0) {

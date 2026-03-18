@@ -166,11 +166,14 @@ const App: React.FC = () => {
             try {
               const response = await fetchClaudeStatus(session.name, win.name);
               if (response.success) {
-                const hasActivity = response.status.current_tool || response.status.action;
+                // action contains spinner text when Claude is working (e.g. "✢ Twisting…")
+                // current_tool may contain stale output text even when idle — don't use it for BUSY detection
+                const action = response.status.action || '';
+                const isWorking = action !== '' && action !== 'None' && action !== 'null';
                 statusUpdates.set(`${session.id}:${win.id}`, {
-                  claudeStatus: hasActivity ? response.status : undefined,
+                  claudeStatus: isWorking ? response.status : undefined,
                   claudePane: response.status.pane || undefined,
-                  isClaudeBusy: !!hasActivity,
+                  isClaudeBusy: isWorking,
                 });
               }
             } catch {

@@ -51,14 +51,15 @@ export function useTrackerState() {
               const data = await res.json();
               if (data.success && data.status) {
                 const key = `${session.id}|${win.id}`;
-                const hasActivity = data.status.current_tool || data.status.action;
+                // action contains spinner text when working ("✢ Twisting…"), empty/None when idle
+                const action = data.status.action || '';
+                const isWorking = action !== '' && action !== 'None' && action !== 'null';
                 claudeStatusCache.current.set(key, data.status);
-                win.claudeStatus = hasActivity ? data.status : undefined;
+                win.claudeStatus = isWorking ? data.status : undefined;
                 win.claudePane = data.status.pane || undefined;
-                // Sync status: override IDLE→BUSY if Claude is active, BUSY→IDLE if not
-                if (hasActivity && (win.status === 'IDLE' || win.status === 'COMPLETED')) {
+                if (isWorking && (win.status === 'IDLE' || win.status === 'COMPLETED')) {
                   win.status = 'BUSY';
-                } else if (!hasActivity && win.status === 'BUSY') {
+                } else if (!isWorking && win.status === 'BUSY') {
                   win.status = 'IDLE';
                 }
               }
@@ -142,22 +143,6 @@ export function useTrackerState() {
       wsRef.current = null;
     };
   }, [fetchAllClaudeStatus, computeStats]);
-
-  // Periodic Claude status polling (every 5s) to keep IDLE/BUSY in sync
-  useEffect(() => {
-    const poll = async () => {
-      if (state.sessions.length === 0) return;
-      const updated = state.sessions.map(s => ({
-        ...s,
-        windows: s.windows.map(w => ({ ...w })),
-      }));
-      const enriched = await fetchAllClaudeStatus(updated);
-      setState(prev => ({ ...prev, sessions: enriched }));
-      setStats(computeStats(enriched));
-    };
-    const interval = setInterval(poll, 5000);
-    return () => clearInterval(interval);
-  }, [state.sessions.length, fetchAllClaudeStatus, computeStats]);
 
   const reconnect = useCallback(() => {
     const ws = reconnectNow();

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Monitor, Pin, Globe, LogOut, Power, ChevronRight, Eye, Server, Key, Check, X, RefreshCw } from 'lucide-react';
+import { Monitor, Pin, Globe, LogOut, Power, ChevronRight, Eye, Server, Key, Check, X, RefreshCw, Copy } from 'lucide-react';
 import { AgentSession, AgentWindow, ClaudeStatus } from './shared/types';
 import { invoke } from '@tauri-apps/api/core';
 import { clearAuthToken, setAuthToken, API_BASE, authFetch } from './shared/services/auth';
@@ -338,6 +338,9 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
               <Check className="w-4 h-4 text-green-500 shrink-0" />
             ) : (
               <>
+                <button onClick={() => { navigator.clipboard.writeText(tokenValue); }} className="p-0.5 hover:bg-black/5 rounded" title="Copy token">
+                  <Copy className="w-3.5 h-3.5 text-gray-400" />
+                </button>
                 <button onClick={handleRandomizeToken} className="p-0.5 hover:bg-black/5 rounded" title="Generate random token">
                   <RefreshCw className="w-3.5 h-3.5 text-orange-400" />
                 </button>

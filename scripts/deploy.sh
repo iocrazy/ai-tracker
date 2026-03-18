@@ -158,26 +158,50 @@ restart_service() {
     echo -e "${GREEN}  ✓ 服务已重启${NC}"
 }
 
-# Tauri 模式 — 部署到 Agent Tracker.app
+# Tauri 模式 — 构建并安装完整 Tauri app
 install_tauri() {
     echo -e "${YELLOW}[4/5] 安装到 Tauri app...${NC}"
 
-    if [ ! -d "$TAURI_APP" ]; then
-        echo -e "${RED}  ✗ Agent Tracker.app not found${NC}"
-        exit 1
+    TAURI_DIR="$PROJECT_DIR/tauri-menubar"
+    TAURI_SIDECAR="$TAURI_DIR/src-tauri/bin/tracker-server-aarch64-apple-darwin"
+
+    # Update sidecar binary source for Tauri bundling
+    if [ -f "$RUST_DIR/target/release/tracker-server" ]; then
+        cp "$RUST_DIR/target/release/tracker-server" "$TAURI_SIDECAR"
+        echo "  ✓ Sidecar binary updated"
     fi
 
-    # 复制前端 (清理旧 assets 防止 SW 缓存旧版)
+    # Build Tauri app (bundles menubar + sidecar + resources)
+    echo "  Building Tauri app..."
+    cd "$TAURI_DIR"
+    npm run tauri build 2>&1 | tail -2
+    cd "$PROJECT_DIR"
+
+    # Kill existing app
+    pkill -f agent-tracker-menubar 2>/dev/null || true
+    sleep 2
+
+    # Install new app
+    rm -rf "$TAURI_APP"
+    cp -r "$TAURI_DIR/src-tauri/target/release/bundle/macos/Agent Tracker.app" "$TAURI_APP"
+
+    # Overlay web frontend (latest build, may be newer than Tauri bundled)
     if [ -d "$WEB_DIR/dist" ]; then
         rm -rf "$TAURI_WEB/assets"
         cp -r "$WEB_DIR/dist/"* "$TAURI_WEB/"
         echo "  ✓ 前端 → $TAURI_WEB (旧 assets 已清理)"
     fi
 
-    # 复制后端 + codesign
-    cp "$RUST_DIR/target/release/tracker-server" "$TAURI_BIN"
-    codesign -fs - "$TAURI_BIN" 2>/dev/null
-    echo "  ✓ 后端 → $TAURI_BIN (codesigned)"
+    # Copy hook script
+    cp "$PROJECT_DIR/scripts/agent-hook.sh" "$TAURI_APP/Contents/Resources/scripts/agent-hook.sh" 2>/dev/null || true
+    chmod +x "$TAURI_APP/Contents/Resources/scripts/agent-hook.sh" 2>/dev/null || true
+
+    # Pre-seed token to Tauri store
+    local cfg_token
+    cfg_token=$(python3 -c "import json; print(json.load(open('$HOME/Library/Application Support/com.agent-tracker.menubar/agent-config.json')).get('auth',{}).get('token',''))" 2>/dev/null || true)
+    if [ -n "$cfg_token" ]; then
+        python3 -c "import json; json.dump({'auth-token':'$cfg_token'},open('$HOME/Library/Application Support/com.agent-tracker.menubar/settings.json','w'))" 2>/dev/null || true
+    fi
 
     echo -e "${GREEN}  ✓ Tauri 安装完成${NC}"
 }

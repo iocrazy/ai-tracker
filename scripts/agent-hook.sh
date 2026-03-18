@@ -12,21 +12,20 @@ EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // ""' 2>/dev/null)
 
 [ -z "$EVENT" ] && exit 0
 
-# Load env.sh if available
+# Always read token fresh from config (ignore stale env vars)
+TRACKER_TOKEN=""
+for cfg in \
+  "$HOME/Library/Application Support/com.agent-tracker.menubar/agent-config.json" \
+  "$HOME/.config/agent-tracker/agent-config.json"; do
+  if [ -f "$cfg" ]; then
+    TRACKER_TOKEN=$(jq -r '.auth.token // ""' "$cfg" 2>/dev/null)
+    [ -n "$TRACKER_TOKEN" ] && break
+  fi
+done
+
+# URL from env or default
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$SCRIPT_DIR/env.sh" ] && source "$SCRIPT_DIR/env.sh"
-
-# Read token from config files if not set
-if [ -z "${TRACKER_TOKEN:-}" ]; then
-  for cfg in \
-    "$HOME/Library/Application Support/com.agent-tracker.menubar/agent-config.json" \
-    "$HOME/.config/agent-tracker/agent-config.json"; do
-    if [ -f "$cfg" ]; then
-      TRACKER_TOKEN=$(jq -r '.auth.token // ""' "$cfg" 2>/dev/null)
-      [ -n "$TRACKER_TOKEN" ] && break
-    fi
-  done
-fi
 
 TOKEN="${TRACKER_TOKEN:-}"
 URL="${TRACKER_URL:-http://127.0.0.1:3099}"

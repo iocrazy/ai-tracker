@@ -213,16 +213,29 @@ pub(crate) async fn login_finish(
         None => return Json(serde_json::json!({"error": "WebAuthn not configured"})),
     };
 
-    // Retrieve auth state (don't remove yet — allow retry on network issues)
+    // Check if this auth_id was already successfully verified (duplicate request from proxy)
+    {
+        let completed = state.webauthn_completed_auths.lock().unwrap();
+        if let Some(cached_token) = completed.get(&req.auth_id) {
+            info!("Passkey login_finish: returning cached JWT for duplicate auth_id '{}'", req.auth_id);
+            return Json(serde_json::json!({
+                "success": true,
+                "token": cached_token,
+                "expires_in": 7 * 24 * 3600,
+            }));
+        }
+    }
+
+    // Retrieve and remove auth state
     let auth_state = {
-        let auth_states = state.webauthn_auth_states.lock().unwrap();
-        auth_states.get(&req.auth_id).cloned()
+        let mut auth_states = state.webauthn_auth_states.lock().unwrap();
+        auth_states.remove(&req.auth_id)
     };
 
     let auth_state = match auth_state {
         Some(s) => s,
         None => {
-            warn!("Passkey login_finish: auth_id '{}' not found (expired or already used)", req.auth_id);
+            warn!("Passkey login_finish: auth_id '{}' not found", req.auth_id);
             return Json(
                 serde_json::json!({"error": "Invalid or expired authentication session"}),
             )
@@ -231,11 +244,6 @@ pub(crate) async fn login_finish(
 
     match webauthn.finish_passkey_authentication(&req.credential, &auth_state) {
         Ok(auth_result) => {
-            // Remove auth state only after successful verification
-            {
-                let mut auth_states = state.webauthn_auth_states.lock().unwrap();
-                auth_states.remove(&req.auth_id);
-            }
             info!(
                 "Passkey authentication successful, counter={}",
                 auth_result.counter()
@@ -243,11 +251,18 @@ pub(crate) async fn login_finish(
 
             // Issue JWT
             match issue_jwt(&state.jwt_secret) {
-                Ok(token) => Json(serde_json::json!({
-                    "success": true,
-                    "token": token,
-                    "expires_in": 7 * 24 * 3600,
-                })),
+                Ok(token) => {
+                    // Cache the token for duplicate requests (proxy retry)
+                    {
+                        let mut completed = state.webauthn_completed_auths.lock().unwrap();
+                        completed.insert(req.auth_id.clone(), token.clone());
+                    }
+                    Json(serde_json::json!({
+                        "success": true,
+                        "token": token,
+                        "expires_in": 7 * 24 * 3600,
+                    }))
+                }
                 Err(e) => {
                     error!("Failed to issue JWT: {}", e);
                     Json(serde_json::json!({"error": "Failed to issue session token"}))

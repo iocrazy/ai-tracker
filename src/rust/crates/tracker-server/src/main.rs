@@ -166,6 +166,8 @@ pub(crate) struct AppState {
     webauthn_reg_states: Mutex<HashMap<String, webauthn_rs::prelude::PasskeyRegistration>>,
     /// Temporary storage for in-progress WebAuthn authentications
     webauthn_auth_states: Mutex<HashMap<String, webauthn_rs::prelude::PasskeyAuthentication>>,
+    /// Cache of completed auth_id → JWT token (for duplicate proxy requests)
+    webauthn_completed_auths: Mutex<HashMap<String, String>>,
     /// JWT signing secret
     jwt_secret: String,
     /// TOTP login rate limiter
@@ -202,6 +204,7 @@ impl AppState {
             webauthn,
             webauthn_reg_states: Mutex::new(HashMap::new()),
             webauthn_auth_states: Mutex::new(HashMap::new()),
+            webauthn_completed_auths: Mutex::new(HashMap::new()),
             jwt_secret,
             totp_rate_limiter: routes_totp::TotpRateLimiter::new(),
             hook_broadcast_tx: broadcast::channel(64).0,

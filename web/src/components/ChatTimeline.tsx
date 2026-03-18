@@ -249,8 +249,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       prose-ul:my-0.5 prose-ol:my-0.5 prose-li:my-0 prose-li:leading-snug
                       [&_ol]:list-decimal [&_ol]:list-inside [&_ol]:pl-2
                       [&_ul]:list-disc [&_ul]:list-inside [&_ul]:pl-2
-                      [&_table]:block [&_table]:overflow-x-auto [&_table]:max-w-full [&_table]:text-xs
-                      [&_td]:break-all [&_th]:break-all">
+                      [&_table]:block [&_table]:overflow-x-auto [&_table]:max-w-full [&_table]:text-xs [&_table]:border-collapse [&_table]:my-1
+                      [&_th]:border [&_th]:border-green-800 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:text-green-300 [&_th]:bg-green-900/30 [&_th]:font-bold
+                      [&_td]:border [&_td]:border-green-900/50 [&_td]:px-2 [&_td]:py-1 [&_td]:break-all">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content || ''}</ReactMarkdown>
                     </div>
                   );

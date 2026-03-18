@@ -35,60 +35,40 @@ export function useTrackerState() {
   const wsRef = useRef<WebSocket | null>(null);
   const claudeStatusCache = useRef<Map<string, ClaudeStatus>>(new Map());
 
-  // Fetch Claude status for all BUSY windows
+  // Fetch Claude status for ALL windows and sync IDLE↔BUSY
   const fetchAllClaudeStatus = useCallback(async (sessions: AgentSession[]) => {
     const token = getAuthToken();
     if (!token) return sessions;
 
-    const busyWindows: { session: AgentSession; window: AgentSession['windows'][0] }[] = [];
-    for (const s of sessions) {
-      for (const w of s.windows) {
-        if (w.status === 'BUSY' || w.status === 'PAUSED') {
-          busyWindows.push({ session: s, window: w });
-        }
-      }
-    }
-
+    // Query Claude status for every window (not just BUSY)
     await Promise.all(
-      busyWindows.map(async ({ session, window: win }) => {
-        try {
-          const params = new URLSearchParams({ session: session.name, window: win.name });
-          const res = await authFetch(`${API_BASE}/tmux/claude-status?${params}`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.success && data.status) {
-              const key = `${session.id}|${win.id}`;
-              claudeStatusCache.current.set(key, data.status);
-              win.claudeStatus = data.status;
-              win.claudePane = data.status.pane || undefined;
+      sessions.flatMap(session =>
+        session.windows.map(async (win) => {
+          try {
+            const params = new URLSearchParams({ session: session.name, window: win.name });
+            const res = await authFetch(`${API_BASE}/tmux/claude-status?${params}`);
+            if (res.ok) {
+              const data = await res.json();
+              if (data.success && data.status) {
+                const key = `${session.id}|${win.id}`;
+                const hasActivity = data.status.current_tool || data.status.action;
+                claudeStatusCache.current.set(key, data.status);
+                win.claudeStatus = hasActivity ? data.status : undefined;
+                win.claudePane = data.status.pane || undefined;
+                // Sync status: override IDLE→BUSY if Claude is active, BUSY→IDLE if not
+                if (hasActivity && (win.status === 'IDLE' || win.status === 'COMPLETED')) {
+                  win.status = 'BUSY';
+                } else if (!hasActivity && win.status === 'BUSY') {
+                  win.status = 'IDLE';
+                }
+              }
             }
+          } catch {
+            // Ignore individual failures
           }
-        } catch {
-          // Ignore individual failures
-        }
-      })
+        })
+      )
     );
-
-    // Apply cached pane info to non-busy windows (for cost stats), but clear action/tool
-    for (const s of sessions) {
-      for (const w of s.windows) {
-        const key = `${s.id}|${w.id}`;
-        if (w.status === 'BUSY' || w.status === 'PAUSED') {
-          // Active windows: apply full cache if not already fetched
-          if (!w.claudeStatus) {
-            const cached = claudeStatusCache.current.get(key);
-            if (cached) w.claudeStatus = cached;
-          }
-        } else {
-          // Idle windows: only keep cost/model/pane, clear action/tool
-          const cached = claudeStatusCache.current.get(key);
-          if (cached) {
-            w.claudeStatus = { ...cached, action: null, current_tool: null };
-            w.claudePane = cached.pane || undefined;
-          }
-        }
-      }
-    }
 
     return sessions;
   }, []);
@@ -162,6 +142,22 @@ export function useTrackerState() {
       wsRef.current = null;
     };
   }, [fetchAllClaudeStatus, computeStats]);
+
+  // Periodic Claude status polling (every 5s) to keep IDLE/BUSY in sync
+  useEffect(() => {
+    const poll = async () => {
+      if (state.sessions.length === 0) return;
+      const updated = state.sessions.map(s => ({
+        ...s,
+        windows: s.windows.map(w => ({ ...w })),
+      }));
+      const enriched = await fetchAllClaudeStatus(updated);
+      setState(prev => ({ ...prev, sessions: enriched }));
+      setStats(computeStats(enriched));
+    };
+    const interval = setInterval(poll, 5000);
+    return () => clearInterval(interval);
+  }, [state.sessions.length, fetchAllClaudeStatus, computeStats]);
 
   const reconnect = useCallback(() => {
     const ws = reconnectNow();

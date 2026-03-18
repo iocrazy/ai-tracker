@@ -446,7 +446,7 @@ const App: React.FC = () => {
         try { return JSON.parse(saved); } catch {}
       }
       return {
-        theme: 'PHOSPHOR_GREEN',
+        theme: 'MODERN',
         scanlines: true,
         flicker: true,
         glow: true,

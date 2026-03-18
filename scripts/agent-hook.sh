@@ -1,21 +1,22 @@
 #!/bin/bash
-# agent-hook.sh — Unified Claude Code hook forwarder
-# Routes hook events to tracker-server ingest endpoints.
-# Reads JSON from stdin, uses jq for parsing.
+# agent-hook.sh — Unified Claude Code hook handler
+# Combines task status management (old /api/hook) and conversation tracking (new /api/hook/*).
+# Reads JSON from stdin, routes to both endpoints.
 #
-# Usage: Configured in ~/.claude/settings.json as hook command for:
-#   UserPromptSubmit, Stop, SubagentStop, PostToolUse, SessionStart, SessionEnd
+# Configured in ~/.claude/settings.json for:
+#   UserPromptSubmit, Stop, SubagentStop, PostToolUse, SessionStart, SessionEnd,
+#   PermissionRequest, Notification
 
 INPUT=$(cat)
 EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // ""' 2>/dev/null)
 
 [ -z "$EVENT" ] && exit 0
 
-# Load env.sh if available (for TRACKER_TOKEN, TRACKER_URL)
+# Load env.sh if available
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$SCRIPT_DIR/env.sh" ] && source "$SCRIPT_DIR/env.sh"
 
-# If token not set via env.sh, read directly from config files
+# Read token from config files if not set
 if [ -z "${TRACKER_TOKEN:-}" ]; then
   for cfg in \
     "$HOME/Library/Application Support/com.agent-tracker.menubar/agent-config.json" \
@@ -32,18 +33,43 @@ URL="${TRACKER_URL:-http://127.0.0.1:3099}"
 
 [ -z "$TOKEN" ] && exit 0
 
+AUTH=(-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json")
+
+# --- 1. Legacy task status endpoint (/api/hook) ---
+# Handles: UserPromptSubmit, Stop, PermissionRequest, Notification
+# Sends X-Hook-Event header for the old handler
+case "$EVENT" in
+  UserPromptSubmit|Stop|PermissionRequest|Notification)
+    curl -sf -X POST "$URL/api/hook" \
+      "${AUTH[@]}" \
+      -H "X-Hook-Event: $EVENT" \
+      -H "X-Tmux-Pane: ${TMUX_PANE:-}" \
+      -d "$INPUT" \
+      --max-time 5 >/dev/null 2>&1 &
+    ;;
+esac
+
+# --- 2. New conversation/tool/session endpoints (/api/hook/*) ---
 case "$EVENT" in
   UserPromptSubmit|Stop|SubagentStop)  EP="/api/hook/message" ;;
   PostToolUse)                          EP="/api/hook/tool" ;;
   SessionStart|SessionEnd)              EP="/api/hook/session" ;;
-  *)                                    exit 0 ;;
+  *)                                    EP="" ;;
 esac
 
-# Fire and forget (async, max 3s timeout)
-curl -sf -X POST "$URL$EP" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$INPUT" \
-  --max-time 3 >/dev/null 2>&1 &
+if [ -n "$EP" ]; then
+  curl -sf -X POST "$URL$EP" \
+    "${AUTH[@]}" \
+    -d "$INPUT" \
+    --max-time 3 >/dev/null 2>&1 &
+fi
+
+# --- 3. Desktop notification on Stop ---
+if [ "$EVENT" = "Stop" ]; then
+  NOTIFY_SCRIPT="$SCRIPT_DIR/notify.py"
+  if [ -f "$NOTIFY_SCRIPT" ]; then
+    python3 "$NOTIFY_SCRIPT" '{"type":"agent-turn-complete"}' >/dev/null 2>&1 &
+  fi
+fi
 
 exit 0

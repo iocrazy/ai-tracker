@@ -550,7 +550,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   // =====================================================
   if (!selectedProject) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-4 overflow-x-hidden">
         {/* Header */}
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-3">
@@ -797,7 +797,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 overflow-x-hidden">
       {/* Breadcrumb + Back */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
@@ -845,8 +845,8 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
       </div>
 
       {/* Sub-tabs */}
-      <div className="border-b border-green-900">
-        <div className="flex">
+      <div className="border-b border-green-900 overflow-x-auto overflow-y-hidden scrollbar-hide" style={{ WebkitOverflowScrolling: 'touch' }}>
+        <div className="flex min-w-max">
           {([
             { id: 'overview' as DetailTab, label: 'OVERVIEW', icon: Activity },
             { id: 'todos' as DetailTab, label: `TODOS${(() => { const c = projectTodos.length > 0 ? projectTodos.filter(t => t.status !== 'done').length : selectedProject.todos_count; return c > 0 ? ` (${c})` : ''; })()}`, icon: CheckSquare },
@@ -859,12 +859,12 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
             <button
               key={tab.id}
               onClick={() => setDetailTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2 text-xs font-bold tracking-widest uppercase transition-all
+              className={`flex items-center gap-2 px-3 sm:px-4 py-2 text-[10px] sm:text-xs font-bold tracking-wider sm:tracking-widest uppercase transition-all whitespace-nowrap flex-shrink-0
                 ${detailTab === tab.id
                   ? 'text-green-300 border-b-2 border-green-400 bg-green-900/20'
                   : 'text-green-700 hover:text-green-500'}`}
             >
-              <tab.icon className="w-4 h-4" />
+              <tab.icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               {tab.label}
             </button>
           ))}
@@ -1025,19 +1025,19 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
 
               {/* Branches */}
               {gitInfo.branches.length > 0 && (
-                <div className="border border-green-900/50">
+                <div className="border border-green-900/50 overflow-hidden">
                   <div className="flex items-center px-3 py-2 border-b border-green-900/50 bg-green-900/10">
-                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-1">BRANCH</span>
-                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold w-[100px] text-center">AHEAD/BEHIND</span>
-                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-[2] text-right">LAST COMMIT</span>
+                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-1 min-w-0">BRANCH</span>
+                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold w-[60px] sm:w-[100px] text-center flex-shrink-0">AHEAD/BEHIND</span>
+                    <span className="text-green-700 text-[10px] tracking-widest uppercase font-bold flex-1 min-w-0 text-right">LAST COMMIT</span>
                   </div>
                   {gitInfo.branches.map(b => (
                     <div key={b.name} className={`flex items-center px-3 py-2 border-b border-green-900/30 hover:bg-green-900/5 ${b.is_current ? 'bg-green-900/10' : ''}`}>
                       <div className="flex items-center gap-2 flex-1 min-w-0">
                         <GitBranch className={`w-3 h-3 shrink-0 ${b.is_current ? 'text-green-400' : 'text-green-800'}`} />
-                        <span className={`font-mono text-sm truncate ${b.is_current ? 'text-green-300 font-bold' : 'text-green-600'}`}>{b.name}</span>
+                        <span className={`font-mono text-xs sm:text-sm truncate ${b.is_current ? 'text-green-300 font-bold' : 'text-green-600'}`}>{b.name}</span>
                       </div>
-                      <div className="w-[100px] text-center flex items-center justify-center gap-1.5">
+                      <div className="w-[60px] sm:w-[100px] text-center flex items-center justify-center gap-1.5 flex-shrink-0">
                         {(b.ahead > 0 || b.behind > 0) ? (
                           <>
                             {b.ahead > 0 && <span className="text-green-500 text-[10px] font-mono">+{b.ahead}</span>}
@@ -1047,8 +1047,8 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                           <span className="text-green-800 text-[10px] font-mono">--</span>
                         )}
                       </div>
-                      <div className="flex-[2] text-right">
-                        <span className="text-green-700 font-mono text-xs truncate">{b.message}</span>
+                      <div className="flex-1 min-w-0 text-right">
+                        <span className="text-green-700 font-mono text-[11px] sm:text-xs truncate block">{b.message}</span>
                       </div>
                     </div>
                   ))}
@@ -1545,7 +1545,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ sessions, onSwitchTa
                       <span className="text-green-800 font-mono text-[10px] break-all">{file.path}</span>
                     </div>
                     {/* File content */}
-                    <div className="p-4 max-h-[60vh] overflow-auto">
+                    <div className="p-4 sm:max-h-[60vh] sm:overflow-auto">
                       {file.name.endsWith('.md') ? (
                         <div className="prose-green">
                           <MarkdownText content={file.content} />

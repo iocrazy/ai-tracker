@@ -592,12 +592,12 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
               filteredEvents.map((event, index) => (
                 <React.Fragment key={event.id}>
                   {event.dateLabel && (
-                    <div className="relative -ml-4 pl-4 py-2 flex items-center gap-3">
-                      <div className="absolute -left-[39px] top-1/2 -translate-y-1/2 w-5 h-[2px] bg-green-700/50" />
-                      <span className="text-green-500 font-mono text-xs font-bold tracking-wider bg-black/60 px-2 py-1 rounded border border-green-800/40">
+                    <div className="relative -ml-8 pl-8 py-1 flex items-center gap-2">
+                      <div className="absolute left-[-1px] top-1/2 -translate-y-1/2 w-3 h-[2px] bg-green-600/60" />
+                      <span className="text-green-500 font-mono text-[11px] font-bold tracking-wider bg-green-900/30 px-2 py-0.5 rounded border border-green-800/40">
                         {event.dateLabel}
                       </span>
-                      <div className="flex-1 h-px bg-green-800/30" />
+                      <div className="flex-1 h-px bg-green-800/20" />
                     </div>
                   )}
                   <TimelineItem

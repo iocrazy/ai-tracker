@@ -17,6 +17,7 @@ mod transcript;
 mod workspace;
 
 mod routes_auth;
+mod routes_hook;
 mod routes_totp;
 mod routes_history;
 mod routes_projects;
@@ -169,6 +170,10 @@ pub(crate) struct AppState {
     jwt_secret: String,
     /// TOTP login rate limiter
     totp_rate_limiter: routes_totp::TotpRateLimiter,
+    /// Hook event broadcast channel (separate from state broadcast)
+    hook_broadcast_tx: broadcast::Sender<routes_hook::HookEvent>,
+    /// Git dir resolution cache: cwd → Option<git_root>
+    git_dir_cache: Mutex<HashMap<String, Option<String>>>,
 }
 
 impl AppState {
@@ -199,6 +204,8 @@ impl AppState {
             webauthn_auth_states: Mutex::new(HashMap::new()),
             jwt_secret,
             totp_rate_limiter: routes_totp::TotpRateLimiter::new(),
+            hook_broadcast_tx: broadcast::channel(64).0,
+            git_dir_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2695,6 +2702,9 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     // Subscribe to chat message events
     let mut chat_rx = state.chat_watcher.subscribe();
 
+    // Subscribe to hook events
+    let mut hook_rx = state.hook_broadcast_tx.subscribe();
+
     // Send initial realtime message (state + tmux windows)
     // If cached tmux windows are empty, do a live query to ensure first client gets real data
     let initial_msg = {
@@ -2785,6 +2795,27 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    // Spawn task to forward hook events to WebSocket
+    let sender_clone4 = sender.clone();
+    let hook_send_task = tokio::spawn(async move {
+        loop {
+            match hook_rx.recv().await {
+                Ok(event) => {
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    let mut sender_guard = sender_clone4.lock().await;
+                    if sender_guard.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("WebSocket hook receiver lagged, skipped {} messages", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
     // Server-side heartbeat: send Ping every 30s, disconnect if no Pong within 90s
     // Generous timeout avoids false disconnects when Tauri app is backgrounded
     let sender_ping = sender.clone();
@@ -2850,6 +2881,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
     state_send_task.abort();
     stream_send_task.abort();
     chat_send_task.abort();
+    hook_send_task.abort();
     ping_task.abort();
     let duration = chrono::Utc::now().signed_duration_since(connected_at);
     info!("[WS-{}] Disconnected after {}", ws_id, format_duration_human(duration));
@@ -3173,6 +3205,28 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Background task: close stale hook sessions every 60s
+    let stale_state = app_state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let state_ref = stale_state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let server = state_ref.state.lock().unwrap();
+                match server.db.close_stale_hook_sessions(10) {
+                    Ok(n) if n > 0 => {
+                        info!("Closed {} stale hook sessions", n);
+                    }
+                    Err(e) => {
+                        debug!("Stale hook session check error: {}", e);
+                    }
+                    _ => {}
+                }
+            }).await;
+        }
+    });
+
     // Background task: daily auto-backup
     // Offloaded to spawn_blocking because backup_to does blocking SQLite I/O.
     let backup_state = app_state.clone();
@@ -3344,6 +3398,10 @@ async fn main() -> Result<()> {
         .route("/api/auth/totp/confirm", post(routes_totp::totp_confirm))
         .route("/api/auth/totp/login", post(routes_totp::totp_login))
         .route("/api/auth/totp", delete(routes_totp::totp_disable))
+        // Hook ingest (Claude Code hooks)
+        .route("/api/hook/message", post(routes_hook::hook_message))
+        .route("/api/hook/tool", post(routes_hook::hook_tool))
+        .route("/api/hook/session", post(routes_hook::hook_session))
         // Health check (no auth required — bypassed in auth_middleware)
         .route("/api/health", get(health_check))
         // Setup status (no auth required — for setup banner)

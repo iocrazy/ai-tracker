@@ -3018,10 +3018,9 @@ async fn main() -> Result<()> {
         .init();
     paths.migrate_if_needed();
 
-    // Load configuration and rotate auth token on startup
+    // Load configuration (generate token only if empty, never rotate)
     let mut config = config::AgentConfig::load().unwrap_or_default();
-    {
-        // Always rotate auth token on startup
+    if config.auth.token.is_empty() {
         let token = format!(
             "{}{}",
             Uuid::new_v4().as_simple(),
@@ -3029,18 +3028,14 @@ async fn main() -> Result<()> {
         );
         config.auth.token = token.clone();
         if let Err(e) = config.save() {
-            error!("Failed to save config with rotated auth token: {}", e);
+            error!("Failed to save config with new auth token: {}", e);
         } else {
-            info!("Auth token rotated on startup");
+            info!("Generated new auth token (first run)");
         }
-        // Sync token to Tauri store (settings.json) so menubar WebView picks it up
+        // Sync to Tauri store so menubar WebView picks it up
         let store_path = paths.data_dir.join("settings.json");
         let store_json = serde_json::json!({"auth-token": token});
-        if let Err(e) = std::fs::write(&store_path, store_json.to_string()) {
-            warn!("Failed to sync token to Tauri store: {}", e);
-        } else {
-            debug!("Token synced to Tauri store at {:?}", store_path);
-        }
+        let _ = std::fs::write(&store_path, store_json.to_string());
     }
     info!("Auth token loaded ({}...)", &config.auth.token[..8]);
 

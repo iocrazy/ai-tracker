@@ -53,7 +53,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     const hookConverted: ChatMessage[] = hookMessages.map(m => ({
       sender: m.role === 'user' ? 'USER' : 'AGENT',
       text: m.content,
-      timestamp: m.timestamp ? new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '',
+      timestamp: m.timestamp || '',
     }));
     return [...messages, ...hookConverted];
   }, [messages, hookMessages]);

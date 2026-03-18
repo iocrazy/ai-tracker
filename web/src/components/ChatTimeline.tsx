@@ -85,7 +85,14 @@ export function fromHistoryTimeline(entries: TimelineEntry[]): TimelineItem[] {
 
   for (const entry of entries) {
     const role = entry.role as 'user' | 'assistant';
-    const timestamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '';
+    // Convert ISO timestamp to local time; pass through if already HH:mm:ss
+    let timestamp = entry.timestamp || '';
+    if (timestamp.includes('T') || timestamp.includes('Z')) {
+      const d = new Date(timestamp);
+      if (!isNaN(d.getTime())) {
+        timestamp = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      }
+    }
 
     // Group consecutive entries from the same role+timestamp into one item
     if (!currentItem || currentItem.role !== role || currentItem.timestamp !== timestamp) {

@@ -82,10 +82,15 @@ fn start_sidecar(app: &tauri::AppHandle) {
         let _ = std::fs::create_dir_all(&data_dir);
     }
 
+    // Inherit PATH so sidecar can find tmux, git, etc.
+    // macOS apps don't inherit shell PATH — must include homebrew paths for tmux/git
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    let path_env = format!("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{}", system_path);
     let cmd = match app.shell().sidecar("tracker-server") {
         Ok(cmd) => cmd
             .env("TRACKER_RESOURCES_DIR", &resources_dir)
-            .env("TRACKER_DATA_DIR", &data_dir),
+            .env("TRACKER_DATA_DIR", &data_dir)
+            .env("PATH", &path_env),
         Err(e) => {
             eprintln!("Failed to create sidecar command: {e}");
             app.manage(SidecarState {
@@ -290,10 +295,14 @@ fn restart_sidecar(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    // macOS apps don't inherit shell PATH — must include homebrew paths for tmux/git
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    let path_env = format!("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{}", system_path);
     let cmd = app.shell().sidecar("tracker-server")
         .map_err(|e| format!("Failed to create sidecar command: {e}"))?
         .env("TRACKER_RESOURCES_DIR", &resources_dir)
-        .env("TRACKER_DATA_DIR", &data_dir);
+        .env("TRACKER_DATA_DIR", &data_dir)
+        .env("PATH", &path_env);
 
     let (_rx, child) = cmd.spawn()
         .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;

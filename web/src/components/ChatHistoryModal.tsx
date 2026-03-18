@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, MessageSquare, Send, Paperclip, XCircle } from 'lucide-react';
-import { tmuxSendKeys, tmuxSendRawKeys, sendImages, ToolInteraction, ToolCallInfo, ToolResultInfo } from '../services/api';
+import { tmuxSendKeys, tmuxSendRawKeys, sendImages, ToolInteraction, ToolCallInfo, ToolResultInfo, HookChatMessage } from '../services/api';
 import { ClaudeStatus } from '../types';
 import { ChatTimeline, fromLiveChatMessages } from './ChatTimeline';
 
@@ -22,6 +22,7 @@ interface ChatHistoryModalProps {
   title: string;
   subtitle?: string;
   messages: ChatMessage[];
+  hookMessages?: HookChatMessage[];  // Real-time hook messages to append
   sessionName?: string;
   windowName?: string;
   windowId?: string;  // tmux window ID (e.g., "@33") for send-keys targeting
@@ -32,7 +33,7 @@ interface ChatHistoryModalProps {
 // Default pane where Claude runs (can be auto-detected or configured per window)
 const DEFAULT_CLAUDE_PANE = '1';
 
-export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, messages, sessionName, windowName, windowId, claudePane, claudeStatus }) => {
+export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, messages, hookMessages, sessionName, windowName, windowId, claudePane, claudeStatus }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [inputValue, setInputValue] = useState('');
@@ -45,6 +46,17 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [sentInteractions, setSentInteractions] = useState<Set<number>>(new Set());
+
+  // Merge hook messages into displayed messages
+  const allMessages = useMemo(() => {
+    if (!hookMessages || hookMessages.length === 0) return messages;
+    const hookConverted: ChatMessage[] = hookMessages.map(m => ({
+      sender: m.role === 'user' ? 'USER' : 'AGENT',
+      text: m.content,
+      timestamp: m.timestamp?.slice(11, 19) || '',
+    }));
+    return [...messages, ...hookConverted];
+  }, [messages, hookMessages]);
 
   // Reset send status after a delay
   useEffect(() => {
@@ -214,7 +226,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
 
   // Auto-scroll to bottom when modal opens
   useEffect(() => {
-    if (isOpen && scrollRef.current && messages.length > 0) {
+    if (isOpen && scrollRef.current && allMessages.length > 0) {
       // Always scroll to bottom when modal first opens
       setTimeout(() => {
         if (scrollRef.current) {
@@ -227,14 +239,14 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
 
   // Auto-scroll on new messages only if user is at bottom
   useEffect(() => {
-    if (isOpen && scrollRef.current && messages.length > 0 && isAtBottom) {
+    if (isOpen && scrollRef.current && allMessages.length > 0 && isAtBottom) {
       setTimeout(() => {
         if (scrollRef.current) {
           scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
       }, 50);
     }
-  }, [messages, isAtBottom, isOpen]);
+  }, [allMessages, isAtBottom, isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -318,7 +330,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
               </div>
             )}
             <ChatTimeline
-              items={fromLiveChatMessages(messages)}
+              items={fromLiveChatMessages(allMessages)}
               onInteractionSelect={isLive ? async (msgIdx, optIdx, multiSelect, totalOptions) => {
                 if (!sessionName || !windowId) return;
                 const targetPane = claudePane || DEFAULT_CLAUDE_PANE;

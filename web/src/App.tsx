@@ -18,7 +18,7 @@ import { SetupBanner } from './components/SetupBanner';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
-import { fetchState, connectWebSocket, disconnectWebSocket, getCurrentWs, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, consumeTokenFromURL, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
+import { fetchState, connectWebSocket, disconnectWebSocket, getCurrentWs, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, HookChatMessage, HookSessionUpdate, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, consumeTokenFromURL, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 // localStorage cache keys
@@ -250,6 +250,30 @@ const App: React.FC = () => {
     }
   }, []);
 
+  // Hook-based real-time chat messages (from agent-event.sh hooks)
+  const [hookChatMessages, setHookChatMessages] = useState<HookChatMessage[]>([]);
+
+  // Handle hook chat messages from WebSocket
+  const handleHookChatMessage = useCallback((msg: HookChatMessage) => {
+    setHookChatMessages(prev => [...prev, msg]);
+  }, []);
+
+  // Handle hook session updates (start/end) — sync window status
+  const handleHookSessionUpdate = useCallback((msg: HookSessionUpdate) => {
+    setSessions(prev => prev.map(session => {
+      if (session.gitDir !== msg.git_dir) return session;
+      const newStatus = msg.event === 'start' ? 'BUSY' as const : 'IDLE' as const;
+      return {
+        ...session,
+        status: newStatus,
+        windows: session.windows.map(win => ({
+          ...win,
+          status: newStatus,
+        })),
+      };
+    }));
+  }, []);
+
   // Store latest state for polling
   const latestStateRef = useRef<BackendState | null>(null);
 
@@ -296,6 +320,8 @@ const App: React.FC = () => {
       onStateUpdate: handleRealtimeUpdate,
       onStreamChunk: handleStreamChunk,
       onChatMessage: handleChatMessage,
+      onHookChatMessage: handleHookChatMessage,
+      onHookSessionUpdate: handleHookSessionUpdate,
       onConnectionChange: (status: ConnectionStatus, retry?: number) => {
         setConnStatus(status);
         setRetryCount(retry || 0);
@@ -357,7 +383,7 @@ const App: React.FC = () => {
       clearInterval(stalenessInterval);
       disconnectWebSocket();
     };
-  }, [isAuthenticated, handleRealtimeUpdate, handleStreamChunk, handleChatMessage]);
+  }, [isAuthenticated, handleRealtimeUpdate, handleStreamChunk, handleChatMessage, handleHookChatMessage, handleHookSessionUpdate]);
 
   // Health polling (every 30s)
   useEffect(() => {
@@ -966,6 +992,13 @@ const App: React.FC = () => {
                 windowName={modalTarget?.window}
                 windowId={modalTarget?.windowId}
                 claudePane={modalTarget?.claudePane}
+                hookMessages={
+                  modalTarget
+                    ? hookChatMessages.filter(m =>
+                        m.git_dir === sessions.find(s => s.name === modalTarget.session)?.gitDir
+                      )
+                    : []
+                }
                 claudeStatus={
                   modalTarget
                     ? sessions

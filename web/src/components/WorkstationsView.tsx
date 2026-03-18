@@ -223,6 +223,12 @@ const WindowCardContent: React.FC<{
           <span className="text-green-700/80">{win.lastActive}</span>
         </div>
 
+        {win.claudeStatus?.awaiting_resume && (
+          <div className="text-xs font-mono mb-2 text-yellow-400 bg-yellow-900/20 px-2 py-1 rounded border border-yellow-800/30">
+            ⏸ 等待选择 Resume Session
+          </div>
+        )}
+
         {win.claudeStatus && (win.claudeStatus.cost !== null || win.claudeStatus.current_tool !== null || win.claudeStatus.action !== null) && (
           <div className="text-xs font-mono mb-4 space-y-1">
             {(win.claudeStatus.current_tool || win.claudeStatus.action) && (

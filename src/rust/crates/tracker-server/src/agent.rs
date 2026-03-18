@@ -81,6 +81,9 @@ pub struct ClaudeStatus {
     /// Whether the agent is showing a permission prompt (waiting for user input)
     #[serde(default)]
     pub awaiting_permission: bool,
+    /// Whether the agent is at "Resume Session" picker (needs user to select a session)
+    #[serde(default)]
+    pub awaiting_resume: bool,
 }
 
 /// tmux operations for agent management (async)
@@ -1247,6 +1250,17 @@ impl TmuxAgent {
                 || (line.starts_with('>') && line.contains("Yes"))
             {
                 status.awaiting_permission = true;
+                break;
+            }
+        }
+
+        // Detect "Resume Session" picker (claude --resume showing session list)
+        // Patterns: "Resume Session", "current worktree", "Type to search"
+        for line in &lines {
+            let line = line.trim();
+            if line.contains("Resume Session") || line.contains("Type to search") {
+                status.awaiting_resume = true;
+                status.agent_type = Some("claude".to_string());
                 break;
             }
         }

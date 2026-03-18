@@ -11,6 +11,8 @@ export interface ClaudeStatus {
     cost: number | null;
     session_duration: string | null;
     pane: string | null;  // Detected pane where Claude runs
+    awaiting_permission?: boolean;
+    awaiting_resume?: boolean;  // Claude showing "Resume Session" picker
 }
 
 export interface AgentWindow {

@@ -8,6 +8,8 @@ export interface ClaudeStatus {
     cost: number | null;
     session_duration: string | null;
     pane: string | null;
+    awaiting_permission?: boolean;
+    awaiting_resume?: boolean;
 }
 
 export interface AgentWindow {

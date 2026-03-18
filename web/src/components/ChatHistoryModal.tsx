@@ -314,6 +314,26 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
             </button>
         </div>
 
+        {/* Resume Session banner */}
+        {claudeStatus?.awaiting_resume && (
+          <div className="px-4 py-2 bg-yellow-900/30 border-b border-yellow-700/50 flex items-center justify-between">
+            <span className="text-yellow-400 text-xs font-mono">
+              ⏸ Claude 在等待选择 Resume Session — 消息无法发送
+            </span>
+            <button
+              onClick={async () => {
+                if (sessionName && windowId) {
+                  const targetPane = claudePane || '1';
+                  await tmuxSendKeys(sessionName, windowId, targetPane, '', 'Enter');
+                }
+              }}
+              className="px-2 py-0.5 bg-yellow-800/50 border border-yellow-600/50 rounded text-yellow-300 text-xs hover:bg-yellow-700/50"
+            >
+              选择默认 Session
+            </button>
+          </div>
+        )}
+
         {/* Content */}
         <div
           ref={scrollRef}

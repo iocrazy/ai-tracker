@@ -281,7 +281,12 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
   // Render grouped messages with task boundary dividers
   const renderGroupedMessages = (data: GroupedDetailResponse) => {
     if (!data.messages || data.messages.length === 0) {
-      return <div className="text-green-700 italic">暂无对话记录</div>;
+      return (
+        <div className="text-green-700 italic space-y-2 p-4">
+          <div>暂无对话记录</div>
+          <div className="text-green-800 text-xs">可能原因: Claude JSONL 会话文件已被清理或时间戳不匹配</div>
+        </div>
+      );
     }
 
     const filtered = data.messages.filter(m => m.content.trim().length > 0);
@@ -372,13 +377,23 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
 
   const renderMessages = (messages: ConversationMessage[]) => {
     if (!messages || messages.length === 0) {
-      return <div className="text-green-700 italic">暂无对话记录</div>;
+      return (
+        <div className="text-green-700 italic space-y-2 p-4">
+          <div>暂无对话记录</div>
+          <div className="text-green-800 text-xs">可能原因: 该条目创建时未保存对话内容，或会话文件已被清理</div>
+        </div>
+      );
     }
 
     // Filter out empty messages (tool-only assistant turns with no text)
     const filtered = messages.filter(m => m.content.trim().length > 0);
     if (filtered.length === 0) {
-      return <div className="text-green-700 italic">暂无对话记录</div>;
+      return (
+        <div className="text-green-700 italic space-y-2 p-4">
+          <div>暂无对话记录</div>
+          <div className="text-green-800 text-xs">该条目仅包含工具调用，无文字对话内容</div>
+        </div>
+      );
     }
 
     return (
@@ -705,7 +720,12 @@ export const HistoryDetailModal: React.FC<HistoryDetailModalProps> = ({
 
     // Single entry mode
     if (!detail) {
-      return <div className="text-green-700">No data</div>;
+      return (
+        <div className="text-green-700 italic space-y-2 p-4">
+          <div>无法加载详情</div>
+          <div className="text-green-800 text-xs">关联的会话文件可能已被删除或移动</div>
+        </div>
+      );
     }
 
     switch (activeTab) {

@@ -555,6 +555,13 @@ impl Database {
                 last_used_step INTEGER,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )"),
+            (103, "ALTER TABLE history ADD COLUMN claude_session_id TEXT DEFAULT ''"),
+            (104, "CREATE INDEX IF NOT EXISTS idx_history_claude_session ON history(claude_session_id)"),
+            (105, "ALTER TABLE conversation_messages ADD COLUMN claude_session_id TEXT DEFAULT ''"),
+            (106, "ALTER TABLE conversation_messages ADD COLUMN source TEXT DEFAULT 'hook'"),
+            (107, "ALTER TABLE tool_usage ADD COLUMN claude_session_id TEXT DEFAULT ''"),
+            (108, "ALTER TABLE tool_usage ADD COLUMN tool_use_id TEXT DEFAULT ''"),
+            (109, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_usage_use_id ON tool_usage(tool_use_id) WHERE tool_use_id != ''"),
         ];
 
         for (version, sql) in migrations {
@@ -3157,6 +3164,94 @@ impl Database {
     pub fn delete_totp_config(&self) -> Result<()> {
         self.conn.execute("DELETE FROM totp_config WHERE id = 1", [])?;
         Ok(())
+    }
+
+    // =========================================================================
+    // Hook Ingest
+    // =========================================================================
+
+    pub fn find_or_create_hook_history(
+        &self,
+        claude_session_id: &str,
+        session_name: &str,
+        window_id: &str,
+        git_dir: &str,
+    ) -> Result<i64> {
+        let existing: Option<i64> = self.conn.query_row(
+            "SELECT id FROM history WHERE claude_session_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![claude_session_id],
+            |row| row.get(0),
+        ).ok();
+
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO history (session_id, session, window_id, window, pane, summary, started_at, claude_session_id, git_dir)
+             VALUES (?1, ?2, ?3, ?4, '1', ?5, ?6, ?7, ?8)",
+            params![
+                session_name, session_name, window_id, window_id,
+                format!("Claude session {}", &claude_session_id[..8.min(claude_session_id.len())]),
+                now, claude_session_id, git_dir,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn insert_hook_message(
+        &self,
+        history_id: i64,
+        claude_session_id: &str,
+        role: &str,
+        content: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO conversation_messages (history_id, role, content, created_at, claude_session_id, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'hook')",
+            params![history_id, role, content, now, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_hook_tool_usage(
+        &self,
+        history_id: i64,
+        claude_session_id: &str,
+        tool_name: &str,
+        tool_args: &str,
+        result_summary: &str,
+        tool_use_id: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tool_usage (history_id, tool_name, tool_args, result_summary, success, timestamp, claude_session_id, tool_use_id)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7)",
+            params![history_id, tool_name, tool_args, result_summary, now, claude_session_id, tool_use_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn close_hook_session(&self, claude_session_id: &str, reason: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE history SET completed_at = ?1, completion_note = ?2
+             WHERE claude_session_id = ?3 AND completed_at IS NULL",
+            params![now, reason, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn close_stale_hook_sessions(&self, stale_minutes: i64) -> Result<usize> {
+        let count = self.conn.execute(
+            "UPDATE history SET completed_at = datetime('now'), completion_note = 'auto-closed: stale'
+             WHERE claude_session_id != '' AND completed_at IS NULL
+             AND started_at < datetime('now', ?1)",
+            params![format!("-{} minutes", stale_minutes)],
+        )?;
+        Ok(count)
     }
 }
 

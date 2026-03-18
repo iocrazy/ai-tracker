@@ -39,7 +39,7 @@ const MARKDOWN_COMPONENTS: Record<string, React.FC<any>> = {
     const isBlock = codeClassName?.startsWith('language-');
     if (isBlock) {
       return (
-        <code className={`text-cyan-400 text-sm ${codeClassName || ''}`} {...props}>
+        <code className={`text-cyan-400 text-sm font-mono ${codeClassName || ''}`} {...props}>
           {children}
         </code>
       );
@@ -51,7 +51,7 @@ const MARKDOWN_COMPONENTS: Record<string, React.FC<any>> = {
     );
   },
   pre: ({ children }) => (
-    <pre className="bg-black/60 border border-green-900/50 rounded p-3 mb-2 overflow-x-auto text-sm leading-relaxed">
+    <pre className="bg-black/60 border border-green-900/50 rounded p-3 mb-2 overflow-x-hidden whitespace-pre-wrap break-all text-sm leading-tight font-mono">
       {children}
     </pre>
   ),

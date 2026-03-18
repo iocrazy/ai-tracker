@@ -99,7 +99,7 @@ pub(crate) enum HookEvent {
 
 /// Resolve cwd to git_dir (cached), check workspace is registered.
 /// Returns None (with skipped response) if workspace is not tracked.
-fn validate_and_resolve(
+async fn validate_and_resolve(
     state: &Arc<AppState>,
     ctx: &HookContext,
 ) -> Result<ResolvedContext, HookResponse> {
@@ -110,8 +110,8 @@ fn validate_and_resolve(
         return Err(HookResponse::err("missing cwd"));
     }
 
-    // Resolve cwd → git_dir (cached)
-    let git_dir = resolve_git_dir(state, &ctx.cwd);
+    // Resolve cwd → git_dir (cached, async git call)
+    let git_dir = resolve_git_dir(state, &ctx.cwd).await;
     let git_dir = match git_dir {
         Some(d) => d,
         None => {
@@ -138,8 +138,9 @@ fn validate_and_resolve(
 }
 
 /// Resolve cwd to git root directory, with caching.
-fn resolve_git_dir(state: &Arc<AppState>, cwd: &str) -> Option<String> {
-    // Check cache first
+/// Uses spawn_blocking for the git command to avoid blocking tokio runtime.
+async fn resolve_git_dir(state: &Arc<AppState>, cwd: &str) -> Option<String> {
+    // Check cache first (fast path, no blocking)
     {
         let cache = state.git_dir_cache.lock().unwrap();
         if let Some(cached) = cache.get(cwd) {
@@ -147,22 +148,22 @@ fn resolve_git_dir(state: &Arc<AppState>, cwd: &str) -> Option<String> {
         }
     }
 
-    // Run git rev-parse to find the root.
-    // NOTE: This is a blocking call in an async context, but it's acceptable
-    // because the result is cached (only the cold-start call blocks), and the
-    // surrounding Mutex on ServerState already serializes access.
-    let result = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        });
+    // Run git rev-parse in a blocking thread to avoid starving tokio runtime
+    let cwd_owned = cwd.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&cwd_owned)
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+                } else {
+                    None
+                }
+            })
+    }).await.unwrap_or(None);
 
     // Cache the result (even None, to avoid repeated git calls)
     {
@@ -249,7 +250,7 @@ pub(crate) async fn hook_message(
     Json(req): Json<HookMessageRequest>,
 ) -> Json<HookResponse> {
     let ctx = HookContext { session_id: req.session_id, cwd: req.cwd };
-    let resolved = match validate_and_resolve(&state, &ctx) {
+    let resolved = match validate_and_resolve(&state, &ctx).await {
         Ok(r) => r,
         Err(resp) => return Json(resp),
     };
@@ -337,7 +338,7 @@ pub(crate) async fn hook_tool(
     Json(req): Json<HookToolRequest>,
 ) -> Json<HookResponse> {
     let ctx = HookContext { session_id: req.session_id, cwd: req.cwd };
-    let resolved = match validate_and_resolve(&state, &ctx) {
+    let resolved = match validate_and_resolve(&state, &ctx).await {
         Ok(r) => r,
         Err(resp) => return Json(resp),
     };
@@ -411,7 +412,7 @@ pub(crate) async fn hook_session(
     Json(req): Json<HookSessionRequest>,
 ) -> Json<HookResponse> {
     let ctx = HookContext { session_id: req.session_id, cwd: req.cwd };
-    let resolved = match validate_and_resolve(&state, &ctx) {
+    let resolved = match validate_and_resolve(&state, &ctx).await {
         Ok(r) => r,
         Err(resp) => return Json(resp),
     };

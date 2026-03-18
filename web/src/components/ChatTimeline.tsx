@@ -85,7 +85,7 @@ export function fromHistoryTimeline(entries: TimelineEntry[]): TimelineItem[] {
 
   for (const entry of entries) {
     const role = entry.role as 'user' | 'assistant';
-    const timestamp = entry.timestamp?.slice(11, 19) || '';
+    const timestamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '';
 
     // Group consecutive entries from the same role+timestamp into one item
     if (!currentItem || currentItem.role !== role || currentItem.timestamp !== timestamp) {

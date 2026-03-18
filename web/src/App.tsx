@@ -241,7 +241,7 @@ const App: React.FC = () => {
     const newMessages: ChatMessage[] = event.messages.map(m => ({
       sender: m.role === 'user' ? 'USER' : 'AGENT',
       text: m.text,
-      timestamp: m.timestamp?.slice(11, 19) || '',
+      timestamp: m.timestamp ? new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '',
       thinking: m.thinking,
       interaction: m.interaction,
       toolCalls: m.tool_calls,
@@ -712,7 +712,7 @@ const App: React.FC = () => {
     const messages: ChatMessage[] = data.messages.map(m => ({
       sender: m.role === 'user' ? 'USER' : 'AGENT',
       text: m.text,
-      timestamp: m.timestamp?.slice(11, 19) || '',
+      timestamp: m.timestamp ? new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '',
       thinking: m.thinking,
       interaction: m.interaction,
       toolCalls: m.tool_calls,

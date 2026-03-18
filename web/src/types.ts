@@ -39,6 +39,7 @@ export interface TimelineEvent {
     user: string;
     action: string;
     description: string;
+    dateLabel?: string;  // Date group label for date separator rendering
     status?: 'COMPLETED' | 'PENDING' | 'FAILED';
     linkText?: string;
     // Enhanced fields from history API

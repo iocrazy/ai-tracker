@@ -269,20 +269,29 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
   }, [gitDir]);
 
   // Convert history data to events (supports both grouped and flat modes)
+  // Preserves date group labels for rendering date separators
   const events = useMemo(() => {
     if (groupedData) {
-      const allGroups: WindowGroupEntry[] = [];
+      const result: TimelineEvent[] = [];
       for (const dateGroup of groupedData.groups) {
-        allGroups.push(...dateGroup.records);
+        const events = dateGroup.records.map(convertGroupToTimelineEvent);
+        if (events.length > 0) {
+          events[0] = { ...events[0], dateLabel: dateGroup.label };
+        }
+        result.push(...events);
       }
-      return allGroups.map(convertGroupToTimelineEvent);
+      return result;
     }
     if (historyData) {
-      const allEntries: HistoryEntry[] = [];
+      const result: TimelineEvent[] = [];
       for (const group of historyData.groups) {
-        allEntries.push(...group.records);
+        const events = group.records.map(convertToTimelineEvent);
+        if (events.length > 0) {
+          events[0] = { ...events[0], dateLabel: group.label };
+        }
+        result.push(...events);
       }
-      return allEntries.map(convertToTimelineEvent);
+      return result;
     }
     return [];
   }, [historyData, groupedData, convertToTimelineEvent, convertGroupToTimelineEvent]);
@@ -581,14 +590,24 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
               <div className="text-green-800 font-mono italic p-4">NO_RECORDS_FOUND</div>
             ) : (
               filteredEvents.map((event, index) => (
-                <TimelineItem
-                  key={event.id}
-                  event={event}
-                  isSelected={index === selectedIndex}
-                  deepQuery={deepQuery}
-                  onSelect={() => { setSelectedIndex(index); handleViewDetails(event); }}
-                  itemRef={(el) => { itemRefs.current[index] = el; }}
-                />
+                <React.Fragment key={event.id}>
+                  {event.dateLabel && (
+                    <div className="relative -ml-4 pl-4 py-2 flex items-center gap-3">
+                      <div className="absolute -left-[39px] top-1/2 -translate-y-1/2 w-5 h-[2px] bg-green-700/50" />
+                      <span className="text-green-500 font-mono text-xs font-bold tracking-wider bg-black/60 px-2 py-1 rounded border border-green-800/40">
+                        {event.dateLabel}
+                      </span>
+                      <div className="flex-1 h-px bg-green-800/30" />
+                    </div>
+                  )}
+                  <TimelineItem
+                    event={event}
+                    isSelected={index === selectedIndex}
+                    deepQuery={deepQuery}
+                    onSelect={() => { setSelectedIndex(index); handleViewDetails(event); }}
+                    itemRef={(el) => { itemRefs.current[index] = el; }}
+                  />
+                </React.Fragment>
               ))
             )}
 

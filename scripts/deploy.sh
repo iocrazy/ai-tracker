@@ -167,10 +167,11 @@ install_tauri() {
         exit 1
     fi
 
-    # 复制前端
+    # 复制前端 (清理旧 assets 防止 SW 缓存旧版)
     if [ -d "$WEB_DIR/dist" ]; then
+        rm -rf "$TAURI_WEB/assets"
         cp -r "$WEB_DIR/dist/"* "$TAURI_WEB/"
-        echo "  ✓ 前端 → $TAURI_WEB"
+        echo "  ✓ 前端 → $TAURI_WEB (旧 assets 已清理)"
     fi
 
     # 复制后端 + codesign

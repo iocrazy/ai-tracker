@@ -43,6 +43,12 @@ fn load_or_create_key(data_dir: &std::path::Path) -> Result<[u8; 32], String> {
         }
         std::fs::write(&key_path, &key)
             .map_err(|e| format!("Failed to write TOTP key: {}", e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("Failed to set key permissions: {}", e))?;
+        }
         info!("Generated new TOTP encryption key at {:?}", key_path);
         Ok(key)
     }

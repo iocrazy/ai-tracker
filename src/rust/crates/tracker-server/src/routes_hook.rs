@@ -147,7 +147,10 @@ fn resolve_git_dir(state: &Arc<AppState>, cwd: &str) -> Option<String> {
         }
     }
 
-    // Run git rev-parse to find the root
+    // Run git rev-parse to find the root.
+    // NOTE: This is a blocking call in an async context, but it's acceptable
+    // because the result is cached (only the cold-start call blocks), and the
+    // surrounding Mutex on ServerState already serializes access.
     let result = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
@@ -236,9 +239,9 @@ pub(crate) struct HookMessageRequest {
     /// Last assistant message (for Stop/SubagentStop)
     #[serde(default)]
     last_assistant_message: Option<String>,
-    /// Whether this is a subagent (for SubagentStop)
+    /// Agent type (e.g. "subagent" for SubagentStop)
     #[serde(default)]
-    is_subagent: Option<bool>,
+    agent_type: Option<String>,
 }
 
 pub(crate) async fn hook_message(
@@ -272,11 +275,7 @@ pub(crate) async fn hook_message(
         }
     };
 
-    let agent_type = if req.is_subagent.unwrap_or(false) {
-        Some("subagent".to_string())
-    } else {
-        None
-    };
+    let agent_type = req.agent_type;
 
     // Persist to DB
     let db_result = {
@@ -345,7 +344,8 @@ pub(crate) async fn hook_tool(
         .map(|v| serde_json::to_string(&v).unwrap_or_default())
         .unwrap_or_default();
     let result_summary = req.tool_response.map(|s| {
-        if s.len() > 500 { format!("{}...", &s[..500]) } else { s }
+        let truncated: String = s.chars().take(500).collect();
+        if truncated.len() < s.len() { format!("{}...", truncated) } else { s }
     }).unwrap_or_default();
 
     // Persist to DB

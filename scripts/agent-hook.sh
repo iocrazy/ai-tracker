@@ -21,7 +21,7 @@ if [ -z "${TRACKER_TOKEN:-}" ]; then
     "$HOME/Library/Application Support/com.agent-tracker.menubar/agent-config.json" \
     "$HOME/.config/agent-tracker/agent-config.json"; do
     if [ -f "$cfg" ]; then
-      TRACKER_TOKEN=$(python3 -c "import json; print(json.load(open('$cfg')).get('auth',{}).get('token',''))" 2>/dev/null || true)
+      TRACKER_TOKEN=$(jq -r '.auth.token // ""' "$cfg" 2>/dev/null)
       [ -n "$TRACKER_TOKEN" ] && break
     fi
   done

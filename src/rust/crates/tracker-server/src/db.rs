@@ -562,6 +562,8 @@ impl Database {
             (107, "ALTER TABLE tool_usage ADD COLUMN claude_session_id TEXT DEFAULT ''"),
             (108, "ALTER TABLE tool_usage ADD COLUMN tool_use_id TEXT DEFAULT ''"),
             (109, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_usage_use_id ON tool_usage(tool_use_id) WHERE tool_use_id != ''"),
+            (110, "DROP INDEX IF EXISTS idx_history_claude_session"),
+            (111, "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_claude_session ON history(claude_session_id) WHERE claude_session_id != ''"),
         ];
 
         for (version, sql) in migrations {
@@ -3177,19 +3179,10 @@ impl Database {
         window_id: &str,
         git_dir: &str,
     ) -> Result<i64> {
-        let existing: Option<i64> = self.conn.query_row(
-            "SELECT id FROM history WHERE claude_session_id = ?1 ORDER BY id DESC LIMIT 1",
-            params![claude_session_id],
-            |row| row.get(0),
-        ).ok();
-
-        if let Some(id) = existing {
-            return Ok(id);
-        }
-
         let now = chrono::Utc::now().to_rfc3339();
+        // Attempt insert (ignored if claude_session_id already exists via unique index)
         self.conn.execute(
-            "INSERT INTO history (session_id, session, window_id, window, pane, summary, started_at, claude_session_id, git_dir)
+            "INSERT OR IGNORE INTO history (session_id, session, window_id, window, pane, summary, started_at, claude_session_id, git_dir)
              VALUES (?1, ?2, ?3, ?4, '1', ?5, ?6, ?7, ?8)",
             params![
                 session_name, session_name, window_id, window_id,
@@ -3197,7 +3190,13 @@ impl Database {
                 now, claude_session_id, git_dir,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        // Always select (works for both new and existing)
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM history WHERE claude_session_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![claude_session_id],
+            |row| row.get(0),
+        )?;
+        Ok(id)
     }
 
     pub fn insert_hook_message(

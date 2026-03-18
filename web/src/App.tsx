@@ -255,7 +255,7 @@ const App: React.FC = () => {
 
   // Handle hook chat messages from WebSocket
   const handleHookChatMessage = useCallback((msg: HookChatMessage) => {
-    setHookChatMessages(prev => [...prev, msg]);
+    setHookChatMessages(prev => [...prev.slice(-499), msg]);
   }, []);
 
   // Handle hook session updates (start/end) — sync window status

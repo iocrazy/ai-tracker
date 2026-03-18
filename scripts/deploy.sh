@@ -40,6 +40,8 @@ echo ""
 # 解析参数
 QUICK_MODE=false
 RESTART_ONLY=false
+TAURI_MODE=false
+CHECK_ONLY=false
 
 for arg in "$@"; do
     case $arg in
@@ -49,8 +51,19 @@ for arg in "$@"; do
         --restart)
             RESTART_ONLY=true
             ;;
+        --tauri)
+            TAURI_MODE=true
+            ;;
+        --check)
+            CHECK_ONLY=true
+            ;;
     esac
 done
+
+# Tauri app paths
+TAURI_APP="/Applications/Agent Tracker.app"
+TAURI_BIN="$TAURI_APP/Contents/MacOS/tracker-server"
+TAURI_WEB="$TAURI_APP/Contents/Resources/web-dist"
 
 # 创建目录
 create_directories() {
@@ -145,9 +158,150 @@ restart_service() {
     echo -e "${GREEN}  ✓ 服务已重启${NC}"
 }
 
+# Tauri 模式 — 部署到 Agent Tracker.app
+install_tauri() {
+    echo -e "${YELLOW}[4/5] 安装到 Tauri app...${NC}"
+
+    if [ ! -d "$TAURI_APP" ]; then
+        echo -e "${RED}  ✗ Agent Tracker.app not found${NC}"
+        exit 1
+    fi
+
+    # 复制前端
+    if [ -d "$WEB_DIR/dist" ]; then
+        cp -r "$WEB_DIR/dist/"* "$TAURI_WEB/"
+        echo "  ✓ 前端 → $TAURI_WEB"
+    fi
+
+    # 复制后端 + codesign
+    cp "$RUST_DIR/target/release/tracker-server" "$TAURI_BIN"
+    codesign -fs - "$TAURI_BIN" 2>/dev/null
+    echo "  ✓ 后端 → $TAURI_BIN (codesigned)"
+
+    echo -e "${GREEN}  ✓ Tauri 安装完成${NC}"
+}
+
+# 重启 Tauri app
+restart_tauri() {
+    echo -e "${YELLOW}[5/5] 重启 Tauri app...${NC}"
+
+    # Kill existing
+    pkill -f "agent-tracker-menubar" 2>/dev/null || true
+    sleep 1
+
+    # Reopen
+    open -a "Agent Tracker"
+    echo "  等待 sidecar 启动..."
+
+    # Wait for server to come up (max 15s)
+    for i in $(seq 1 15); do
+        if curl -sf http://localhost:3099/api/health >/dev/null 2>&1; then
+            echo -e "${GREEN}  ✓ Sidecar 启动成功 (${i}s)${NC}"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo -e "${RED}  ✗ Sidecar 启动超时 (15s)${NC}"
+    return 1
+}
+
+# 自检 — 验证所有关键端点
+health_check() {
+    echo ""
+    echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║           自检 (Health Check)           ║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+    echo ""
+
+    local ALL_OK=true
+    local URL="${TRACKER_URL:-http://localhost:3099}"
+
+    # 1. Health
+    local health
+    health=$(curl -sf "$URL/api/health" 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        local status=$(echo "$health" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null)
+        local uptime=$(echo "$health" | python3 -c "import sys,json; print(json.load(sys.stdin)['checks']['uptime'])" 2>/dev/null || echo "?")
+        echo -e "  ✅ Health:      ${GREEN}$status${NC} (uptime: $uptime)"
+    else
+        echo -e "  ❌ Health:      ${RED}FAILED — server not responding${NC}"
+        ALL_OK=false
+    fi
+
+    # 2. Passkey status
+    local passkey
+    passkey=$(curl -sf "$URL/api/auth/passkey/status" 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        local has_pk=$(echo "$passkey" | python3 -c "import sys,json; print(json.load(sys.stdin)['has_passkey'])" 2>/dev/null)
+        echo -e "  ✅ Passkey:     has_passkey=${GREEN}$has_pk${NC}"
+    else
+        echo -e "  ❌ Passkey:     ${RED}endpoint failed${NC}"
+        ALL_OK=false
+    fi
+
+    # 3. TOTP status
+    local totp
+    totp=$(curl -sf "$URL/api/auth/totp/status" 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        local enabled=$(echo "$totp" | python3 -c "import sys,json; print(json.load(sys.stdin)['enabled'])" 2>/dev/null)
+        echo -e "  ✅ TOTP:        enabled=${GREEN}$enabled${NC}"
+    else
+        echo -e "  ❌ TOTP:        ${RED}endpoint failed${NC}"
+        ALL_OK=false
+    fi
+
+    # 4. Frontend
+    local fe_code
+    fe_code=$(curl -sf -o /dev/null -w "%{http_code}" "$URL/" 2>/dev/null)
+    if [ "$fe_code" = "200" ]; then
+        echo -e "  ✅ Frontend:    ${GREEN}200 OK${NC}"
+    else
+        echo -e "  ❌ Frontend:    ${RED}HTTP $fe_code${NC}"
+        ALL_OK=false
+    fi
+
+    # 5. WebSocket (expect 401 without token, 101 with token)
+    if [ -n "$TRACKER_TOKEN" ]; then
+        local ws_code
+        ws_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$URL/ws?token=$TRACKER_TOKEN" 2>/dev/null || true)
+        if [ "$ws_code" = "101" ] || [ "$ws_code" = "000" ]; then
+            echo -e "  ✅ WebSocket:   ${GREEN}auth OK${NC}"
+        else
+            echo -e "  ⚠️  WebSocket:   HTTP $ws_code (token may be expired)"
+        fi
+    else
+        local ws_code
+        ws_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$URL/ws" 2>/dev/null || true)
+        echo -e "  ⚠️  WebSocket:   ${YELLOW}no token, got $ws_code (expected 401)${NC}"
+    fi
+
+    echo ""
+    if [ "$ALL_OK" = true ]; then
+        echo -e "  ${GREEN}🎉 All checks passed!${NC}"
+    else
+        echo -e "  ${RED}⚠️  Some checks failed${NC}"
+    fi
+    echo ""
+}
+
 # 主流程
+if [ "$CHECK_ONLY" = true ]; then
+    health_check
+    exit 0
+fi
+
 if [ "$RESTART_ONLY" = true ]; then
-    restart_service
+    if [ "$TAURI_MODE" = true ]; then
+        restart_tauri && health_check
+    else
+        restart_service
+    fi
+elif [ "$TAURI_MODE" = true ]; then
+    build_rust
+    build_web
+    install_tauri
+    restart_tauri && health_check
 else
     create_directories
     build_rust
@@ -156,12 +310,14 @@ else
     restart_service
 fi
 
-echo ""
-echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║           部署完成！                    ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "  服务地址: ${BLUE}http://localhost:3099${NC}"
-echo -e "  日志文件: ${BLUE}$LOG_DIR/tracker-server.log${NC}"
-echo -e "  数据目录: ${BLUE}$CONFIG_DIR${NC}"
-echo ""
+if [ "$CHECK_ONLY" != true ] && [ "$TAURI_MODE" != true ]; then
+    echo ""
+    echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║           部署完成！                    ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  服务地址: ${BLUE}http://localhost:3099${NC}"
+    echo -e "  日志文件: ${BLUE}$LOG_DIR/tracker-server.log${NC}"
+    echo -e "  数据目录: ${BLUE}$CONFIG_DIR${NC}"
+    echo ""
+fi

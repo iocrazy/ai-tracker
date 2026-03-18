@@ -158,7 +158,7 @@ const App: React.FC = () => {
       if (currentSessions.length === 0) return;
 
       // Collect all Claude status updates
-      const statusUpdates: Map<string, { claudeStatus?: any; claudePane?: string }> = new Map();
+      const statusUpdates: Map<string, { claudeStatus?: any; claudePane?: string; isClaudeBusy: boolean }> = new Map();
 
       await Promise.all(
         currentSessions.flatMap((session) =>
@@ -166,10 +166,11 @@ const App: React.FC = () => {
             try {
               const response = await fetchClaudeStatus(session.name, win.name);
               if (response.success) {
-                const isBusyOrPaused = win.status === 'BUSY' || win.status === 'PAUSED';
+                const hasActivity = response.status.current_tool || response.status.action;
                 statusUpdates.set(`${session.id}:${win.id}`, {
-                  claudeStatus: isBusyOrPaused ? response.status : undefined,
+                  claudeStatus: hasActivity ? response.status : undefined,
                   claudePane: response.status.pane || undefined,
+                  isClaudeBusy: !!hasActivity,
                 });
               }
             } catch {
@@ -186,9 +187,16 @@ const App: React.FC = () => {
           windows: session.windows.map(win => {
             const update = statusUpdates.get(`${session.id}:${win.id}`);
             if (!update) return win;
+            // Sync window status with Claude activity: if Claude is busy but task says IDLE, override
+            const syncedStatus = update.isClaudeBusy && (win.status === 'IDLE' || win.status === 'COMPLETED')
+              ? 'BUSY' as const
+              : !update.isClaudeBusy && win.status === 'BUSY'
+                ? 'IDLE' as const
+                : win.status;
             return {
               ...win,
-              claudeStatus: update.claudeStatus ?? win.claudeStatus,
+              status: syncedStatus,
+              claudeStatus: update.claudeStatus !== undefined ? update.claudeStatus : win.claudeStatus,
               claudePane: update.claudePane ?? win.claudePane,
             };
           }),

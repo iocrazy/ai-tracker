@@ -134,39 +134,62 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     return () => document.removeEventListener('paste', handlePaste);
   }, [isOpen, handlePaste]);
 
+  const [sendError, setSendError] = useState('');
+
   const handleSend = async () => {
     const hasText = inputValue.trim().length > 0;
     const hasImages = pendingImages.length > 0;
     if ((!hasText && !hasImages) || !sessionName || !windowId || isSending) return;
 
     const msgText = inputValue.trim();
+    const savedInput = msgText; // Preserve for retry on failure
     setInputValue('');
     setIsSending(true);
     setSendStatus('sending');
+    setSendError('');
+
+    // Timeout wrapper (10s)
+    const withTimeout = <T,>(promise: Promise<T>, ms = 10000): Promise<T> =>
+      Promise.race([
+        promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('发送超时 (10s)')), ms)),
+      ]);
 
     try {
       const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
 
       if (hasImages) {
-        // Convert all images to base64
         const base64List = await Promise.all(pendingImages.map(img => fileToBase64(img.file)));
-        const result = await sendImages(
+        const result = await withTimeout(sendImages(
           sessionName,
           windowId,
           targetPane,
           base64List,
           msgText || undefined
-        );
-        clearAllImages();
-        setSendStatus(result.success ? 'success' : 'failed');
+        ));
+        if (result.success) {
+          clearAllImages();
+          setSendStatus('success');
+        } else {
+          setSendStatus('failed');
+          setSendError(result.message || '发送失败');
+          setInputValue(savedInput); // Restore input for retry
+        }
       } else {
-        // Text-only message
-        const result = await tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter');
-        setSendStatus(result.success ? 'success' : 'failed');
+        const result = await withTimeout(tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter'));
+        if (result.success) {
+          setSendStatus('success');
+        } else {
+          setSendStatus('failed');
+          setSendError(result.message || '发送失败');
+          setInputValue(savedInput); // Restore input for retry
+        }
       }
     } catch (error) {
       console.error('Failed to send message:', error);
       setSendStatus('failed');
+      setSendError(error instanceof Error ? error.message : '发送失败');
+      setInputValue(savedInput); // Restore input for retry
     } finally {
       setIsSending(false);
     }
@@ -461,7 +484,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
                         <span className="text-green-500">🟢 SENT</span>
                     )}
                     {sendStatus === 'failed' && (
-                        <span className="text-red-500">🔴 FAILED</span>
+                        <span className="text-red-500" title={sendError}>🔴 {sendError || 'FAILED'}</span>
                     )}
                 </div>
                 {/* Claude status */}

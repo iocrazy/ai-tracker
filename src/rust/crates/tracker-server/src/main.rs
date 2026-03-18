@@ -1986,7 +1986,7 @@ fn check_claude_hooks_configured() -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    content.contains("127.0.0.1:3099/api/hook")
+    content.contains("agent-hook.sh") || content.contains("127.0.0.1:3099/api/hook")
 }
 
 // ============================================================================

@@ -148,6 +148,48 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
 
   const [sendError, setSendError] = useState('');
 
+  // Slash command palette
+  const SLASH_COMMANDS = useMemo(() => [
+    { command: '/brainstorming', description: 'Creative design and brainstorming' },
+    { command: '/commit', description: 'Create a git commit' },
+    { command: '/plan', description: 'Create implementation plan' },
+    { command: '/review', description: 'Request code review' },
+    { command: '/tdd', description: 'Test-driven development' },
+    { command: '/debug', description: 'Systematic debugging' },
+    { command: '/discord-notify', description: 'Send Discord notification' },
+    { command: '/help', description: 'Show available commands' },
+    { command: '/clear', description: 'Clear conversation' },
+    { command: '/compact', description: 'Compact context' },
+    { command: '/cost', description: 'Show session cost' },
+    { command: '/doctor', description: 'Check Claude Code health' },
+    { command: '/init', description: 'Initialize CLAUDE.md' },
+    { command: '/login', description: 'Switch account' },
+    { command: '/logout', description: 'Sign out' },
+    { command: '/memory', description: 'Edit CLAUDE.md' },
+    { command: '/model', description: 'Switch model' },
+    { command: '/permissions', description: 'View permissions' },
+    { command: '/pr', description: 'Create pull request' },
+    { command: '/status', description: 'Show git status' },
+    { command: '/terminal-setup', description: 'Terminal configuration' },
+    { command: '/vim', description: 'Enter vim mode' },
+  ], []);
+
+  const [slashCommands, setSlashCommands] = useState<{ command: string; description: string }[]>([]);
+  const [slashIndex, setSlashIndex] = useState(0);
+
+  // Detect `/` prefix and filter commands
+  useEffect(() => {
+    const text = inputValue.trim();
+    if (text.startsWith('/') && !text.includes(' ')) {
+      const query = text.toLowerCase();
+      const filtered = SLASH_COMMANDS.filter(c => c.command.toLowerCase().startsWith(query));
+      setSlashCommands(filtered);
+      setSlashIndex(0);
+    } else {
+      setSlashCommands([]);
+    }
+  }, [inputValue, SLASH_COMMANDS]);
+
   const handleSend = async () => {
     const hasText = inputValue.trim().length > 0;
     const hasImages = pendingImages.length > 0;
@@ -475,23 +517,70 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
                 onChange={handleFileSelect}
                 className="hidden"
               />
-              <textarea
-                ref={inputRef}
-                value={inputValue}
-                onChange={(e) => {
-                  setInputValue(e.target.value);
-                  // Auto-resize: reset then fit content (max 5 lines)
-                  const el = e.target;
-                  el.style.height = '36px';
-                  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
-                }}
-                onKeyDown={handleKeyDown}
-                placeholder="Type a message..."
-                disabled={isSending}
-                rows={1}
-                className="flex-1 bg-black border border-green-800 text-green-400 px-3 py-2 text-sm font-mono placeholder-green-900 focus:outline-none focus:border-green-500 disabled:opacity-50 resize-none"
-                style={{ minHeight: '36px', maxHeight: '140px', lineHeight: '1.5' }}
-              />
+              <div className="flex-1 relative">
+                <textarea
+                  ref={inputRef}
+                  value={inputValue}
+                  onChange={(e) => {
+                    setInputValue(e.target.value);
+                    const el = e.target;
+                    el.style.height = '36px';
+                    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+                  }}
+                  onKeyDown={(e) => {
+                    // Command palette navigation
+                    if (slashCommands.length > 0) {
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        setSlashIndex(i => Math.min(i + 1, slashCommands.length - 1));
+                        return;
+                      }
+                      if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        setSlashIndex(i => Math.max(i - 1, 0));
+                        return;
+                      }
+                      if (e.key === 'Tab' || e.key === 'Enter') {
+                        if (slashCommands[slashIndex]) {
+                          e.preventDefault();
+                          setInputValue(slashCommands[slashIndex].command + ' ');
+                          setSlashCommands([]);
+                          return;
+                        }
+                      }
+                      if (e.key === 'Escape') {
+                        setSlashCommands([]);
+                        return;
+                      }
+                    }
+                    handleKeyDown(e);
+                  }}
+                  placeholder="Type a message..."
+                  disabled={isSending}
+                  rows={1}
+                  className="w-full bg-black border border-green-800 text-green-400 px-3 py-2 text-sm font-mono placeholder-green-900 focus:outline-none focus:border-green-500 disabled:opacity-50 resize-none"
+                  style={{ minHeight: '36px', maxHeight: '140px', lineHeight: '1.5' }}
+                />
+                {/* Command palette dropdown */}
+                {slashCommands.length > 0 && (
+                  <div className="absolute bottom-full left-0 right-0 mb-1 bg-black border border-green-800 max-h-48 overflow-y-auto z-50 font-mono text-xs">
+                    {slashCommands.map((cmd, i) => (
+                      <div
+                        key={cmd.command}
+                        className={`px-3 py-1.5 cursor-pointer flex items-center gap-3 ${i === slashIndex ? 'bg-green-900/50 text-green-300' : 'text-green-600 hover:bg-green-900/20'}`}
+                        onClick={() => {
+                          setInputValue(cmd.command + ' ');
+                          setSlashCommands([]);
+                          inputRef.current?.focus();
+                        }}
+                      >
+                        <span className="text-cyan-500 min-w-[140px]">{cmd.command}</span>
+                        <span className="text-green-800 truncate">{cmd.description}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button
                 onClick={handleSend}
                 disabled={(!inputValue.trim() && pendingImages.length === 0) || isSending}

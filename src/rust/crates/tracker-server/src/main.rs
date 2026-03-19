@@ -3493,24 +3493,20 @@ async fn main() -> Result<()> {
     use tower_http::set_header::SetResponseHeaderLayer;
     use axum::http::HeaderValue;
 
-    let cached_assets = ServeDir::new(web_dist.join("assets"));
-    let assets_service = ServiceBuilder::new()
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=31536000, immutable"),
-        ))
-        .service(cached_assets);
-
+    // All static files: no-cache (prevents Cloudflare/Synology proxy from serving stale content)
+    // Assets are content-hashed so browsers still cache them locally, but proxies won't hold stale versions
     let nocache_service = ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache, no-store, must-revalidate"),
         ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::PRAGMA,
+            HeaderValue::from_static("no-cache"),
+        ))
         .service(serve_dir);
 
-    // Mount assets with long cache, everything else with no-cache
     let app = app
-        .nest_service("/assets", assets_service)
         .fallback_service(nocache_service);
 
     // Start server

@@ -6,7 +6,9 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      selfDestroying: true,  // Unregister existing SW to fix cache issues
       registerType: 'autoUpdate',
+      devOptions: { enabled: false },
       manifest: {
         name: 'Agent Tracker',
         short_name: 'Tracker',

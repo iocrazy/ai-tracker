@@ -309,6 +309,23 @@ pub(crate) fn issue_jwt(secret: &str) -> Result<String, jsonwebtoken::errors::Er
     )
 }
 
+/// Poll for passkey login result — used when login_finish gets 502 from proxy
+pub(crate) async fn passkey_poll(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let auth_id = params.get("auth_id").cloned().unwrap_or_default();
+    if auth_id.is_empty() {
+        return Json(serde_json::json!({"ready": false}));
+    }
+    let completed = state.webauthn_completed_auths.lock().unwrap();
+    if let Some(token) = completed.get(&auth_id) {
+        Json(serde_json::json!({"ready": true, "success": true, "token": token, "expires_in": 7 * 24 * 3600}))
+    } else {
+        Json(serde_json::json!({"ready": false}))
+    }
+}
+
 pub(crate) fn verify_jwt(token: &str, secret: &str) -> bool {
     let validation = jsonwebtoken::Validation::default();
     jsonwebtoken::decode::<Claims>(

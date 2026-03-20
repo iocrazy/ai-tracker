@@ -1910,6 +1910,7 @@ async fn auth_middleware(
     if path == "/api/auth/passkey/status"
         || path == "/api/auth/webauthn/login/start"
         || path == "/api/auth/webauthn/login/finish"
+        || path == "/api/auth/passkey/poll"
     {
         return next.run(req).await;
     }
@@ -3411,6 +3412,7 @@ async fn main() -> Result<()> {
         .route("/api/auth/webauthn/register/finish", post(routes_auth::register_finish))
         .route("/api/auth/webauthn/login/start", post(routes_auth::login_start))
         .route("/api/auth/webauthn/login/finish", post(routes_auth::login_finish))
+        .route("/api/auth/passkey/poll", get(routes_auth::passkey_poll))
         // TOTP routes
         .route("/api/auth/totp/status", get(routes_totp::totp_status))
         .route("/api/auth/totp/setup", post(routes_totp::totp_setup))

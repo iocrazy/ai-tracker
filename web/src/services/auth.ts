@@ -163,25 +163,38 @@ export async function loginPasskeyFinish(authId: string, credential: PublicKeyCr
     },
   };
 
-  // Single request — no retry (retry causes duplicate finish which invalidates auth_state)
+  // Send finish request
   const response = await fetch(`${API_BASE}/auth/webauthn/login/finish`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  console.log(`login/finish: HTTP ${response.status} ${response.statusText}`);
+
+  // Try parse response
   const text = await response.text();
-  console.log(`login/finish body (first 300): ${text.substring(0, 300)}`);
-  let data: any;
   try {
-    data = JSON.parse(text);
+    const data = JSON.parse(text);
+    if (data.success && data.token) {
+      return data.token;
+    }
   } catch {
-    throw new Error(`login/finish returned non-JSON (HTTP ${response.status}): ${text.substring(0, 100)}`);
+    // Non-JSON (502 from proxy) — fall through to polling
   }
-  if (data.success && data.token) {
-    return data.token;
+
+  // If 502 or no token: poll for the result (server may have processed it)
+  console.log(`login/finish got HTTP ${response.status}, polling for result...`);
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const pollRes = await fetch(`${API_BASE}/auth/passkey/poll?auth_id=${encodeURIComponent(authId)}`);
+      const pollData = await pollRes.json();
+      if (pollData.ready && pollData.token) {
+        return pollData.token;
+      }
+    } catch { /* ignore */ }
   }
-  throw new Error(`Server response: ${JSON.stringify(data).substring(0, 200)}`);
+
+  throw new Error(`Passkey verification may have succeeded but response was lost (HTTP ${response.status})`);
 }
 
 /** Full passkey login flow: start → browser prompt → finish → store JWT

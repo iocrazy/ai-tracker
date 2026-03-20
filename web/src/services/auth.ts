@@ -220,11 +220,30 @@ async function _loginWithPasskeyOnce(): Promise<boolean> {
   }
 
   // Step 3: Browser prompt (Bitwarden will intercept this)
+  // Wait for document focus (iOS Safari loses focus when Bitwarden/autofill UI appears)
+  if (!document.hasFocus()) {
+    await new Promise<void>((resolve) => {
+      const onFocus = () => { window.removeEventListener('focus', onFocus); resolve(); };
+      window.addEventListener('focus', onFocus);
+      // Also resolve after 2s in case focus event doesn't fire
+      setTimeout(resolve, 2000);
+    });
+  }
   let credential: PublicKeyCredential;
   try {
     credential = await navigator.credentials.get({ publicKey }) as PublicKeyCredential;
   } catch (e: any) {
-    throw new Error(`Bitwarden prompt failed: ${e?.message || 'cancelled'}`);
+    // Retry once if document was not focused
+    if (e?.message?.includes('not focused') || e?.name === 'NotAllowedError') {
+      await new Promise(r => setTimeout(r, 500));
+      try {
+        credential = await navigator.credentials.get({ publicKey }) as PublicKeyCredential;
+      } catch (e2: any) {
+        throw new Error(`Bitwarden prompt failed: ${e2?.message || 'cancelled'}`);
+      }
+    } else {
+      throw new Error(`Bitwarden prompt failed: ${e?.message || 'cancelled'}`);
+    }
   }
 
   // Step 4: Send to server for verification

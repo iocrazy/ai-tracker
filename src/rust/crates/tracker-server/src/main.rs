@@ -3059,8 +3059,8 @@ async fn main() -> Result<()> {
     let allowed_origins = config.auth.allowed_origins.clone();
 
     // Initialize WebAuthn
-    let rp_id = "tracker.heygo.cn";
-    let rp_origin = url::Url::parse("https://tracker.heygo.cn:88").expect("Invalid RP origin");
+    let rp_id = "iocrazy.com";
+    let rp_origin = url::Url::parse("https://tracker.iocrazy.com").expect("Invalid RP origin");
     let webauthn = match webauthn_rs::WebauthnBuilder::new(rp_id, &rp_origin) {
         Ok(builder) => match builder.build() {
             Ok(w) => {

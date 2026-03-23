@@ -180,7 +180,7 @@ pub(crate) async fn login_start(
     match webauthn.start_passkey_authentication(&passkeys) {
         Ok((rcr, auth_state)) => {
             let auth_id = Uuid::new_v4().to_string();
-            let mut auth_states = state.webauthn_auth_states.lock().unwrap();
+            let mut auth_states = state.webauthn_auth_states.lock().unwrap_or_else(|e| e.into_inner());
             auth_states.insert(auth_id.clone(), auth_state);
 
             info!("Passkey authentication started, auth_id={}", auth_id);
@@ -218,7 +218,7 @@ pub(crate) async fn login_finish(
 
     // Check if this auth_id was already successfully verified (duplicate request from proxy)
     {
-        let completed = state.webauthn_completed_auths.lock().unwrap();
+        let completed = state.webauthn_completed_auths.lock().unwrap_or_else(|e| e.into_inner());
         info!("Passkey login_finish: completed_auths has {} entries, checking for '{}'", completed.len(), req.auth_id);
         if let Some(cached_token) = completed.get(&req.auth_id) {
             info!("Passkey login_finish: returning cached JWT for duplicate auth_id '{}'", req.auth_id);
@@ -232,7 +232,7 @@ pub(crate) async fn login_finish(
 
     // Retrieve and remove auth state
     let auth_state = {
-        let mut auth_states = state.webauthn_auth_states.lock().unwrap();
+        let mut auth_states = state.webauthn_auth_states.lock().unwrap_or_else(|e| e.into_inner());
         auth_states.remove(&req.auth_id)
     };
 
@@ -259,7 +259,7 @@ pub(crate) async fn login_finish(
 
     // Cache JWT immediately (before verification which may be cancelled by proxy)
     {
-        let mut map = state.webauthn_completed_auths.lock().unwrap();
+        let mut map = state.webauthn_completed_auths.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(req.auth_id.clone(), token.clone());
         warn!("Passkey: JWT pre-cached for auth_id='{}', entries={}", req.auth_id, map.len());
     }
@@ -277,7 +277,7 @@ pub(crate) async fn login_finish(
         Err(e) => {
             // Verification failed — remove the pre-cached token
             {
-                let mut map = state.webauthn_completed_auths.lock().unwrap();
+                let mut map = state.webauthn_completed_auths.lock().unwrap_or_else(|e| e.into_inner());
                 map.remove(&req.auth_id);
             }
             warn!("Passkey verification failed: {}", e);
@@ -330,7 +330,7 @@ pub(crate) async fn passkey_poll(
 
     // Check explicit cache first
     {
-        let completed = state.webauthn_completed_auths.lock().unwrap();
+        let completed = state.webauthn_completed_auths.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(token) = completed.get(&auth_id) {
             return Json(serde_json::json!({"ready": true, "success": true, "token": token, "expires_in": 7 * 24 * 3600}));
         }
@@ -339,12 +339,12 @@ pub(crate) async fn passkey_poll(
     // If auth_state was consumed (removed by login_finish), verification succeeded.
     // Issue a fresh JWT for the client.
     {
-        let auth_states = state.webauthn_auth_states.lock().unwrap();
+        let auth_states = state.webauthn_auth_states.lock().unwrap_or_else(|e| e.into_inner());
         if !auth_states.contains_key(&auth_id) {
             // auth_state was consumed → verification succeeded → issue JWT
             drop(auth_states);
             if let Ok(token) = issue_jwt(&state.jwt_secret) {
-                let mut completed = state.webauthn_completed_auths.lock().unwrap();
+                let mut completed = state.webauthn_completed_auths.lock().unwrap_or_else(|e| e.into_inner());
                 completed.insert(auth_id.clone(), token.clone());
                 return Json(serde_json::json!({"ready": true, "success": true, "token": token, "expires_in": 7 * 24 * 3600}));
             }

@@ -255,10 +255,11 @@ pub(crate) async fn login_finish(
             // Issue JWT
             match issue_jwt(&state.jwt_secret) {
                 Ok(token) => {
-                    // Cache the token for duplicate requests (proxy retry)
+                    // Cache the token for poll endpoint (proxy may 502 the response)
                     {
                         let mut completed = state.webauthn_completed_auths.lock().unwrap();
                         completed.insert(req.auth_id.clone(), token.clone());
+                        info!("Passkey login_finish: cached JWT for auth_id='{}', completed_auths now has {} entries", req.auth_id, completed.len());
                     }
                     Json(serde_json::json!({
                         "success": true,

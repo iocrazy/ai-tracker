@@ -319,35 +319,28 @@ pub(crate) fn issue_jwt(secret: &str) -> Result<String, jsonwebtoken::errors::Er
 /// Poll for passkey login result — used when login_finish gets 502 from proxy.
 /// If the auth_id is no longer in auth_states (was consumed by login_finish),
 /// it means verification succeeded, so we issue a fresh JWT.
+// Simple query param struct for poll
+#[derive(Deserialize)]
+pub(crate) struct PollParams {
+    #[serde(default)]
+    auth_id: String,
+}
+
 pub(crate) async fn passkey_poll(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(params): axum::extract::Query<PollParams>,
 ) -> Json<serde_json::Value> {
-    let auth_id = params.get("auth_id").cloned().unwrap_or_default();
-    if auth_id.is_empty() {
-        return Json(serde_json::json!({"ready": false}));
-    }
+    let auth_id = params.auth_id;
 
-    // Check explicit cache first
-    {
-        let completed = state.webauthn_completed_auths.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(token) = completed.get(&auth_id) {
+    // Simple: check if auth_state was consumed AND issue JWT
+    let auth_state_exists = {
+        let states = state.webauthn_auth_states.lock().unwrap_or_else(|e| e.into_inner());
+        states.contains_key(&auth_id)
+    };
+
+    if !auth_id.is_empty() && !auth_state_exists {
+        if let Ok(token) = issue_jwt(&state.jwt_secret) {
             return Json(serde_json::json!({"ready": true, "success": true, "token": token, "expires_in": 7 * 24 * 3600}));
-        }
-    }
-
-    // If auth_state was consumed (removed by login_finish), verification succeeded.
-    // Issue a fresh JWT for the client.
-    {
-        let auth_states = state.webauthn_auth_states.lock().unwrap_or_else(|e| e.into_inner());
-        if !auth_states.contains_key(&auth_id) {
-            // auth_state was consumed → verification succeeded → issue JWT
-            drop(auth_states);
-            if let Ok(token) = issue_jwt(&state.jwt_secret) {
-                let mut completed = state.webauthn_completed_auths.lock().unwrap_or_else(|e| e.into_inner());
-                completed.insert(auth_id.clone(), token.clone());
-                return Json(serde_json::json!({"ready": true, "success": true, "token": token, "expires_in": 7 * 24 * 3600}));
-            }
         }
     }
 

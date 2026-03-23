@@ -47,6 +47,40 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [sentInteractions, setSentInteractions] = useState<Set<number>>(new Set());
 
+  // Dynamically resolved Claude pane — updated on open + periodically
+  const resolvedPaneRef = useRef<string>(claudePane || DEFAULT_CLAUDE_PANE);
+
+  // Resolve Claude pane from API
+  const resolveClaudePane = useCallback(async (): Promise<string> => {
+    if (!sessionName || !windowName) return claudePane || DEFAULT_CLAUDE_PANE;
+    try {
+      const res = await fetch(`/api/tmux/claude-status?session=${encodeURIComponent(sessionName)}&window=${encodeURIComponent(windowName)}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('agent-tracker-auth-token') || ''}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.status?.pane) {
+          resolvedPaneRef.current = data.status.pane;
+          return data.status.pane;
+        }
+      }
+    } catch { /* fallback */ }
+    return resolvedPaneRef.current;
+  }, [sessionName, windowName, claudePane]);
+
+  // Resolve pane on modal open and refresh every 30s
+  useEffect(() => {
+    if (!isOpen || !isLive) return;
+    resolveClaudePane();
+    const interval = setInterval(resolveClaudePane, 30000);
+    return () => clearInterval(interval);
+  }, [isOpen, isLive, resolveClaudePane]);
+
+  // Update ref when prop changes
+  useEffect(() => {
+    if (claudePane) resolvedPaneRef.current = claudePane;
+  }, [claudePane]);
+
   // Merge hook messages into displayed messages
   const allMessages = useMemo(() => {
     if (!hookMessages || hookMessages.length === 0) return messages;
@@ -210,21 +244,8 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
       ]);
 
     try {
-      // Resolve Claude pane dynamically (prop may be stale)
-      let targetPane = claudePane || DEFAULT_CLAUDE_PANE;
-      if (sessionName && windowName) {
-        try {
-          const statusRes = await fetch(`/api/tmux/claude-status?session=${encodeURIComponent(sessionName)}&window=${encodeURIComponent(windowName)}`, {
-            headers: { 'Authorization': `Bearer ${localStorage.getItem('agent-tracker-auth-token') || ''}` },
-          });
-          if (statusRes.ok) {
-            const statusData = await statusRes.json();
-            if (statusData.success && statusData.status?.pane) {
-              targetPane = statusData.status.pane;
-            }
-          }
-        } catch { /* use fallback */ }
-      }
+      // Resolve Claude pane dynamically (refresh the cached value)
+      const targetPane = await resolveClaudePane();
 
       if (hasImages) {
         const base64List = await Promise.all(pendingImages.map(img => fileToBase64(img.file)));
@@ -379,8 +400,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
             <button
               onClick={async () => {
                 if (sessionName && windowId) {
-                  const targetPane = claudePane || '1';
-                  await tmuxSendKeys(sessionName, windowId, targetPane, '', 'Enter');
+                  await tmuxSendKeys(sessionName, windowId, resolvedPaneRef.current, '', 'Enter');
                 }
               }}
               className="px-2 py-0.5 bg-yellow-800/50 border border-yellow-600/50 rounded text-yellow-300 text-xs hover:bg-yellow-700/50"
@@ -409,7 +429,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
               items={fromLiveChatMessages(allMessages)}
               onInteractionSelect={isLive ? async (msgIdx, optIdx, multiSelect, totalOptions) => {
                 if (!sessionName || !windowId) return;
-                const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
+                const targetPane = resolvedPaneRef.current;
 
                 try {
                   if (multiSelect) {
@@ -448,7 +468,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
               } : undefined}
               onInteractionTextSubmit={isLive ? async (msgIdx, text, optionCount, multiSelect) => {
                 if (!sessionName || !windowId) return;
-                const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
+                const targetPane = resolvedPaneRef.current;
 
                 try {
                   if (multiSelect) {

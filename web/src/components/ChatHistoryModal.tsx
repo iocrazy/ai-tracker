@@ -31,7 +31,7 @@ interface ChatHistoryModalProps {
 }
 
 // Default pane where Claude runs (can be auto-detected or configured per window)
-const DEFAULT_CLAUDE_PANE = '1';
+const DEFAULT_CLAUDE_PANE = '1'; // Fallback if claudePane not detected
 
 export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, messages, hookMessages, sessionName, windowName, windowId, claudePane, claudeStatus }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -210,7 +210,21 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
       ]);
 
     try {
-      const targetPane = claudePane || DEFAULT_CLAUDE_PANE;
+      // Resolve Claude pane dynamically (prop may be stale)
+      let targetPane = claudePane || DEFAULT_CLAUDE_PANE;
+      if (sessionName && windowName) {
+        try {
+          const statusRes = await fetch(`/api/tmux/claude-status?session=${encodeURIComponent(sessionName)}&window=${encodeURIComponent(windowName)}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('agent-tracker-auth-token') || ''}` },
+          });
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            if (statusData.success && statusData.status?.pane) {
+              targetPane = statusData.status.pane;
+            }
+          }
+        } catch { /* use fallback */ }
+      }
 
       if (hasImages) {
         const base64List = await Promise.all(pendingImages.map(img => fileToBase64(img.file)));

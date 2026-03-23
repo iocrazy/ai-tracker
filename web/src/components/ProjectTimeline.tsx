@@ -142,7 +142,7 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
       : entry.window || entry.session || 'Unknown';
     return {
       id: String(entry.id),
-      time: startTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }),
+      time: `${(startTime.getMonth()+1).toString().padStart(2,'0')}/${startTime.getDate().toString().padStart(2,'0')} ${startTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}`,
       user: displayName,
       action: 'COMPLETED',
       description: entry.summary || entry.completion_note || 'No description',
@@ -157,16 +157,22 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ gitDir, projec
   const convertGroupToTimelineEvent = useCallback((group: WindowGroupEntry): TimelineEvent => {
     const startTime = group.first_started ? new Date(group.first_started) : new Date();
     const endTime = group.last_ended ? new Date(group.last_ended) : null;
-    const timeStr = startTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-    const endStr = endTime ? endTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
-    const timeRange = endStr && endStr !== timeStr ? `${timeStr}-${endStr}` : timeStr;
+    const dateFmt = (d: Date) => `${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getDate().toString().padStart(2,'0')}`;
+    const timeFmt = (d: Date) => d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const startDateStr = dateFmt(startTime);
+    const endDateStr = endTime ? dateFmt(endTime) : '';
+    const timeRange = endTime
+      ? (startDateStr === endDateStr
+        ? `${startDateStr} ${timeFmt(startTime)}-${timeFmt(endTime)}`
+        : `${startDateStr} ${timeFmt(startTime)} ~ ${endDateStr} ${timeFmt(endTime)}`)
+      : `${startDateStr} ${timeFmt(startTime)}`;
 
-    // Build description from summaries (show first 3, clean up)
+    // Build description from summaries (show first 5, clean up)
     const cleanSummary = (s: string) => s
       .replace(/<[^>]+>/g, '')              // Strip XML/HTML tags
       .replace(/\/Volumes\/[^\s|]*/g, (p) => p.split('/').slice(-2).join('/'))  // Shorten paths
       .trim();
-    const maxSummaries = 3;
+    const maxSummaries = 5;
     const visibleSummaries = group.summaries.slice(0, maxSummaries).map(cleanSummary).filter(s => s.length > 0);
     const remaining = group.summaries.length - maxSummaries;
     let description = visibleSummaries.join(' | ');

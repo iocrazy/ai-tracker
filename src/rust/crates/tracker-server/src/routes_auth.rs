@@ -252,26 +252,27 @@ pub(crate) async fn login_finish(
                 auth_result.counter()
             );
 
-            // Issue JWT
-            match issue_jwt(&state.jwt_secret) {
-                Ok(token) => {
-                    // Cache the token for poll endpoint (proxy may 502 the response)
-                    {
-                        let mut completed = state.webauthn_completed_auths.lock().unwrap();
-                        completed.insert(req.auth_id.clone(), token.clone());
-                        info!("Passkey login_finish: cached JWT for auth_id='{}', completed_auths now has {} entries", req.auth_id, completed.len());
-                    }
-                    Json(serde_json::json!({
-                        "success": true,
-                        "token": token,
-                        "expires_in": 7 * 24 * 3600,
-                    }))
-                }
+            // Issue JWT and cache immediately (before returning response, which proxy may drop)
+            let token = match issue_jwt(&state.jwt_secret) {
+                Ok(t) => t,
                 Err(e) => {
                     error!("Failed to issue JWT: {}", e);
-                    Json(serde_json::json!({"error": "Failed to issue session token"}))
+                    return Json(serde_json::json!({"error": "Failed to issue session token"}));
                 }
+            };
+
+            // Cache FIRST, then return (proxy may 502 the response but poll will work)
+            {
+                let mut completed = state.webauthn_completed_auths.lock().unwrap();
+                completed.insert(req.auth_id.clone(), token.clone());
             }
+            info!("Passkey login_finish: JWT issued and cached for auth_id='{}'", req.auth_id);
+
+            Json(serde_json::json!({
+                "success": true,
+                "token": token,
+                "expires_in": 7 * 24 * 3600,
+            }))
         }
         Err(e) => {
             warn!("Passkey authentication verification failed: {}", e);

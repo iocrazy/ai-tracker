@@ -180,19 +180,10 @@ pub(crate) async fn login_start(
     match webauthn.start_passkey_authentication(&passkeys) {
         Ok((rcr, auth_state)) => {
             let auth_id = Uuid::new_v4().to_string();
-            {
-                let mut auth_states = state.webauthn_auth_states.lock().unwrap();
-                auth_states.insert(auth_id.clone(), auth_state);
-            }
+            let mut auth_states = state.webauthn_auth_states.lock().unwrap();
+            auth_states.insert(auth_id.clone(), auth_state);
 
-            // Pre-generate JWT at login_start (before Cloudflare can interfere)
-            if let Ok(token) = issue_jwt(&state.jwt_secret) {
-                let mut completed = state.webauthn_completed_auths.lock().unwrap();
-                completed.insert(auth_id.clone(), token);
-                info!("Passkey authentication started, auth_id={} (JWT pre-cached)", auth_id);
-            } else {
-                info!("Passkey authentication started, auth_id={}", auth_id);
-            }
+            info!("Passkey authentication started, auth_id={}", auth_id);
 
             Json(serde_json::json!({
                 "success": true,
@@ -325,7 +316,9 @@ pub(crate) fn issue_jwt(secret: &str) -> Result<String, jsonwebtoken::errors::Er
     )
 }
 
-/// Poll for passkey login result — used when login_finish gets 502 from proxy
+/// Poll for passkey login result — used when login_finish gets 502 from proxy.
+/// If the auth_id is no longer in auth_states (was consumed by login_finish),
+/// it means verification succeeded, so we issue a fresh JWT.
 pub(crate) async fn passkey_poll(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -334,12 +327,31 @@ pub(crate) async fn passkey_poll(
     if auth_id.is_empty() {
         return Json(serde_json::json!({"ready": false}));
     }
-    let completed = state.webauthn_completed_auths.lock().unwrap();
-    if let Some(token) = completed.get(&auth_id) {
-        Json(serde_json::json!({"ready": true, "success": true, "token": token, "expires_in": 7 * 24 * 3600}))
-    } else {
-        Json(serde_json::json!({"ready": false}))
+
+    // Check explicit cache first
+    {
+        let completed = state.webauthn_completed_auths.lock().unwrap();
+        if let Some(token) = completed.get(&auth_id) {
+            return Json(serde_json::json!({"ready": true, "success": true, "token": token, "expires_in": 7 * 24 * 3600}));
+        }
     }
+
+    // If auth_state was consumed (removed by login_finish), verification succeeded.
+    // Issue a fresh JWT for the client.
+    {
+        let auth_states = state.webauthn_auth_states.lock().unwrap();
+        if !auth_states.contains_key(&auth_id) {
+            // auth_state was consumed → verification succeeded → issue JWT
+            drop(auth_states);
+            if let Ok(token) = issue_jwt(&state.jwt_secret) {
+                let mut completed = state.webauthn_completed_auths.lock().unwrap();
+                completed.insert(auth_id.clone(), token.clone());
+                return Json(serde_json::json!({"ready": true, "success": true, "token": token, "expires_in": 7 * 24 * 3600}));
+            }
+        }
+    }
+
+    Json(serde_json::json!({"ready": false}))
 }
 
 pub(crate) fn verify_jwt(token: &str, secret: &str) -> bool {

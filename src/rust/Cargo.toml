@@ -53,7 +53,7 @@ regex = "1"
 libc = "0.2"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = "0.5"
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 url = "2"
 totp-rs = { version = "5", features = ["otpauth", "gen_secret"] }
 aes-gcm = "0.10"

@@ -245,31 +245,33 @@ pub(crate) async fn login_finish(
         }
     };
 
+    // Issue JWT BEFORE finishing authentication verification response
+    // This ensures the token is cached even if Cloudflare drops the connection
+    let secret = state.jwt_secret.clone();
+    let token = match issue_jwt(&secret) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Failed to issue JWT before auth check: {}", e);
+            return Json(serde_json::json!({"error": "Failed to issue session token"}));
+        }
+    };
+
     match webauthn.finish_passkey_authentication(&req.credential, &auth_state) {
         Ok(auth_result) => {
+            // Cache JWT immediately in a spawned task (survives connection cancellation by proxy)
+            let state_for_cache = state.clone();
+            let auth_id = req.auth_id.clone();
+            let token_for_cache = token.clone();
+            tokio::spawn(async move {
+                let mut map = state_for_cache.webauthn_completed_auths.lock().unwrap();
+                map.insert(auth_id.clone(), token_for_cache);
+                tracing::warn!("Passkey: JWT cached for poll, auth_id={}, entries={}", auth_id, map.len());
+            });
+
             info!(
                 "Passkey authentication successful, counter={}",
                 auth_result.counter()
             );
-
-            // Issue JWT
-            let secret = state.jwt_secret.clone();
-            let token = match issue_jwt(&secret) {
-                Ok(t) => t,
-                Err(e) => {
-                    error!("Failed to issue JWT: {}", e);
-                    return Json(serde_json::json!({"error": "Failed to issue session token"}));
-                }
-            };
-
-            // Cache FIRST, then return (proxy may 502 the response but poll will work)
-            let auth_id_clone = req.auth_id.clone();
-            let token_clone = token.clone();
-            {
-                let mut completed = state.webauthn_completed_auths.lock().unwrap();
-                completed.insert(auth_id_clone, token_clone);
-            }
-            warn!("Passkey: JWT cached for poll, auth_id={}", req.auth_id);
 
             Json(serde_json::json!({
                 "success": true,

@@ -180,11 +180,12 @@ pub(crate) async fn login_start(
     match webauthn.start_passkey_authentication(&passkeys) {
         Ok((rcr, auth_state)) => {
             let auth_id = Uuid::new_v4().to_string();
-            let mut auth_states = state.webauthn_auth_states.lock().unwrap();
-            auth_states.insert(auth_id.clone(), auth_state);
+            {
+                let mut auth_states = state.webauthn_auth_states.lock().unwrap();
+                auth_states.insert(auth_id.clone(), auth_state);
+            }
 
             // Pre-generate JWT at login_start (before Cloudflare can interfere)
-            // This JWT will be available via poll if login_finish gets 502'd
             if let Ok(token) = issue_jwt(&state.jwt_secret) {
                 let mut completed = state.webauthn_completed_auths.lock().unwrap();
                 completed.insert(auth_id.clone(), token);

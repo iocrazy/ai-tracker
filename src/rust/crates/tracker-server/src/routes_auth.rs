@@ -183,7 +183,16 @@ pub(crate) async fn login_start(
             let mut auth_states = state.webauthn_auth_states.lock().unwrap();
             auth_states.insert(auth_id.clone(), auth_state);
 
-            info!("Passkey authentication started, auth_id={}", auth_id);
+            // Pre-generate JWT at login_start (before Cloudflare can interfere)
+            // This JWT will be available via poll if login_finish gets 502'd
+            if let Ok(token) = issue_jwt(&state.jwt_secret) {
+                let mut completed = state.webauthn_completed_auths.lock().unwrap();
+                completed.insert(auth_id.clone(), token);
+                info!("Passkey authentication started, auth_id={} (JWT pre-cached)", auth_id);
+            } else {
+                info!("Passkey authentication started, auth_id={}", auth_id);
+            }
+
             Json(serde_json::json!({
                 "success": true,
                 "challenge": rcr,

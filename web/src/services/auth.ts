@@ -65,6 +65,10 @@ export async function verifyToken(token: string): Promise<boolean> {
 
 /** Check if any passkeys are registered */
 export async function checkPasskeyStatus(): Promise<boolean> {
+  // Hide passkey button if WebAuthn API not available
+  if (!navigator.credentials || !navigator.credentials.get) {
+    return false;
+  }
   try {
     const response = await fetch(`${API_BASE}/auth/passkey/status`);
     if (!response.ok) return false;
@@ -232,7 +236,11 @@ async function _loginWithPasskeyOnce(): Promise<boolean> {
     }));
   }
 
-  // Step 3: Browser prompt (Bitwarden will intercept this)
+  // Step 3: Browser prompt
+  // Check if WebAuthn is available
+  if (!navigator.credentials || !navigator.credentials.get) {
+    throw new Error('WebAuthn not supported in this browser. Try using Safari directly or a desktop browser.');
+  }
   // Wait for document focus (iOS Safari loses focus when Bitwarden/autofill UI appears)
   if (!document.hasFocus()) {
     await new Promise<void>((resolve) => {

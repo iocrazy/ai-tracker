@@ -252,8 +252,9 @@ pub(crate) async fn login_finish(
                 auth_result.counter()
             );
 
-            // Issue JWT and cache immediately (before returning response, which proxy may drop)
-            let token = match issue_jwt(&state.jwt_secret) {
+            // Issue JWT
+            let secret = state.jwt_secret.clone();
+            let token = match issue_jwt(&secret) {
                 Ok(t) => t,
                 Err(e) => {
                     error!("Failed to issue JWT: {}", e);
@@ -262,11 +263,13 @@ pub(crate) async fn login_finish(
             };
 
             // Cache FIRST, then return (proxy may 502 the response but poll will work)
+            let auth_id_clone = req.auth_id.clone();
+            let token_clone = token.clone();
             {
                 let mut completed = state.webauthn_completed_auths.lock().unwrap();
-                completed.insert(req.auth_id.clone(), token.clone());
+                completed.insert(auth_id_clone, token_clone);
             }
-            info!("Passkey login_finish: JWT issued and cached for auth_id='{}'", req.auth_id);
+            warn!("Passkey: JWT cached for poll, auth_id={}", req.auth_id);
 
             Json(serde_json::json!({
                 "success": true,

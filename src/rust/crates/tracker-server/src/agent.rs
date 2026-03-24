@@ -1727,10 +1727,15 @@ impl TmuxAgent {
 
     /// Synchronous version of find_git_root
     pub fn find_git_root_sync(path: &str) -> Option<String> {
+        let start = std::time::Instant::now();
         let output = std::process::Command::new("git")
             .args(["-C", path, "rev-parse", "--show-toplevel"])
             .output()
             .ok()?;
+        let elapsed = start.elapsed();
+        if elapsed.as_secs() >= 2 {
+            tracing::warn!("CMD_SLOW: git rev-parse --show-toplevel in {} took {}ms", path, elapsed.as_millis());
+        }
 
         if !output.status.success() {
             return None;

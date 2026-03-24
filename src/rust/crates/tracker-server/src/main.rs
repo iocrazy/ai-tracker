@@ -55,6 +55,83 @@ use tracker_core::{commands, Envelope, Goal, HistoryRecord, Note, NoteScope, Tas
 use crate::db::Database;
 
 // ============================================================================
+// Diagnostics: Timed Lock + Command Helpers
+// ============================================================================
+
+/// Acquire a Mutex lock with timing. Warns if acquisition takes > 100ms or hold time > 500ms.
+macro_rules! timed_lock {
+    ($mutex:expr, $name:expr) => {{
+        let _lock_start = std::time::Instant::now();
+        let guard = $mutex.lock().unwrap();
+        let _elapsed = _lock_start.elapsed();
+        if _elapsed.as_millis() > 100 {
+            tracing::warn!(
+                "SLOW_LOCK: {} took {}ms to acquire",
+                $name, _elapsed.as_millis()
+            );
+        }
+        guard
+    }};
+}
+
+/// Run a std::process::Command with logging and timeout.
+/// Returns Option<String> (stdout trimmed). Logs duration + warns if > 2s.
+fn run_command_timed(
+    label: &str,
+    cmd: &str,
+    args: &[&str],
+    timeout_secs: u64,
+) -> Option<String> {
+    let start = std::time::Instant::now();
+    let mut child = match std::process::Command::new(cmd)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("CMD_FAIL: {} spawn error: {}", label, e);
+            return None;
+        }
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let elapsed = start.elapsed();
+                if elapsed.as_secs() >= 2 {
+                    tracing::warn!("CMD_SLOW: {} took {}ms", label, elapsed.as_millis());
+                }
+                if !status.success() {
+                    tracing::debug!("CMD_FAIL: {} exit={}", label, status);
+                    return None;
+                }
+                let output = child.wait_with_output().ok()?;
+                let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                return if result.is_empty() { None } else { Some(result) };
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    tracing::error!(
+                        "CMD_TIMEOUT: {} killed after {}s",
+                        label, timeout_secs
+                    );
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                tracing::warn!("CMD_FAIL: {} wait error: {}", label, e);
+                return None;
+            }
+        }
+    }
+}
+
+// ============================================================================
 // State Management
 // ============================================================================
 
@@ -216,7 +293,7 @@ impl AppState {
     fn resolve_git_dir_for_window(&self, session_id: &str, window_id: &str) -> Option<String> {
         // Extract data from Mutex lock, then release before running git commands
         let (cached_git_dir, working_dir) = {
-            let windows = self.last_tmux_windows.lock().unwrap();
+            let windows = timed_lock!(self.last_tmux_windows, "resolve_git_dir:last_tmux_windows");
             let win = windows.iter().find(|w| w.session_id == session_id && w.window_id == window_id)?;
             (win.git_dir.clone(), win.working_dir.clone())
         };
@@ -240,7 +317,7 @@ impl AppState {
 
     /// Get current state as Envelope for WebSocket broadcast
     fn get_state_response(&self) -> Envelope {
-        let state = self.state.lock().unwrap();
+        let state = timed_lock!(self.state, "get_state_response:state");
         Envelope {
             kind: "state".to_string(),
             tasks: state.tasks.values().cloned().collect(),
@@ -256,9 +333,14 @@ impl AppState {
 
     /// Get current state with tmux names filled in
     fn get_state_response_with_tmux_names(&self) -> Envelope {
+        let start = std::time::Instant::now();
         let (session_map, window_map) = agent::TmuxAgent::get_tmux_name_mappings_sync();
+        let tmux_elapsed = start.elapsed();
+        if tmux_elapsed.as_millis() > 500 {
+            warn!("CMD_SLOW: get_tmux_name_mappings_sync took {}ms", tmux_elapsed.as_millis());
+        }
 
-        let state = self.state.lock().unwrap();
+        let state = timed_lock!(self.state, "get_state_response_with_tmux_names:state");
 
         // Enrich tasks with tmux names
         let tasks: Vec<Task> = state
@@ -339,7 +421,7 @@ impl AppState {
 
         // Populate changed tables from SQLite hook tracking
         {
-            let server_state = self.state.lock().unwrap();
+            let server_state = timed_lock!(self.state, "broadcast_state:state");
             let changes = server_state.db.take_changes();
             if !changes.is_empty() {
                 state.changed = changes.into_iter().collect();
@@ -348,7 +430,7 @@ impl AppState {
 
         // Use cached tmux windows from the polling loop (updated every 1s)
         // instead of calling list_all_windows_sync() which blocks the async runtime.
-        let tmux_windows = self.last_tmux_windows.lock().unwrap().clone();
+        let tmux_windows = timed_lock!(self.last_tmux_windows, "broadcast_state:last_tmux_windows").clone();
 
         // Write cache file for tmux status line
         Self::write_cache_file(&state);
@@ -391,13 +473,13 @@ impl AppState {
     /// Uses cached tmux windows to avoid blocking the async runtime.
     fn get_realtime_message(&self) -> RealtimeMessage {
         let state = self.get_state_response_with_tmux_names();
-        let tmux_windows = self.last_tmux_windows.lock().unwrap().clone();
+        let tmux_windows = timed_lock!(self.last_tmux_windows, "get_realtime_message:last_tmux_windows").clone();
         RealtimeMessage { state, tmux_windows }
     }
 
     /// Broadcast if tmux windows changed
     fn broadcast_if_tmux_changed(&self, new_windows: Vec<agent::TmuxWindowInfo>) {
-        let mut last = self.last_tmux_windows.lock().unwrap();
+        let mut last = timed_lock!(self.last_tmux_windows, "broadcast_if_tmux_changed:last_tmux_windows");
 
         // Safety: if tmux returns empty but we previously had windows,
         // treat it as a transient failure and skip the update.
@@ -415,8 +497,13 @@ impl AppState {
         let new_json = serde_json::to_string(&new_windows).unwrap_or_default();
 
         if old_json != new_json {
+            let change_start = std::time::Instant::now();
+            let old_count = last.len();
+            let new_count = new_windows.len();
             let old_windows = std::mem::replace(&mut *last, new_windows.clone());
             drop(last); // Release lock before broadcast
+
+            debug!("TMUX_CHANGE: {} -> {} windows", old_count, new_count);
 
             // Detect disappeared windows (in old but not in new) and save to closed_windows
             self.detect_closed_windows(&old_windows, &new_windows);
@@ -430,11 +517,17 @@ impl AppState {
             let state = self.get_state_response_with_tmux_names();
             let msg = RealtimeMessage { state, tmux_windows: new_windows };
             let _ = self.broadcast_tx.send(msg);
+
+            let elapsed = change_start.elapsed();
+            if elapsed.as_millis() > 1000 {
+                warn!("SLOW_FN: broadcast_if_tmux_changed processing took {}ms", elapsed.as_millis());
+            }
         }
     }
 
     /// Detect windows that disappeared and save them to closed_windows DB
     fn detect_closed_windows(&self, old_windows: &[agent::TmuxWindowInfo], new_windows: &[agent::TmuxWindowInfo]) {
+        let fn_start = std::time::Instant::now();
         // Skip if old_windows is empty (first poll, nothing disappeared)
         if old_windows.is_empty() {
             return;
@@ -485,7 +578,7 @@ impl AppState {
             // Save to global DB with git_dir tag + register project
             // Use a single lock scope to avoid self-deadlock
             {
-                let server_state = self.state.lock().unwrap();
+                let server_state = timed_lock!(self.state, "detect_closed_windows:state");
                 if let Err(e) = server_state.db.save_closed_window(
                     &old_win.session_id,
                     &old_win.session_name,
@@ -509,6 +602,10 @@ impl AppState {
                 }
             } // MutexGuard dropped here
         }
+        let elapsed = fn_start.elapsed();
+        if elapsed.as_millis() > 500 {
+            warn!("SLOW_FN: detect_closed_windows took {}ms", elapsed.as_millis());
+        }
     }
 
     /// Detect windows that reappeared and clean up their closed_windows records
@@ -521,7 +618,7 @@ impl AppState {
             }
 
             // This is a newly appeared window - clean up any closed_windows record with same name
-            let db = &self.state.lock().unwrap().db;
+            let db = &timed_lock!(self.state, "detect_reopened_windows:state").db;
             if let Err(e) = db.delete_closed_window_by_name(&new_win.session_name, &new_win.window_name) {
                 warn!("Failed to clean up closed window record for {}: {}", new_win.window_name, e);
             }
@@ -529,38 +626,11 @@ impl AppState {
     }
 
     /// Run a git command with a 3-second timeout to prevent blocking the runtime.
-    /// Returns None if the command fails or times out.
     fn git_command_with_timeout(working_dir: &str, args: &[&str]) -> Option<String> {
-        use std::process::Command;
-        let mut child = Command::new("git")
-            .args(["-C", working_dir])
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-
-        // Poll with timeout instead of blocking indefinitely
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() { return None; }
-                    let output = child.wait_with_output().ok()?;
-                    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    return if result.is_empty() { None } else { Some(result) };
-                }
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        let _ = child.kill();
-                        tracing::warn!("git command timed out (3s) in {}", working_dir);
-                        return None;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(_) => return None,
-            }
-        }
+        let label = format!("git -C {} {}", working_dir, args.join(" "));
+        let mut full_args = vec!["-C", working_dir];
+        full_args.extend_from_slice(args);
+        run_command_timed(&label, "git", &full_args, 3)
     }
 
     /// Clean up stale tasks whose tmux session or window no longer exists.
@@ -572,7 +642,7 @@ impl AppState {
         let live_windows: std::collections::HashSet<(&str, &str)> = current_windows.iter()
             .map(|w| (w.session_id.as_str(), w.window_id.as_str())).collect();
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = timed_lock!(self.state, "cleanup_stale_tasks:state");
         let stale_keys: Vec<String> = state.tasks.iter()
             .filter(|(_, task)| {
                 // Task is stale if its session doesn't exist OR its window doesn't exist
@@ -3165,9 +3235,22 @@ async fn main() -> Result<()> {
             // broadcast_if_tmux_changed may run blocking git commands (detect_closed_windows),
             // so offload to a blocking thread to prevent async runtime starvation.
             let state_ref = tmux_monitor_state.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                state_ref.broadcast_if_tmux_changed(windows);
-            }).await;
+            let broadcast_start = std::time::Instant::now();
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    state_ref.broadcast_if_tmux_changed(windows);
+                }),
+            ).await {
+                Ok(Ok(())) => {
+                    let elapsed = broadcast_start.elapsed();
+                    if elapsed.as_secs() >= 3 {
+                        tracing::warn!("SLOW_BROADCAST: broadcast_if_tmux_changed took {}ms", elapsed.as_millis());
+                    }
+                }
+                Ok(Err(e)) => tracing::error!("broadcast_if_tmux_changed panicked: {}", e),
+                Err(_) => tracing::error!("TIMEOUT: broadcast_if_tmux_changed hung for 10s — possible deadlock!"),
+            }
         }
     });
 
@@ -3549,6 +3632,24 @@ async fn main() -> Result<()> {
 
     let app = app
         .fallback_service(nocache_service);
+
+    // Liveness heartbeat — logs every 60s so log gaps reveal hangs
+    let heartbeat_state = app_state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        interval.tick().await; // skip immediate tick
+        loop {
+            interval.tick().await;
+            let ws_count = heartbeat_state.broadcast_tx.receiver_count();
+            let task_count = heartbeat_state.state.lock()
+                .map(|s| s.tasks.len()).unwrap_or(0);
+            info!(
+                "HEARTBEAT: ws_clients={} tasks={} uptime={}s",
+                ws_count, task_count,
+                heartbeat_state.start_time.elapsed().as_secs()
+            );
+        }
+    });
 
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], 3099));

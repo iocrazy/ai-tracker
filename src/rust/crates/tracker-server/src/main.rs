@@ -214,22 +214,27 @@ impl AppState {
 
     /// Resolve git_dir for a session/window from cached tmux windows
     fn resolve_git_dir_for_window(&self, session_id: &str, window_id: &str) -> Option<String> {
-        let windows = self.last_tmux_windows.lock().unwrap();
-        for win in windows.iter() {
-            if win.session_id == session_id && win.window_id == window_id {
-                // Prefer cached git_dir, fall back to working_dir -> git root discovery
-                if let Some(ref gd) = win.git_dir {
-                    if !gd.is_empty() {
-                        return Some(gd.clone());
-                    }
-                }
-                if let Some(ref wd) = win.working_dir {
-                    if !wd.is_empty() {
-                        return agent::TmuxAgent::find_git_root_sync(wd);
-                    }
-                }
+        // Extract data from Mutex lock, then release before running git commands
+        let (cached_git_dir, working_dir) = {
+            let windows = self.last_tmux_windows.lock().unwrap();
+            let win = windows.iter().find(|w| w.session_id == session_id && w.window_id == window_id)?;
+            (win.git_dir.clone(), win.working_dir.clone())
+        };
+
+        // Prefer cached git_dir
+        if let Some(ref gd) = cached_git_dir {
+            if !gd.is_empty() {
+                return Some(gd.clone());
             }
         }
+
+        // Fall back to git root discovery with timeout (outside Mutex lock)
+        if let Some(ref wd) = working_dir {
+            if !wd.is_empty() {
+                return Self::git_command_with_timeout(wd, &["rev-parse", "--show-toplevel"]);
+            }
+        }
+
         None
     }
 
@@ -461,18 +466,8 @@ impl AppState {
             };
 
             // Get git branch from the working directory (directory still exists even though tmux window is gone)
-            let git_branch = std::process::Command::new("git")
-                .args(["-C", &working_dir, "rev-parse", "--abbrev-ref", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|out| {
-                    if out.status.success() {
-                        let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if branch.is_empty() { None } else { Some(branch) }
-                    } else {
-                        None
-                    }
-                })
+            // Use timeout to prevent blocking the async runtime if volume is unresponsive
+            let git_branch = Self::git_command_with_timeout(&working_dir, &["rev-parse", "--abbrev-ref", "HEAD"])
                 .unwrap_or_default();
 
             let pane_count = old_win.pane_count as i32;
@@ -482,9 +477,9 @@ impl AppState {
                 old_win.session_name, old_win.window_name, old_win.window_id, working_dir, git_branch, pane_count
             );
 
-            // Resolve git_dir for project tagging
+            // Resolve git_dir for project tagging (with timeout to prevent runtime starvation)
             let git_dir = old_win.git_dir.clone()
-                .or_else(|| agent::TmuxAgent::find_git_root_sync(&working_dir))
+                .or_else(|| Self::git_command_with_timeout(&working_dir, &["rev-parse", "--show-toplevel"]))
                 .unwrap_or_default();
 
             // Save to global DB with git_dir tag
@@ -527,6 +522,41 @@ impl AppState {
             let db = &self.state.lock().unwrap().db;
             if let Err(e) = db.delete_closed_window_by_name(&new_win.session_name, &new_win.window_name) {
                 warn!("Failed to clean up closed window record for {}: {}", new_win.window_name, e);
+            }
+        }
+    }
+
+    /// Run a git command with a 3-second timeout to prevent blocking the runtime.
+    /// Returns None if the command fails or times out.
+    fn git_command_with_timeout(working_dir: &str, args: &[&str]) -> Option<String> {
+        use std::process::Command;
+        let mut child = Command::new("git")
+            .args(["-C", working_dir])
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+
+        // Poll with timeout instead of blocking indefinitely
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() { return None; }
+                    let output = child.wait_with_output().ok()?;
+                    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    return if result.is_empty() { None } else { Some(result) };
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        tracing::warn!("git command timed out (3s) in {}", working_dir);
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => return None,
             }
         }
     }
@@ -2729,7 +2759,9 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         if msg.tmux_windows.is_empty() {
             if let Ok(windows) = tokio::task::spawn_blocking(agent::TmuxAgent::list_all_windows_sync).await {
                 if !windows.is_empty() {
-                    state.broadcast_if_tmux_changed(windows.clone());
+                    let s = state.clone();
+                    let w = windows.clone();
+                    let _ = tokio::task::spawn_blocking(move || s.broadcast_if_tmux_changed(w)).await;
                     msg.tmux_windows = windows;
                 }
             }
@@ -3128,7 +3160,12 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
-            tmux_monitor_state.broadcast_if_tmux_changed(windows);
+            // broadcast_if_tmux_changed may run blocking git commands (detect_closed_windows),
+            // so offload to a blocking thread to prevent async runtime starvation.
+            let state_ref = tmux_monitor_state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                state_ref.broadcast_if_tmux_changed(windows);
+            }).await;
         }
     });
 

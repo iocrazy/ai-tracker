@@ -380,8 +380,10 @@ pub(crate) async fn tmux_kill_window(
 
     // Save to closed_windows table if we got valid info
     if let Some((session_id, session_name, window_name, working_dir, git_branch, pane_count)) = window_info {
-        let git_dir = crate::agent::TmuxAgent::find_git_root_sync(&working_dir)
-            .unwrap_or_default();
+        let wd = working_dir.clone();
+        let git_dir = tokio::task::spawn_blocking(move || {
+            crate::agent::TmuxAgent::find_git_root_sync(&wd)
+        }).await.ok().flatten().unwrap_or_default();
         let db = &state.state.lock().unwrap().db;
         if let Err(e) = db.save_closed_window(&session_id, &session_name, &window_name, &working_dir, &git_branch, pane_count, &git_dir) {
             warn!("Failed to save closed window info: {}", e);

@@ -482,30 +482,32 @@ impl AppState {
                 .or_else(|| Self::git_command_with_timeout(&working_dir, &["rev-parse", "--show-toplevel"]))
                 .unwrap_or_default();
 
-            // Save to global DB with git_dir tag
-            let db = &self.state.lock().unwrap().db;
-            if let Err(e) = db.save_closed_window(
-                &old_win.session_id,
-                &old_win.session_name,
-                &old_win.window_name,
-                &working_dir,
-                &git_branch,
-                pane_count,
-                &git_dir,
-            ) {
-                warn!("Failed to auto-save closed window: {}", e);
-            }
+            // Save to global DB with git_dir tag + register project
+            // Use a single lock scope to avoid self-deadlock
+            {
+                let server_state = self.state.lock().unwrap();
+                if let Err(e) = server_state.db.save_closed_window(
+                    &old_win.session_id,
+                    &old_win.session_name,
+                    &old_win.window_name,
+                    &working_dir,
+                    &git_branch,
+                    pane_count,
+                    &git_dir,
+                ) {
+                    warn!("Failed to auto-save closed window: {}", e);
+                }
 
-            // Register project in global DB if git_dir available
-            if !git_dir.is_empty() {
-                let project_name = std::path::Path::new(&git_dir)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let state = self.state.lock().unwrap();
-                let _ = state.db.register_project(&git_dir, &project_name);
-                let _ = state.db.update_project_activity(&git_dir, &old_win.session_name, &old_win.window_name);
-            }
+                // Register project in global DB if git_dir available
+                if !git_dir.is_empty() {
+                    let project_name = std::path::Path::new(&git_dir)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let _ = server_state.db.register_project(&git_dir, &project_name);
+                    let _ = server_state.db.update_project_activity(&git_dir, &old_win.session_name, &old_win.window_name);
+                }
+            } // MutexGuard dropped here
         }
     }
 

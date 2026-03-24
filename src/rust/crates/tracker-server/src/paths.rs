@@ -5,7 +5,7 @@
 //! - Standalone: falls back to ~/.config/agent-tracker/ for everything
 
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{error, info, warn};
 
 /// All resolved paths used by the server.
 #[derive(Debug, Clone)]
@@ -35,7 +35,24 @@ impl TrackerPaths {
             .ok()
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| legacy_dir.clone());
+            .unwrap_or_else(|| {
+                // Check if Tauri data dir exists with real data — if so, we're likely
+                // started manually without TRACKER_DATA_DIR and should NOT silently
+                // fall back to the empty legacy dir.
+                let tauri_data = Self::tauri_data_dir();
+                if tauri_data.join("data").join("tracker.db").exists() {
+                    error!("==========================================================");
+                    error!("  TRACKER_DATA_DIR not set but Tauri data dir exists at:");
+                    error!("  {:?}", tauri_data);
+                    error!("  Falling back to legacy dir would use a WRONG database!");
+                    error!("  Using Tauri data dir instead.");
+                    error!("  To start properly, launch via 'Agent Tracker.app'.");
+                    error!("==========================================================");
+                    tauri_data
+                } else {
+                    legacy_dir.clone()
+                }
+            });
 
         // Read-only resources directory
         let resources_dir = std::env::var("TRACKER_RESOURCES_DIR")
@@ -162,5 +179,22 @@ impl TrackerPaths {
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".config")
             .join("agent-tracker")
+    }
+
+    /// Tauri application data directory (macOS: ~/Library/Application Support/com.agent-tracker.menubar).
+    fn tauri_data_dir() -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("Library/Application Support/com.agent-tracker.menubar")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // On Linux/Windows, Tauri data dir follows platform conventions
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("com.agent-tracker.menubar")
+        }
     }
 }

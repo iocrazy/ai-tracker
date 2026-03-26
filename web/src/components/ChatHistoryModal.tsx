@@ -184,6 +184,11 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
 
   // Slash command palette
   const SLASH_COMMANDS = useMemo(() => [
+    // Skills (user-installed)
+    { command: '/qa', description: 'QA test a web app and fix bugs' },
+    { command: '/qa-only', description: 'QA test (report only, no fixes)' },
+    { command: '/browse', description: 'Headless browser for testing' },
+    { command: '/gstack', description: 'gstack browser toolkit' },
     { command: '/brainstorming', description: 'Creative design and brainstorming' },
     { command: '/commit', description: 'Create a git commit' },
     { command: '/plan', description: 'Create implementation plan' },
@@ -191,6 +196,8 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     { command: '/tdd', description: 'Test-driven development' },
     { command: '/debug', description: 'Systematic debugging' },
     { command: '/discord-notify', description: 'Send Discord notification' },
+    { command: '/simplify', description: 'Review code for quality and efficiency' },
+    // Built-in commands
     { command: '/help', description: 'Show available commands' },
     { command: '/clear', description: 'Clear conversation' },
     { command: '/compact', description: 'Compact context' },

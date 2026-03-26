@@ -36,6 +36,10 @@ const DEFAULT_CLAUDE_PANE = '1'; // Fallback if claudePane not detected
 export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, messages, hookMessages, sessionName, windowName, windowId, claudePane, claudeStatus }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Per-window draft storage: windowId → inputText
+  const draftsRef = useRef<Map<string, string>>(new Map());
+  const prevWindowIdRef = useRef<string | undefined>(undefined);
+
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
   // Detect if session is live (has active Claude) vs archived (no Claude running)
@@ -47,13 +51,22 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [sentInteractions, setSentInteractions] = useState<Set<number>>(new Set());
 
-  // Reset input state when switching between windows
+  // Save draft when switching away, restore draft when switching to
   useEffect(() => {
-    setInputValue('');
-    setPendingImages([]);
+    const prevId = prevWindowIdRef.current;
+    // Save current input as draft for previous window
+    if (prevId && prevId !== windowId) {
+      draftsRef.current.set(prevId, inputValue);
+    }
+    // Restore draft for new window (or empty)
+    if (windowId) {
+      setInputValue(draftsRef.current.get(windowId) || '');
+    }
+    prevWindowIdRef.current = windowId;
+    // Reset transient state on switch
     setSendStatus('idle');
     setSentInteractions(new Set());
-  }, [windowId]);
+  }, [windowId]); // intentionally exclude inputValue to avoid save loops
 
   // Dynamically resolved Claude pane — updated on open + periodically
   const resolvedPaneRef = useRef<string>(claudePane || DEFAULT_CLAUDE_PANE);

@@ -28,18 +28,15 @@ interface ChatHistoryModalProps {
   windowId?: string;  // tmux window ID (e.g., "@33") for send-keys targeting
   claudePane?: string;  // Pane number where Claude runs (default: "1")
   claudeStatus?: ClaudeStatus;  // Current Claude status for display
+  draftsRef?: React.RefObject<Map<string, string>>;  // Per-window draft storage from parent
 }
 
 // Default pane where Claude runs (can be auto-detected or configured per window)
 const DEFAULT_CLAUDE_PANE = '1'; // Fallback if claudePane not detected
 
-export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, messages, hookMessages, sessionName, windowName, windowId, claudePane, claudeStatus }) => {
+export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, messages, hookMessages, sessionName, windowName, windowId, claudePane, claudeStatus, draftsRef }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  // Per-window draft storage: windowId → inputText
-  const draftsRef = useRef<Map<string, string>>(new Map());
-  const prevWindowIdRef = useRef<string | undefined>(undefined);
-
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
   // Detect if session is live (has active Claude) vs archived (no Claude running)
@@ -50,23 +47,24 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [sentInteractions, setSentInteractions] = useState<Set<number>>(new Set());
+  const prevWindowIdRef = useRef<string | undefined>(undefined);
 
-  // Save draft when switching away, restore draft when switching to
+  // Save draft on every input change
   useEffect(() => {
-    const prevId = prevWindowIdRef.current;
-    // Save current input as draft for previous window
-    if (prevId && prevId !== windowId) {
-      draftsRef.current.set(prevId, inputValue);
+    if (windowId && draftsRef?.current) {
+      draftsRef.current.set(windowId, inputValue);
     }
-    // Restore draft for new window (or empty)
-    if (windowId) {
-      setInputValue(draftsRef.current.get(windowId) || '');
+  }, [inputValue, windowId, draftsRef]);
+
+  // Restore draft when opening a different window
+  useEffect(() => {
+    if (windowId && windowId !== prevWindowIdRef.current) {
+      setInputValue(draftsRef?.current?.get(windowId) || '');
+      setSendStatus('idle');
+      setSentInteractions(new Set());
     }
     prevWindowIdRef.current = windowId;
-    // Reset transient state on switch
-    setSendStatus('idle');
-    setSentInteractions(new Set());
-  }, [windowId]); // intentionally exclude inputValue to avoid save loops
+  }, [windowId, draftsRef]);
 
   // Dynamically resolved Claude pane — updated on open + periodically
   const resolvedPaneRef = useRef<string>(claudePane || DEFAULT_CLAUDE_PANE);

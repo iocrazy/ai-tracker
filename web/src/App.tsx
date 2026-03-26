@@ -420,6 +420,8 @@ const App: React.FC = () => {
   const [modalTitle, setModalTitle] = useState('');
   const [modalSubtitle, setModalSubtitle] = useState('');
   const [modalMessages, setModalMessages] = useState<ChatMessage[]>([]);
+  // Per-window draft storage (survives modal close/reopen)
+  const chatDraftsRef = useRef<Map<string, string>>(new Map());
 
   // History Detail Modal
   const [historyDetailId, setHistoryDetailId] = useState<number | null>(null);
@@ -1010,6 +1012,7 @@ const App: React.FC = () => {
                         ?.claudeStatus
                     : undefined
                 }
+                draftsRef={chatDraftsRef}
             />
 
             {/* History Detail Modal */}

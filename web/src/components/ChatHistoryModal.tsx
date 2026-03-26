@@ -47,6 +47,14 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [sentInteractions, setSentInteractions] = useState<Set<number>>(new Set());
 
+  // Reset input state when switching between windows
+  useEffect(() => {
+    setInputValue('');
+    setPendingImages([]);
+    setSendStatus('idle');
+    setSentInteractions(new Set());
+  }, [windowId]);
+
   // Dynamically resolved Claude pane — updated on open + periodically
   const resolvedPaneRef = useRef<string>(claudePane || DEFAULT_CLAUDE_PANE);
 

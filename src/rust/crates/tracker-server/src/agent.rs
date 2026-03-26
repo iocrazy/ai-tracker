@@ -856,15 +856,38 @@ impl TmuxAgent {
         tracing::info!("send_keys_with_suffix: target={}, keys={}, suffix={:?}", target, keys, suffix_key);
 
         if !keys.is_empty() {
-            let output = Command::new(TMUX_BIN.as_str())
-                .args(["send-keys", "-t", &target, "-l", keys])
-                .output()
-                .await
-                .context("Failed to send keys to tmux pane")?;
+            // Slash commands (e.g., /qa, /commit) need character-by-character input
+            // so Claude Code's TUI can trigger the autocomplete menu.
+            // Regular text uses -l (literal) for efficiency.
+            if keys.starts_with('/') && keys.len() <= 50 && !keys.contains(' ') {
+                tracing::info!("send_keys_with_suffix: sending slash command char-by-char");
+                for ch in keys.chars() {
+                    let ch_str = ch.to_string();
+                    let output = Command::new(TMUX_BIN.as_str())
+                        .args(["send-keys", "-t", &target, "-l", &ch_str])
+                        .output()
+                        .await
+                        .context("Failed to send char to tmux pane")?;
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        bail!("tmux send-keys (char) failed: {}", stderr);
+                    }
+                    // Small delay between chars for TUI to process
+                    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                }
+                // Extra delay after slash command for menu to appear
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            } else {
+                let output = Command::new(TMUX_BIN.as_str())
+                    .args(["send-keys", "-t", &target, "-l", keys])
+                    .output()
+                    .await
+                    .context("Failed to send keys to tmux pane")?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("tmux send-keys (text) failed: {}", stderr);
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    bail!("tmux send-keys (text) failed: {}", stderr);
+                }
             }
             tracing::info!("send_keys_with_suffix: text sent successfully");
         }

@@ -203,19 +203,46 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
 
   // Slash command palette
   const SLASH_COMMANDS = useMemo(() => [
-    // Skills (user-installed)
-    { command: '/qa', description: 'QA test a web app and fix bugs' },
-    { command: '/qa-only', description: 'QA test (report only, no fixes)' },
-    { command: '/browse', description: 'Headless browser for testing' },
+    // gstack — Planning
+    { command: '/office-hours', description: 'YC office hours: reframe requirements' },
+    { command: '/plan-ceo-review', description: 'CEO review: 10-dimension scope check' },
+    { command: '/plan-eng-review', description: 'Eng review: architecture & test matrix' },
+    { command: '/plan-design-review', description: 'Design review: UI/UX gaps' },
+    { command: '/autoplan', description: 'Auto-run full planning pipeline' },
+    // gstack — Development
+    { command: '/design-consultation', description: 'Design consultation' },
+    { command: '/review', description: 'Code review + auto-fix issues' },
+    { command: '/investigate', description: 'Deep bug investigation' },
+    // gstack — Quality
+    { command: '/qa', description: 'QA test with real browser + auto-fix' },
+    { command: '/qa-only', description: 'QA report only, no fixes' },
+    { command: '/benchmark', description: 'Performance benchmark' },
+    { command: '/design-review', description: 'UI/UX design review' },
+    // gstack — Security
+    { command: '/cso', description: 'Security audit: OWASP + STRIDE' },
+    // gstack — Release
+    { command: '/ship', description: 'Create PR' },
+    { command: '/land-and-deploy', description: 'Merge and deploy' },
+    { command: '/canary', description: 'Post-deploy monitoring' },
+    { command: '/document-release', description: 'Release documentation' },
+    // gstack — Tools
+    { command: '/browse', description: 'Headless Chromium browser' },
+    { command: '/retro', description: 'Analysis retrospective' },
+    { command: '/codex', description: 'Cross-model review (OpenAI)' },
+    { command: '/careful', description: 'Destructive command warnings' },
+    { command: '/freeze', description: 'Lock files from editing' },
+    { command: '/guard', description: 'Full safety mode (careful + freeze)' },
+    { command: '/gstack-upgrade', description: 'Update gstack' },
     { command: '/gstack', description: 'gstack browser toolkit' },
+    // Superpowers
     { command: '/brainstorming', description: 'Creative design and brainstorming' },
     { command: '/commit', description: 'Create a git commit' },
     { command: '/plan', description: 'Create implementation plan' },
-    { command: '/review', description: 'Request code review' },
     { command: '/tdd', description: 'Test-driven development' },
     { command: '/debug', description: 'Systematic debugging' },
-    { command: '/discord-notify', description: 'Send Discord notification' },
     { command: '/simplify', description: 'Review code for quality and efficiency' },
+    // Custom
+    { command: '/discord-notify', description: 'Send Discord notification' },
     // Built-in commands
     { command: '/help', description: 'Show available commands' },
     { command: '/clear', description: 'Clear conversation' },

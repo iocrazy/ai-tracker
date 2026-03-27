@@ -747,6 +747,7 @@ const App: React.FC = () => {
   const handleViewHistory = async (sessionName: string, windowName: string, windowId: string, claudePane?: string) => {
       setModalTitle(`TRANSCRIPT: ${windowName}`);
       setModalSubtitle(`SOURCE: ${sessionName} // RETRIEVING...`);
+      setModalMessages([{ sender: 'SYSTEM', text: 'Loading...', timestamp: '' }]);
       modalTargetRef.current = { session: sessionName, window: windowName, windowId, claudePane };
       setModalTarget({ session: sessionName, window: windowName, windowId, claudePane });
       setIsModalOpen(true);

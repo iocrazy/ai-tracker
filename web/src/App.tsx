@@ -64,6 +64,20 @@ const MOBILE_TABS: { id: AppTab; icon: typeof Monitor; label: string }[] = [
 ];
 
 const App: React.FC = () => {
+  // PWA update banner
+  const [swUpdateAvailable, setSwUpdateAvailable] = useState(false);
+  const swUpdateFnRef = useRef<((reloadPage?: boolean) => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      swUpdateFnRef.current = detail.updateSW;
+      setSwUpdateAvailable(true);
+    };
+    window.addEventListener('sw-update-available', handler);
+    return () => window.removeEventListener('sw-update-available', handler);
+  }, []);
+
   // Auth State: null = checking, true = authenticated, false = needs login
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [authError, setAuthError] = useState<string>('');
@@ -827,6 +841,21 @@ const App: React.FC = () => {
 
   return (
     <CRTWrapper settings={settings}>
+      {/* PWA update banner */}
+      {swUpdateAvailable && (
+        <div className="fixed top-0 left-0 right-0 z-[9999] bg-green-900/95 border-b border-green-500 px-4 py-2 flex items-center justify-between backdrop-blur-sm">
+          <span className="text-green-300 font-mono text-sm">New version available</span>
+          <button
+            onClick={() => {
+              swUpdateFnRef.current?.(true);
+              setSwUpdateAvailable(false);
+            }}
+            className="px-3 py-1 bg-green-600 hover:bg-green-500 text-black font-mono text-sm font-bold rounded"
+          >
+            UPDATE
+          </button>
+        </div>
+      )}
       {/* Auth states: null = checking, false = login, true = app */}
       {isAuthenticated === null ? (
           <div className="flex items-center justify-center min-h-[100dvh]">

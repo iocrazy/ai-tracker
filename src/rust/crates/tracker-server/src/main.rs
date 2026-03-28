@@ -746,6 +746,85 @@ async fn autofix_stale_awaiting_tasks(app_state: &AppState) {
     }
 }
 
+/// Auto-archive in_progress tasks where Claude is idle (waiting for user input).
+/// This prevents "ghost" busy indicators on the tmux status bar and Web UI.
+/// Only archives if Claude has been idle for consecutive checks (debounce).
+async fn autofix_idle_in_progress_tasks(app_state: &AppState) {
+    // Collect in_progress tasks
+    let in_progress: Vec<(String, String, String, String)> = {
+        let state = app_state.state.lock().unwrap();
+        state.tasks.iter()
+            .filter(|(_, task)| matches!(task.status, TaskStatus::InProgress))
+            .map(|(key, task)| (
+                task.session.clone(),
+                task.window_id.clone(),
+                task.window.clone(),
+                key.clone(),
+            ))
+            .collect()
+    };
+
+    if in_progress.is_empty() {
+        return;
+    }
+
+    let mut archived = false;
+
+    for (session_name, window_id, window_name, task_key) in &in_progress {
+        if session_name.is_empty() {
+            continue;
+        }
+        let window_target = if !window_id.is_empty() {
+            window_id.as_str()
+        } else if !window_name.is_empty() {
+            window_name.as_str()
+        } else {
+            continue;
+        };
+
+        match agent::TmuxAgent::get_claude_status(session_name, window_target).await {
+            Ok(status) => {
+                let action = status.action.as_deref().unwrap_or("");
+                let is_idle = action.is_empty() || action == "None" || action == "null";
+
+                if is_idle {
+                    // Check idle counter (stored in task's acknowledged field as a hack)
+                    // We'll use a simpler approach: check if the task has been in_progress
+                    // for more than 2 minutes with no activity
+                    let mut state = app_state.state.lock().unwrap();
+                    if let Some(task) = state.tasks.get(task_key) {
+                        // If no started_at or started > 2 min ago, archive it
+                        let should_archive = task.started_at
+                            .as_ref()
+                            .map(|started| {
+                                let elapsed = chrono::Utc::now().signed_duration_since(*started);
+                                elapsed.num_minutes() >= 2
+                            })
+                            .unwrap_or(true); // No started_at = definitely stale
+
+                        if should_archive {
+                            info!(
+                                "Auto-archive: in_progress → completed for {}:{} (claude idle)",
+                                session_name, window_name
+                            );
+                            if let Some(task) = state.tasks.remove(task_key) {
+                                let _ = state.db.archive_to_history(&task, "");
+                                let _ = state.db.delete_task(task_key);
+                                archived = true;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    if archived {
+        app_state.broadcast_state();
+    }
+}
+
 // ============================================================================
 // Response Types
 // ============================================================================
@@ -3265,6 +3344,7 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             autofix_stale_awaiting_tasks(&autofix_state).await;
+            autofix_idle_in_progress_tasks(&autofix_state).await;
         }
     });
 

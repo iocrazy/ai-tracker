@@ -184,8 +184,11 @@ const App: React.FC = () => {
                 // current_tool may contain stale output text even when idle — don't use it for BUSY detection
                 const action = response.status.action || '';
                 const isWorking = action !== '' && action !== 'None' && action !== 'null';
+                const hasClaudeProcess = response.status.pane != null;
                 statusUpdates.set(`${session.id}:${win.id}`, {
-                  claudeStatus: isWorking ? response.status : undefined,
+                  // Always pass claudeStatus if Claude process exists (even when idle)
+                  // so frontend knows Claude is present in this window
+                  claudeStatus: hasClaudeProcess ? response.status : undefined,
                   claudePane: response.status.pane || undefined,
                   isClaudeBusy: isWorking,
                 });
@@ -204,10 +207,14 @@ const App: React.FC = () => {
           windows: session.windows.map(win => {
             const update = statusUpdates.get(`${session.id}:${win.id}`);
             if (!update) return win;
-            // Sync window status with Claude activity: if Claude is busy but task says IDLE, override
+            // Sync window status with Claude activity:
+            // - Claude busy + window IDLE → BUSY (Claude is actively working)
+            // - Claude not busy + window BUSY + no task → IDLE (no hook-tracked task, Claude waiting)
+            // - Keep current status if task exists (task status is authoritative)
+            const hasTask = win.status !== 'IDLE' && win.status !== 'COMPLETED';
             const syncedStatus = update.isClaudeBusy && (win.status === 'IDLE' || win.status === 'COMPLETED')
               ? 'BUSY' as const
-              : !update.isClaudeBusy && win.status === 'BUSY'
+              : !update.isClaudeBusy && win.status === 'BUSY' && !hasTask
                 ? 'IDLE' as const
                 : win.status;
             return {

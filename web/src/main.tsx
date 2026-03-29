@@ -4,11 +4,14 @@ import { registerSW } from 'virtual:pwa-register'
 import App from './App'
 import './index.css'
 
-// Register Service Worker with update prompt
-const updateSW = registerSW({
-  onNeedRefresh() {
-    // Dispatch custom event so App.tsx can show an update banner
-    window.dispatchEvent(new CustomEvent('sw-update-available', { detail: { updateSW } }));
+// Auto-update: new SW activates immediately and page reloads
+registerSW({
+  immediate: true,
+  onRegisteredSW(_swUrl, registration) {
+    // Check for updates every 60 seconds
+    if (registration) {
+      setInterval(() => registration.update(), 60 * 1000);
+    }
   },
   onOfflineReady() {
     console.log('PWA: offline ready');

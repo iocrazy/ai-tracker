@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'prompt',  // Show update prompt instead of auto-updating
+      registerType: 'autoUpdate',  // Auto-activate new SW + reload
       devOptions: { enabled: false },
       manifest: {
         name: 'Agent Tracker',

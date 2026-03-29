@@ -25,8 +25,8 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
         navigateFallback: '/index.html',
-        skipWaiting: true,
-        clientsClaim: true,
+        // No skipWaiting/clientsClaim — let registerType:'prompt' control the update flow
+        // New SW waits until user clicks UPDATE button
         // Never cache API or WebSocket — always go to network for fresh data
         navigateFallbackDenylist: [/^\/api\//, /^\/ws/],
         runtimeCaching: [

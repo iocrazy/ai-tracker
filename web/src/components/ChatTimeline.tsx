@@ -244,7 +244,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                       prose-p:my-0.5 prose-p:leading-snug prose-headings:text-green-400 prose-headings:my-1
                       prose-code:text-green-300 prose-code:bg-green-900/30 prose-code:px-1 prose-code:rounded prose-code:text-xs prose-code:break-all
                       prose-pre:bg-green-900/20 prose-pre:border prose-pre:border-green-800 prose-pre:my-1 prose-pre:p-2 prose-pre:overflow-x-auto prose-pre:max-w-full
-                      [&_pre_code]:break-normal [&_pre_code]:whitespace-pre [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-green-500 [&_pre_code]:text-[10px] [&_pre_code]:leading-tight [&_pre_code]:font-mono
+                      [&_pre_code]:break-all [&_pre_code]:whitespace-pre-wrap [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-green-500 [&_pre_code]:text-[10px] [&_pre_code]:leading-tight [&_pre_code]:font-mono
                       prose-strong:text-green-300 prose-em:text-green-400
                       prose-ul:my-0.5 prose-ol:my-0.5 prose-li:my-0 prose-li:leading-snug
                       [&_ol]:list-decimal [&_ol]:list-inside [&_ol]:pl-2

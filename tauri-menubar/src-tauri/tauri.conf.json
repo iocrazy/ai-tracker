@@ -1,5 +1,5 @@
 {
-  "productName": "Agent Tracker",
+  "productName": "AgentTracker",
   "version": "0.1.0",
   "identifier": "com.agent-tracker.menubar",
   "build": {

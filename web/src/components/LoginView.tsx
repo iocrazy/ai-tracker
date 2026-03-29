@@ -99,7 +99,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onTokenSubmit, onPasskeyLo
             <ShieldCheck className="w-8 h-8 text-indigo-400" />
           </div>
           <h1 className="text-[22px] font-semibold text-white/90 tracking-[-0.02em] mb-1.5">
-            Agent Tracker
+            AgentTracker
           </h1>
           <p className="text-white/30 text-[13px]">
             Sign in to continue

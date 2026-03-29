@@ -190,7 +190,7 @@ fn show_float(app: tauri::AppHandle) -> Result<(), String> {
         let _ = win.set_focus();
     } else {
         let win = WebviewWindowBuilder::new(&app, "float", WebviewUrl::App("index.html".into()))
-            .title("Agent Tracker")
+            .title("AgentTracker")
             .inner_size(340.0, 52.0)
             .decorations(false)
             .always_on_top(true)
@@ -376,7 +376,7 @@ fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
 
     let url = WebviewUrl::External(url_str.parse().unwrap());
     let builder = WebviewWindowBuilder::new(&app, "dashboard", url)
-        .title("Agent Tracker Dashboard")
+        .title("AgentTracker Dashboard")
         .inner_size(1200.0, 800.0)
         .resizable(true);
 
@@ -462,7 +462,7 @@ fn toggle_panel(app: &tauri::AppHandle) {
 
 fn create_panel(app: &tauri::AppHandle) {
     let result = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App("index.html".into()))
-        .title("Agent Tracker")
+        .title("AgentTracker")
         .inner_size(280.0, 400.0)
         .decorations(false)
         .always_on_top(true)

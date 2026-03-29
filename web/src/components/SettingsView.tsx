@@ -123,7 +123,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
                ABOUT
             </h3>
             <div className="text-green-600 font-mono text-sm sm:text-lg space-y-2 mt-2 leading-relaxed">
-                <p>Agent Tracker Web Console v0.1.0</p>
+                <p>AgentTracker Web Console v0.1.0</p>
                 <p>Built with React 19 + Tailwind CSS 4.0</p>
                 <p>© 2026 HEYGO</p>
             </div>

@@ -46,7 +46,7 @@ impl TrackerPaths {
                     error!("  {:?}", tauri_data);
                     error!("  Falling back to legacy dir would use a WRONG database!");
                     error!("  Using Tauri data dir instead.");
-                    error!("  To start properly, launch via 'Agent Tracker.app'.");
+                    error!("  To start properly, launch via 'AgentTracker.app'.");
                     error!("==========================================================");
                     tauri_data
                 } else {

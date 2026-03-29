@@ -9,7 +9,7 @@ export default defineConfig({
       registerType: 'autoUpdate',  // Auto-activate new SW + reload
       devOptions: { enabled: false },
       manifest: {
-        name: 'Agent Tracker',
+        name: 'AgentTracker',
         short_name: 'Tracker',
         description: 'AI Agent Control Station',
         theme_color: '#000000',

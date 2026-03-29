@@ -358,7 +358,7 @@ export const MenuBarPanel: React.FC<MenuBarPanelProps> = ({ sessions, connection
 
       {/* Bottom */}
       <MenuItem icon={LogOut} label="Disconnect" onClick={handleLogout} danger />
-      <MenuItem icon={Power} label="Quit Agent Tracker" onClick={() => invoke('quit_app')} danger />
+      <MenuItem icon={Power} label="Quit AgentTracker" onClick={() => invoke('quit_app')} danger />
     </div>
   );
 };

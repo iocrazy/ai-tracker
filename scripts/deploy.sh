@@ -1,5 +1,5 @@
 #!/bin/bash
-# deploy.sh - 部署 Agent Tracker 到本地运行环境
+# deploy.sh - 部署 AgentTracker 到本地运行环境
 #
 # 用法:
 #   ./scripts/deploy.sh          # 完整部署（构建 + 安装）
@@ -33,7 +33,7 @@ LOG_DIR="$TRACKER_LOG_DIR"
 LAUNCHD_LABEL="com.heygo.tracker-server"
 
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║     Agent Tracker Deploy Script        ║${NC}"
+echo -e "${BLUE}║     AgentTracker Deploy Script        ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -61,7 +61,7 @@ for arg in "$@"; do
 done
 
 # Tauri app paths
-TAURI_APP="/Applications/Agent Tracker.app"
+TAURI_APP="/Applications/AgentTracker.app"
 TAURI_BIN="$TAURI_APP/Contents/MacOS/tracker-server"
 TAURI_WEB="$TAURI_APP/Contents/Resources/web-dist"
 
@@ -183,7 +183,7 @@ install_tauri() {
 
     # Install new app
     rm -rf "$TAURI_APP"
-    cp -r "$TAURI_DIR/src-tauri/target/release/bundle/macos/Agent Tracker.app" "$TAURI_APP"
+    cp -r "$TAURI_DIR/src-tauri/target/release/bundle/macos/AgentTracker.app" "$TAURI_APP"
 
     # Overlay web frontend (latest build, may be newer than Tauri bundled)
     if [ -d "$WEB_DIR/dist" ]; then
@@ -215,7 +215,7 @@ restart_tauri() {
     sleep 1
 
     # Reopen
-    open -a "Agent Tracker"
+    open -a "AgentTracker"
     echo "  等待 sidecar 启动..."
 
     # Wait for server to come up (max 15s)

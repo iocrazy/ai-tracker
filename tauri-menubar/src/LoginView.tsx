@@ -31,7 +31,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
   return (
     <div className="flex flex-col items-center justify-center h-full p-6 rounded-[10px] overflow-hidden">
       <KeyRound className="w-7 h-7 text-gray-400 mb-3" />
-      <h2 className="text-[13px] font-medium text-gray-700 mb-4">Connect to Agent Tracker</h2>
+      <h2 className="text-[13px] font-medium text-gray-700 mb-4">Connect to AgentTracker</h2>
       <form onSubmit={handleSubmit} className="w-full space-y-3">
         <input
           type="password"

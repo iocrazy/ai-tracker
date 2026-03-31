@@ -564,6 +564,10 @@ impl Database {
             (109, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_usage_use_id ON tool_usage(tool_use_id) WHERE tool_use_id != ''"),
             (110, "DROP INDEX IF EXISTS idx_history_claude_session"),
             (111, "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_claude_session ON history(claude_session_id) WHERE claude_session_id != ''"),
+            // Close all orphaned history entries (no completed_at, older than 10 min)
+            (112, "UPDATE history SET completed_at = datetime('now'), completion_note = 'migration: closed orphan' WHERE completed_at IS NULL AND started_at < datetime('now', '-10 minutes')"),
+            // Delete empty history entries: no messages, no tools, no completion_note, no summary content
+            (113, "DELETE FROM history WHERE id NOT IN (SELECT DISTINCT history_id FROM conversation_messages) AND id NOT IN (SELECT DISTINCT history_id FROM tool_usage) AND (completion_note IS NULL OR completion_note = '') AND (summary IS NULL OR summary = '' OR summary LIKE 'Claude session %')"),
         ];
 
         for (version, sql) in migrations {

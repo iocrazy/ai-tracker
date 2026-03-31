@@ -3291,13 +3291,22 @@ impl Database {
     }
 
     pub fn close_stale_hook_sessions(&self, stale_minutes: i64) -> Result<usize> {
-        let count = self.conn.execute(
+        let threshold = format!("-{} minutes", stale_minutes);
+        // Close stale hook sessions (with claude_session_id)
+        let hook_count = self.conn.execute(
             "UPDATE history SET completed_at = datetime('now'), completion_note = 'auto-closed: stale'
              WHERE claude_session_id != '' AND completed_at IS NULL
              AND started_at < datetime('now', ?1)",
-            params![format!("-{} minutes", stale_minutes)],
+            params![threshold],
         )?;
-        Ok(count)
+        // Close stale legacy entries (without claude_session_id, from upsert_active_history)
+        let legacy_count = self.conn.execute(
+            "UPDATE history SET completed_at = datetime('now'), completion_note = 'auto-closed: legacy-stale'
+             WHERE (claude_session_id = '' OR claude_session_id IS NULL) AND completed_at IS NULL
+             AND started_at < datetime('now', ?1)",
+            params![threshold],
+        )?;
+        Ok(hook_count + legacy_count)
     }
 }
 

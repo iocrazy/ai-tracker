@@ -111,6 +111,8 @@ export interface HookChatMessage {
   type: 'chat_message';
   claude_session_id: string;
   git_dir: string;
+  session_name: string;
+  window_id: string;
   role: string;
   content: string;
   agent_type?: string;
@@ -130,6 +132,8 @@ export interface HookSessionUpdate {
   type: 'hook_session_update';
   claude_session_id: string;
   git_dir: string;
+  session_name: string;
+  window_id: string;
   event: string;
 }
 

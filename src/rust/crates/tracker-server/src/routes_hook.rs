@@ -71,6 +71,8 @@ pub(crate) enum HookEvent {
     ChatMessage {
         claude_session_id: String,
         git_dir: String,
+        session_name: String,
+        window_id: String,
         role: String,
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,6 +91,8 @@ pub(crate) enum HookEvent {
     HookSessionUpdate {
         claude_session_id: String,
         git_dir: String,
+        session_name: String,
+        window_id: String,
         event: String,
     },
 }
@@ -283,6 +287,8 @@ pub(crate) async fn hook_message(
     let event = HookEvent::ChatMessage {
         claude_session_id: resolved.claude_session_id.clone(),
         git_dir: resolved.git_dir.clone(),
+        session_name: resolved.session_name.clone(),
+        window_id: resolved.window_id.clone(),
         role: role.clone(),
         content: content.clone(),
         agent_type,
@@ -441,6 +447,8 @@ pub(crate) async fn hook_session(
             let event = HookEvent::HookSessionUpdate {
                 claude_session_id: resolved.claude_session_id,
                 git_dir: resolved.git_dir,
+                session_name: resolved.session_name,
+                window_id: resolved.window_id,
                 event: "start".to_string(),
             };
             let _ = state.hook_broadcast_tx.send(event);
@@ -463,6 +471,8 @@ pub(crate) async fn hook_session(
             let event = HookEvent::HookSessionUpdate {
                 claude_session_id: resolved.claude_session_id,
                 git_dir: resolved.git_dir,
+                session_name: resolved.session_name,
+                window_id: resolved.window_id,
                 event: "end".to_string(),
             };
             let _ = state.hook_broadcast_tx.send(event);

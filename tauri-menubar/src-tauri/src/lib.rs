@@ -14,11 +14,17 @@ use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 /// When the app is killed via SIGTERM/SIGINT (e.g. pkill), the RunEvent::ExitRequested
 /// handler doesn't fire. This atomic lets the signal handler kill the sidecar.
 static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
+/// Global cloudflared PID for signal handler cleanup.
+static CLOUDFLARED_PID: AtomicU32 = AtomicU32::new(0);
 
 extern "C" fn signal_cleanup(_sig: libc::c_int) {
     let pid = SIDECAR_PID.swap(0, Ordering::Relaxed);
     if pid != 0 {
         unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    }
+    let cf_pid = CLOUDFLARED_PID.swap(0, Ordering::Relaxed);
+    if cf_pid != 0 {
+        unsafe { libc::kill(cf_pid as i32, libc::SIGTERM); }
     }
     unsafe { libc::_exit(1); }
 }
@@ -42,6 +48,65 @@ struct SidecarState {
     child: Mutex<Option<CommandChild>>,
     /// "sidecar" if we spawned it, "external" if port was already occupied
     source: &'static str,
+}
+
+/// Holds the cloudflared tunnel child process so we can kill it on exit.
+struct CloudflaredState {
+    child: Mutex<Option<std::process::Child>>,
+}
+
+/// Start cloudflared tunnel if not already running.
+/// Reads tunnel ID from ~/.cloudflared/config.yml.
+fn start_cloudflared(app: &tauri::AppHandle) {
+    // Check if cloudflared is already running
+    let output = std::process::Command::new("pgrep")
+        .args(["-f", "cloudflared tunnel run"])
+        .output();
+    if let Ok(out) = &output {
+        if out.status.success() {
+            eprintln!("cloudflared tunnel already running, skipping");
+            app.manage(CloudflaredState { child: Mutex::new(None) });
+            return;
+        }
+    }
+
+    let cloudflared_path = "/opt/homebrew/bin/cloudflared";
+    if !std::path::Path::new(cloudflared_path).exists() {
+        eprintln!("cloudflared not found at {cloudflared_path}, skipping tunnel");
+        app.manage(CloudflaredState { child: Mutex::new(None) });
+        return;
+    }
+
+    match std::process::Command::new(cloudflared_path)
+        .args(["tunnel", "run"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            eprintln!("cloudflared tunnel started (pid {})", child.id());
+            CLOUDFLARED_PID.store(child.id(), Ordering::Relaxed);
+            app.manage(CloudflaredState { child: Mutex::new(Some(child)) });
+        }
+        Err(e) => {
+            eprintln!("Failed to start cloudflared: {e}");
+            app.manage(CloudflaredState { child: Mutex::new(None) });
+        }
+    }
+}
+
+/// Kill the cloudflared tunnel process if we spawned one.
+fn stop_cloudflared(app: &tauri::AppHandle) {
+    CLOUDFLARED_PID.store(0, Ordering::Relaxed);
+    if let Some(state) = app.try_state::<CloudflaredState>() {
+        if let Ok(mut guard) = state.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("cloudflared tunnel killed");
+            }
+        }
+    }
 }
 
 /// Legacy config directory (~/.config/agent-tracker).
@@ -511,6 +576,7 @@ pub fn run() {
             }
 
             start_sidecar(app.handle());
+            start_cloudflared(app.handle());
             create_panel(app.handle());
 
             let tray_icon = {
@@ -553,6 +619,7 @@ pub fn run() {
             ONCE.call_once(install_signal_handlers);
 
             if let RunEvent::ExitRequested { .. } = &event {
+                stop_cloudflared(app);
                 stop_sidecar(app);
             }
         });

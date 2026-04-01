@@ -129,8 +129,37 @@ const App: React.FC = () => {
     const hasChange = (table: string) => !changed || changed.length === 0 || changed.includes(table);
 
     // Update sessions when tmux data is available (skip empty to avoid clearing REST-fetched data)
+    // Preserve claudeStatus/claudePane from polling — WebSocket state doesn't carry these
     if (msg.tmux_windows && msg.tmux_windows.length > 0) {
-      setSessions(mapTmuxToSessions(msg.tmux_windows, msg.state.tasks));
+      setSessions(prevSessions => {
+        const newSessions = mapTmuxToSessions(msg.tmux_windows, msg.state.tasks);
+        // Build lookup of existing claudeStatus/claudePane by session:window key
+        const claudeMap = new Map<string, { claudeStatus?: any; claudePane?: string }>();
+        for (const s of prevSessions) {
+          for (const w of s.windows) {
+            if (w.claudeStatus || w.claudePane) {
+              claudeMap.set(`${s.id}:${w.id}`, { claudeStatus: w.claudeStatus, claudePane: w.claudePane });
+            }
+          }
+        }
+        // Merge preserved claudeStatus/claudePane into new sessions
+        return newSessions.map(s => ({
+          ...s,
+          windows: s.windows.map(w => {
+            const existing = claudeMap.get(`${s.id}:${w.id}`);
+            if (!existing) return w;
+            // Preserve claudeStatus, and sync status if Claude is busy
+            const action = existing.claudeStatus?.action || '';
+            const isClaudeBusy = action !== '' && action !== 'None' && action !== 'null';
+            return {
+              ...w,
+              claudeStatus: existing.claudeStatus ?? w.claudeStatus,
+              claudePane: existing.claudePane ?? w.claudePane,
+              status: isClaudeBusy && (w.status === 'IDLE' || w.status === 'COMPLETED') ? 'BUSY' as const : w.status,
+            };
+          }),
+        }));
+      });
     }
 
     // Only update other sections if their backing table changed
@@ -272,15 +301,18 @@ const App: React.FC = () => {
   // Handle hook session updates (start/end) — sync window status
   const handleHookSessionUpdate = useCallback((msg: HookSessionUpdate) => {
     setSessions(prev => prev.map(session => {
-      if (session.gitDir !== msg.git_dir) return session;
+      // Match by session_name if available, fall back to git_dir
+      if (msg.session_name && session.name !== msg.session_name) return session;
+      if (!msg.session_name && session.gitDir !== msg.git_dir) return session;
       const newStatus = msg.event === 'start' ? 'BUSY' as const : 'IDLE' as const;
       return {
         ...session,
         status: newStatus,
-        windows: session.windows.map(win => ({
-          ...win,
-          status: newStatus,
-        })),
+        windows: session.windows.map(win => {
+          // Only update the specific window if window_id is available
+          if (msg.window_id && win.id !== msg.window_id) return win;
+          return { ...win, status: newStatus };
+        }),
       };
     }));
   }, []);
@@ -434,8 +466,8 @@ const App: React.FC = () => {
   // History Detail Modal
   const [historyDetailId, setHistoryDetailId] = useState<number | null>(null);
   const [historyDetailFilePath, setHistoryDetailFilePath] = useState<string | null>(null);
-  const [modalTarget, setModalTarget] = useState<{ session: string; window: string; windowId: string; claudePane?: string } | null>(null);
-  const modalTargetRef = useRef<{ session: string; window: string; windowId: string; claudePane?: string } | null>(null);
+  const [modalTarget, setModalTarget] = useState<{ session: string; window: string; windowId: string; claudePane?: string; gitDir?: string } | null>(null);
+  const modalTargetRef = useRef<{ session: string; window: string; windowId: string; claudePane?: string; gitDir?: string } | null>(null);
 
   // Input Modal State (legacy - for simple window creation)
   const [isInputModalOpen, setIsInputModalOpen] = useState(false);
@@ -752,12 +784,12 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [isModalOpen, fetchModalMessages]);
 
-  const handleViewHistory = async (sessionName: string, windowName: string, windowId: string, claudePane?: string) => {
+  const handleViewHistory = async (sessionName: string, windowName: string, windowId: string, claudePane?: string, gitDir?: string) => {
       setModalTitle(`TRANSCRIPT: ${windowName}`);
       setModalSubtitle(`SOURCE: ${sessionName} // RETRIEVING...`);
       setModalMessages([{ sender: 'SYSTEM', text: 'Loading...', timestamp: '' }]);
-      modalTargetRef.current = { session: sessionName, window: windowName, windowId, claudePane };
-      setModalTarget({ session: sessionName, window: windowName, windowId, claudePane });
+      modalTargetRef.current = { session: sessionName, window: windowName, windowId, claudePane, gitDir };
+      setModalTarget({ session: sessionName, window: windowName, windowId, claudePane, gitDir });
       setIsModalOpen(true);
 
       try {
@@ -1009,7 +1041,10 @@ const App: React.FC = () => {
                 hookMessages={
                   modalTarget
                     ? hookChatMessages.filter(m =>
-                        m.git_dir === sessions.find(s => s.name === modalTarget.session)?.gitDir
+                        // Match by git_dir (reliable — hook resolves cwd to git root)
+                        // Fall back to session_name + window_id match
+                        (modalTarget.gitDir && m.git_dir === modalTarget.gitDir)
+                        || (m.session_name === modalTarget.session && m.window_id === modalTarget.windowId)
                       )
                     : []
                 }

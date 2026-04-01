@@ -27,7 +27,7 @@ interface WorkstationsViewProps {
   onSwitchToWindow: (sessionName: string, windowName: string, windowId: string) => void;
   onRequestDeleteSession: (sessionId: string, name: string) => void;
   onRequestDeleteWindow: (sessionId: string, windowId: string, name: string) => void;
-  onViewHistory: (sessionName: string, windowName: string, windowId: string, claudePane?: string) => void;
+  onViewHistory: (sessionName: string, windowName: string, windowId: string, claudePane?: string, gitDir?: string) => void;
   onReorderWindow?: (sessionName: string, sourceIndex: number, targetIndex: number) => void;
 }
 
@@ -598,7 +598,7 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
                               onAvatarTap={handleAvatarTap}
                               onDeleteWindow={() => { onRequestDeleteWindow(session.id, window.id, window.name); setExpandedCard(null); }}
                               onSelectWindow={() => { onSelectWindow(session.name, window.name, window.id); setExpandedCard(null); }}
-                              onViewHistory={() => { onViewHistory(session.name, window.name, window.id, window.claudePane); setExpandedCard(null); }}
+                              onViewHistory={() => { onViewHistory(session.name, window.name, window.id, window.claudePane, session.gitDir); setExpandedCard(null); }}
                               renameMode={renamingWindow?.sessionName === session.name && renamingWindow?.windowId === window.id}
                               onRenameConfirm={(name) => handleRenameWindow(session.name, window.id, name)}
                               onRenameCancel={() => setRenamingWindow(null)}
@@ -628,7 +628,7 @@ export const WorkstationsView: React.FC<WorkstationsViewProps> = ({
              y={contextMenu.y}
              onRename={() => setRenamingWindow({ sessionName: contextMenu.sessionName, windowId: contextMenu.windowId })}
              onConsole={() => { onSelectWindow(contextMenu.sessionName, contextMenu.windowName, contextMenu.windowId); }}
-             onHistory={() => { onViewHistory(contextMenu.sessionName, contextMenu.windowName, contextMenu.windowId, contextMenu.claudePane); }}
+             onHistory={() => { const s = sessions.find(s => s.name === contextMenu.sessionName); onViewHistory(contextMenu.sessionName, contextMenu.windowName, contextMenu.windowId, contextMenu.claudePane, s?.gitDir); }}
              onResetLayout={() => { tmuxResetLayout(contextMenu.sessionName, contextMenu.windowId); }}
              onDelete={() => {
                const session = sessions.find(s => s.name === contextMenu.sessionName);

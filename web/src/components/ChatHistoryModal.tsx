@@ -280,7 +280,12 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const handleSend = async () => {
     const hasText = inputValue.trim().length > 0;
     const hasImages = pendingImages.length > 0;
-    if ((!hasText && !hasImages) || !sessionName || !windowId || isSending) return;
+    if ((!hasText && !hasImages) || isSending) return;
+    if (!sessionName || !windowId) {
+      setSendStatus('failed');
+      setSendError('无法发送: 未关联活跃窗口');
+      return;
+    }
 
     const msgText = inputValue.trim();
     const savedInput = msgText; // Preserve for retry on failure
@@ -446,20 +451,37 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
 
         {/* Resume Session banner */}
         {claudeStatus?.awaiting_resume && (
-          <div className="px-4 py-2 bg-yellow-900/30 border-b border-yellow-700/50 flex items-center justify-between">
-            <span className="text-yellow-400 text-xs font-mono">
-              ⏸ Claude 在等待选择 Resume Session — 消息无法发送
-            </span>
-            <button
-              onClick={async () => {
-                if (sessionName && windowId) {
-                  await tmuxSendKeys(sessionName, windowId, resolvedPaneRef.current, '', 'Enter');
-                }
-              }}
-              className="px-2 py-0.5 bg-yellow-800/50 border border-yellow-600/50 rounded text-yellow-300 text-xs hover:bg-yellow-700/50"
-            >
-              选择默认 Session
-            </button>
+          <div className="px-4 py-2 bg-yellow-900/30 border-b border-yellow-700/50 flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-yellow-400 text-xs font-mono">
+                ⏸ Claude 在等待选择 Resume Session — 消息无法发送
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={async () => {
+                    if (sessionName && windowId) {
+                      // Clear search box (Ctrl+U) then Enter to select first item
+                      const pane = resolvedPaneRef.current;
+                      await tmuxSendRawKeys(sessionName, windowId, pane, ['C-u', 'Enter']);
+                    }
+                  }}
+                  className="px-2 py-0.5 bg-yellow-800/50 border border-yellow-600/50 rounded text-yellow-300 text-xs hover:bg-yellow-700/50"
+                >
+                  Resume 最近
+                </button>
+                <button
+                  onClick={async () => {
+                    if (sessionName && windowId) {
+                      // Esc to cancel resume → starts new session
+                      await tmuxSendKeys(sessionName, windowId, resolvedPaneRef.current, '', 'Escape');
+                    }
+                  }}
+                  className="px-2 py-0.5 bg-green-900/50 border border-green-700/50 rounded text-green-400 text-xs hover:bg-green-800/50"
+                >
+                  新建 Session
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

@@ -101,19 +101,24 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   }, [claudePane]);
 
   // Merge hook messages into displayed messages (deduplicated)
+  // Transcript (messages) refreshes every 3s and is authoritative.
+  // Hook messages provide instant feedback for user prompts before transcript catches up.
+  // Only append hook USER messages not already in transcript; skip AGENT (transcript has full version).
   const allMessages = useMemo(() => {
     if (!hookMessages || hookMessages.length === 0) return messages;
-    // Build a set of existing message signatures for dedup (first 80 chars of content + sender)
+    // Normalize text for comparison: strip whitespace, take first 60 chars
+    const normalize = (s: string) => s.replace(/\s+/g, ' ').trim().slice(0, 60);
     const existingKeys = new Set(
-      messages.map(m => `${m.sender}:${(m.text || '').slice(0, 80)}`)
+      messages.map(m => `${m.sender}:${normalize(m.text || '')}`)
     );
     const hookConverted: ChatMessage[] = hookMessages
+      .filter(m => m.role === 'user') // Only user messages — agent messages come from transcript
       .map(m => ({
-        sender: (m.role === 'user' ? 'USER' : 'AGENT') as ChatMessage['sender'],
+        sender: 'USER' as ChatMessage['sender'],
         text: m.content,
         timestamp: m.timestamp || '',
       }))
-      .filter(m => !existingKeys.has(`${m.sender}:${(m.text || '').slice(0, 80)}`));
+      .filter(m => !existingKeys.has(`${m.sender}:${normalize(m.text || '')}`));
     return [...messages, ...hookConverted];
   }, [messages, hookMessages]);
 

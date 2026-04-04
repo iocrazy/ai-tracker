@@ -100,14 +100,20 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     if (claudePane) resolvedPaneRef.current = claudePane;
   }, [claudePane]);
 
-  // Merge hook messages into displayed messages
+  // Merge hook messages into displayed messages (deduplicated)
   const allMessages = useMemo(() => {
     if (!hookMessages || hookMessages.length === 0) return messages;
-    const hookConverted: ChatMessage[] = hookMessages.map(m => ({
-      sender: m.role === 'user' ? 'USER' : 'AGENT',
-      text: m.content,
-      timestamp: m.timestamp || '',
-    }));
+    // Build a set of existing message signatures for dedup (first 80 chars of content + sender)
+    const existingKeys = new Set(
+      messages.map(m => `${m.sender}:${(m.text || '').slice(0, 80)}`)
+    );
+    const hookConverted: ChatMessage[] = hookMessages
+      .map(m => ({
+        sender: (m.role === 'user' ? 'USER' : 'AGENT') as ChatMessage['sender'],
+        text: m.content,
+        timestamp: m.timestamp || '',
+      }))
+      .filter(m => !existingKeys.has(`${m.sender}:${(m.text || '').slice(0, 80)}`));
     return [...messages, ...hookConverted];
   }, [messages, hookMessages]);
 

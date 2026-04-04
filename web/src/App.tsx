@@ -270,6 +270,7 @@ const App: React.FC = () => {
   const activeSessionFileRef = useRef<string>('');
 
   // Handle real-time chat messages from WebSocket
+  // Replace (not append) modal messages to avoid duplicates with REST auto-refresh
   const handleChatMessage = useCallback((event: ChatMessageEvent) => {
     // Only update if modal is open and this event matches the active session file
     if (!modalTargetRef.current) return;
@@ -286,7 +287,8 @@ const App: React.FC = () => {
     }));
 
     if (newMessages.length > 0) {
-      setModalMessages(prev => [...prev, ...newMessages]);
+      // Replace entire message list (WS push is authoritative, same source as REST poll)
+      setModalMessages(newMessages);
     }
   }, []);
 
@@ -746,7 +748,9 @@ const App: React.FC = () => {
 
   // Fetch messages for the modal - extracted for reuse in auto-refresh
   const fetchModalMessages = useCallback(async (sessionName: string, windowName: string, claudePane?: string) => {
-    const session = sessions.find(s => s.name === sessionName);
+    // Use sessionsRef for latest sessions (avoid recreating this callback on every sessions change)
+    const currentSessions = sessionsRef.current;
+    const session = currentSessions.find(s => s.name === sessionName);
     const win = session?.windows.find(w => w.name === windowName);
     const isActive = !!win && win.status !== 'OFFLINE';
 
@@ -761,7 +765,7 @@ const App: React.FC = () => {
       toolResults: m.tool_results,
     }));
     return { messages, isActive, sessionFile: data.session_file };
-  }, [sessions]);
+  }, []); // Stable — uses sessionsRef instead of sessions
 
   // Auto-refresh modal messages every 3 seconds when open
   useEffect(() => {
@@ -1033,6 +1037,7 @@ const App: React.FC = () => {
                 }}
                 title={modalTitle}
                 subtitle={modalSubtitle}
+                isLive={modalSubtitle.includes('LIVE')}
                 messages={modalMessages}
                 sessionName={modalTarget?.session}
                 windowName={modalTarget?.window}

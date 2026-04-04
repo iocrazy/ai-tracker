@@ -21,6 +21,7 @@ interface ChatHistoryModalProps {
   onClose: () => void;
   title: string;
   subtitle?: string;
+  isLive?: boolean;  // Explicit live/archive flag (default: true if not specified)
   messages: ChatMessage[];
   hookMessages?: HookChatMessage[];  // Real-time hook messages to append
   sessionName?: string;
@@ -34,13 +35,13 @@ interface ChatHistoryModalProps {
 // Default pane where Claude runs (can be auto-detected or configured per window)
 const DEFAULT_CLAUDE_PANE = '1'; // Fallback if claudePane not detected
 
-export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, messages, hookMessages, sessionName, windowName, windowId, claudePane, claudeStatus, draftsRef }) => {
+export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onClose, title, subtitle, isLive: isLiveProp, messages, hookMessages, sessionName, windowName, windowId, claudePane, claudeStatus, draftsRef }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
-  // Detect if session is live (has active Claude) vs archived (no Claude running)
-  const isLive = !subtitle?.includes('ARCHIVE');
+  // Use explicit prop if provided, fallback to subtitle heuristic for backwards compatibility
+  const isLive = isLiveProp ?? !subtitle?.includes('ARCHIVE');
   const [sendStatus, setSendStatus] = useState<SendStatus>('idle');
   const [isAtBottom, setIsAtBottom] = useState(true);  // Track if user is at bottom
   const [pendingImages, setPendingImages] = useState<{ file: File; preview: string }[]>([]);
@@ -65,6 +66,20 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     }
     prevWindowIdRef.current = windowId;
   }, [windowId, draftsRef]);
+
+  // Clear interaction state on modal open; revoke image URLs on close
+  useEffect(() => {
+    if (isOpen) {
+      setSentInteractions(new Set());
+      setSendStatus('idle');
+    } else {
+      // Revoke any pending image object URLs to prevent memory leaks
+      setPendingImages(prev => {
+        prev.forEach(img => URL.revokeObjectURL(img.preview));
+        return [];
+      });
+    }
+  }, [isOpen]);
 
   // Dynamically resolved Claude pane — updated on open + periodically
   const resolvedPaneRef = useRef<string>(claudePane || DEFAULT_CLAUDE_PANE);
@@ -297,13 +312,22 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
       setSendError('无法发送: 未关联活跃窗口');
       return;
     }
+    if (claudeStatus?.awaiting_resume) {
+      setSendStatus('failed');
+      setSendError('无法发送: Claude 等待选择 Session');
+      return;
+    }
 
     const msgText = inputValue.trim();
-    const savedInput = msgText; // Preserve for retry on failure
     setInputValue('');
     setIsSending(true);
     setSendStatus('sending');
     setSendError('');
+
+    // Only restore input on failure if user hasn't typed anything new
+    const restoreIfEmpty = (saved: string) => {
+      setInputValue(prev => prev === '' ? saved : prev);
+    };
 
     // Timeout wrapper (10s)
     const withTimeout = <T,>(promise: Promise<T>, ms = 10000): Promise<T> =>
@@ -331,7 +355,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
         } else {
           setSendStatus('failed');
           setSendError(result.message || '发送失败');
-          setInputValue(savedInput); // Restore input for retry
+          restoreIfEmpty(msgText); // Restore input for retry (only if user hasn't typed new text)
         }
       } else {
         const result = await withTimeout(tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter'));
@@ -340,14 +364,14 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
         } else {
           setSendStatus('failed');
           setSendError(result.message || '发送失败');
-          setInputValue(savedInput); // Restore input for retry
+          restoreIfEmpty(msgText); // Restore input for retry (only if user hasn't typed new text)
         }
       }
     } catch (error) {
       console.error('Failed to send message:', error);
       setSendStatus('failed');
       setSendError(error instanceof Error ? error.message : '发送失败');
-      setInputValue(savedInput); // Restore input for retry
+      restoreIfEmpty(msgText); // Restore input for retry (only if user hasn't typed new text)
     } finally {
       setIsSending(false);
     }

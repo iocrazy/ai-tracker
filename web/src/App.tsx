@@ -18,7 +18,7 @@ import { SetupBanner } from './components/SetupBanner';
 import { AppTab, AppSettings, AgentSession, ConsoleTarget, TimelineEvent, ConsoleLog } from './types';
 import { INITIAL_CONSOLE_LOGS } from './constants';
 import { Monitor, Terminal as TerminalIcon, Settings, FolderGit2, Bell, BarChart3 } from 'lucide-react';
-import { fetchState, connectWebSocket, disconnectWebSocket, getCurrentWs, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, HookChatMessage, HookSessionUpdate, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, consumeTokenFromURL, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
+import { fetchState, connectWebSocket, disconnectWebSocket, getCurrentWs, subscribeChatFile, unsubscribeChatFile, fetchTmuxWindows, tmuxKillSession, tmuxKillWindow, tmuxNewWindow, tmuxSelectWindow, tmuxSwapWindow, fetchHistoryDetail, fetchClaudeMessages, fetchClaudeStatus, fetchTmuxCapture, BackendState, RealtimeMessage, StreamChunk, ChatMessageEvent, HookChatMessage, HookSessionUpdate, startWorkspace, destroyWorkspace, closeWindow, resumeWorkspace, LayoutType, getAuthToken, setAuthToken, clearAuthToken, verifyToken, consumeTokenFromURL, ProjectInfo, fetchProjects, createNewSession, fetchHealth, ConnectionStatus, fetchUnreadCount, fetchNotifications, markAllNotificationsRead, NotificationEntry } from './services/api';
 import { mapTmuxToSessions, mapHistoryToTimeline, generateConsoleLogs } from './services/dataMapper';
 
 // localStorage cache keys
@@ -269,14 +269,15 @@ const App: React.FC = () => {
   // Track the active session file for WS chat messages
   const activeSessionFileRef = useRef<string>('');
 
-  // Handle real-time chat messages from WebSocket
-  // Replace (not append) modal messages to avoid duplicates with REST auto-refresh
+  // Handle real-time chat messages from WebSocket (incremental updates from chat_watcher)
+  // chat_watcher sends ONLY newly appended JSONL entries, not the full history.
+  // We must APPEND these to existing messages (with dedup), not replace.
   const handleChatMessage = useCallback((event: ChatMessageEvent) => {
     // Only update if modal is open and this event matches the active session file
     if (!modalTargetRef.current) return;
     if (activeSessionFileRef.current && event.session_file !== activeSessionFileRef.current) return;
 
-    const newMessages: ChatMessage[] = event.messages.map(m => ({
+    const incomingMessages: ChatMessage[] = event.messages.map(m => ({
       sender: m.role === 'user' ? 'USER' : 'AGENT',
       text: m.text,
       timestamp: m.timestamp || '',
@@ -286,9 +287,17 @@ const App: React.FC = () => {
       toolResults: m.tool_results,
     }));
 
-    if (newMessages.length > 0) {
-      // Replace entire message list (WS push is authoritative, same source as REST poll)
-      setModalMessages(newMessages);
+    if (incomingMessages.length > 0) {
+      // Append incremental messages, dedup by timestamp+role+text
+      setModalMessages(prev => {
+        const existingKeys = new Set(
+          prev.map(m => `${m.sender}:${m.timestamp}:${(m.text || '').slice(0, 60)}`)
+        );
+        const newOnly = incomingMessages.filter(m =>
+          !existingKeys.has(`${m.sender}:${m.timestamp}:${(m.text || '').slice(0, 60)}`)
+        );
+        return newOnly.length > 0 ? [...prev, ...newOnly] : prev;
+      });
     }
   }, []);
 
@@ -302,6 +311,15 @@ const App: React.FC = () => {
 
   // Handle hook session updates (start/end) — sync window status
   const handleHookSessionUpdate = useCallback((msg: HookSessionUpdate) => {
+    // Clear stale hook chat messages when a new Claude session starts in this window
+    // (prevents old messages from a previous session contaminating the transcript)
+    if (msg.event === 'start') {
+      setHookChatMessages(prev =>
+        prev.filter(m =>
+          !(m.session_name === msg.session_name && m.window_id === msg.window_id)
+        )
+      );
+    }
     setSessions(prev => prev.map(session => {
       // Match by session_name if available, fall back to git_dir
       if (msg.session_name && session.name !== msg.session_name) return session;
@@ -767,7 +785,9 @@ const App: React.FC = () => {
     return { messages, isActive, sessionFile: data.session_file };
   }, []); // Stable — uses sessionsRef instead of sessions
 
-  // Auto-refresh modal messages every 3 seconds when open
+  // Auto-refresh modal messages every 3 seconds when open.
+  // This is the primary consistency mechanism — WS chat_watcher provides faster incremental
+  // updates (~500ms), but REST polling ensures nothing is missed.
   useEffect(() => {
     if (!isModalOpen || !modalTargetRef.current) return;
 
@@ -799,6 +819,8 @@ const App: React.FC = () => {
       try {
         const { messages, isActive, sessionFile } = await fetchModalMessages(sessionName, windowName, claudePane);
         activeSessionFileRef.current = sessionFile || '';
+        // Subscribe to real-time updates for this session file
+        if (sessionFile) subscribeChatFile(sessionFile);
         setModalSubtitle(`SOURCE: ${sessionName} // ${isActive ? 'LIVE' : 'ARCHIVE'}`);
         setModalMessages(messages.length > 0 ? messages : [
           { sender: 'SYSTEM', text: 'No conversation history available', timestamp: '' }
@@ -1030,6 +1052,10 @@ const App: React.FC = () => {
             <ChatHistoryModal
                 isOpen={isModalOpen}
                 onClose={() => {
+                  // Unsubscribe from chat file monitoring
+                  if (activeSessionFileRef.current) {
+                    unsubscribeChatFile(activeSessionFileRef.current);
+                  }
                   setIsModalOpen(false);
                   modalTargetRef.current = null;
                   activeSessionFileRef.current = '';
@@ -1046,10 +1072,11 @@ const App: React.FC = () => {
                 hookMessages={
                   modalTarget
                     ? hookChatMessages.filter(m =>
-                        // Match by git_dir (reliable — hook resolves cwd to git root)
-                        // Fall back to session_name + window_id match
-                        (modalTarget.gitDir && m.git_dir === modalTarget.gitDir)
-                        || (m.session_name === modalTarget.session && m.window_id === modalTarget.windowId)
+                        // Prefer window_id match (prevents cross-contamination between windows in same session)
+                        // Only fall back to git_dir when window_id is not available
+                        m.session_name === modalTarget.session && m.window_id === modalTarget.windowId
+                          ? true
+                          : !m.window_id && modalTarget.gitDir && m.git_dir === modalTarget.gitDir
                       )
                     : []
                 }

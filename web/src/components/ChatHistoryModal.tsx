@@ -126,8 +126,22 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     const existingKeys = new Set(
       messages.map(m => `${m.sender}:${normalize(m.text || '')}`)
     );
+    // Determine the oldest transcript message timestamp to filter out stale hook messages
+    // from previous Claude sessions that no longer exist in the current JSONL file
+    const oldestTranscriptTs = messages.length > 0
+      ? messages.reduce((oldest, m) => {
+          if (!m.timestamp) return oldest;
+          return !oldest || m.timestamp < oldest ? m.timestamp : oldest;
+        }, '' as string)
+      : '';
     const hookConverted: ChatMessage[] = hookMessages
       .filter(m => m.role === 'user') // Only user messages — agent messages come from transcript
+      .filter(m => {
+        // Skip hook messages older than the oldest transcript message
+        // This prevents stale messages from a previous Claude session leaking in
+        if (oldestTranscriptTs && m.timestamp && m.timestamp < oldestTranscriptTs) return false;
+        return true;
+      })
       .map(m => ({
         sender: 'USER' as ChatMessage['sender'],
         text: m.content,
@@ -154,27 +168,32 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     });
   }, []);
 
+  const ACCEPTED_TYPES = ['image/', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+  const isAcceptedFile = useCallback((f: File) =>
+    ACCEPTED_TYPES.some(t => t.endsWith('/') ? f.type.startsWith(t) : f.type === t)
+  , []);
+
   const addImageFiles = useCallback((files: File[]) => {
-    const imageFiles = files.filter(f => f.type.startsWith('image/'));
-    if (imageFiles.length === 0) return;
-    const newItems = imageFiles.map(file => ({
+    const accepted = files.filter(isAcceptedFile);
+    if (accepted.length === 0) return;
+    const newItems = accepted.map(file => ({
       file,
-      preview: URL.createObjectURL(file),
+      preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : '',
     }));
     setPendingImages(prev => [...prev, ...newItems]);
-  }, []);
+  }, [isAcceptedFile]);
 
   const removeImage = useCallback((index: number) => {
     setPendingImages(prev => {
       const removed = prev[index];
-      if (removed) URL.revokeObjectURL(removed.preview);
+      if (removed?.preview) URL.revokeObjectURL(removed.preview);
       return prev.filter((_, i) => i !== index);
     });
   }, []);
 
   const clearAllImages = useCallback(() => {
     setPendingImages(prev => {
-      prev.forEach(img => URL.revokeObjectURL(img.preview));
+      prev.forEach(img => { if (img.preview) URL.revokeObjectURL(img.preview); });
       return [];
     });
   }, []);
@@ -184,7 +203,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     if (!items) return;
     const files: File[] = [];
     for (const item of items) {
-      if (item.type.startsWith('image/')) {
+      if (isAcceptedFile({ type: item.type } as File)) {
         const file = item.getAsFile();
         if (file) files.push(file);
       }
@@ -198,7 +217,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+    const files = Array.from(e.dataTransfer.files).filter(isAcceptedFile);
     if (files.length > 0) addImageFiles(files);
   }, [addImageFiles]);
 
@@ -329,11 +348,11 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
       setInputValue(prev => prev === '' ? saved : prev);
     };
 
-    // Timeout wrapper (10s)
-    const withTimeout = <T,>(promise: Promise<T>, ms = 10000): Promise<T> =>
+    // Timeout wrapper (text: 10s, images: 30s)
+    const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> =>
       Promise.race([
         promise,
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('发送超时 (10s)')), ms)),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`发送超时 (${ms / 1000}s)`)), ms)),
       ]);
 
     try {
@@ -348,7 +367,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
           targetPane,
           base64List,
           msgText || undefined
-        ));
+        ), 30000);
         if (result.success) {
           clearAllImages();
           setSendStatus('success');
@@ -358,7 +377,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
           restoreIfEmpty(msgText); // Restore input for retry (only if user hasn't typed new text)
         }
       } else {
-        const result = await withTimeout(tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter'));
+        const result = await withTimeout(tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter'), 10000);
         if (result.success) {
           setSendStatus('success');
         } else {
@@ -618,12 +637,19 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
             {pendingImages.length > 0 && (
               <div className="mb-2 flex flex-wrap items-start gap-2 p-2 border border-green-800 bg-green-900/20">
                 {pendingImages.map((img, idx) => (
-                  <div key={img.preview} className="relative group">
-                    <img
-                      src={img.preview}
-                      alt={`Preview ${idx + 1}`}
-                      className="h-16 w-16 object-cover border border-green-800 rounded"
-                    />
+                  <div key={img.preview || img.file.name} className="relative group">
+                    {img.preview ? (
+                      <img
+                        src={img.preview}
+                        alt={`Preview ${idx + 1}`}
+                        className="h-16 w-16 object-cover border border-green-800 rounded"
+                      />
+                    ) : (
+                      <div className="h-16 w-16 flex flex-col items-center justify-center border border-green-800 rounded bg-green-900/30 text-green-500">
+                        <span className="text-lg">📄</span>
+                        <span className="text-[8px] font-mono truncate w-14 text-center">{img.file.name.split('.').pop()?.toUpperCase()}</span>
+                      </div>
+                    )}
                     <button
                       onClick={() => removeImage(idx)}
                       className="absolute -top-1.5 -right-1.5 bg-black rounded-full text-green-700 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
@@ -649,14 +675,14 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isSending}
                 className="px-2 py-2 text-green-700 hover:text-green-400 disabled:opacity-30 transition-colors flex-shrink-0"
-                title="Attach image"
+                title="Attach file (image, PDF, DOC)"
               >
                 <Paperclip className="w-4 h-4" />
               </button>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                accept="image/*,.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 multiple
                 onChange={handleFileSelect}
                 className="hidden"

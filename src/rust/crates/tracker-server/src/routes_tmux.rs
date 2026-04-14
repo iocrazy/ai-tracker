@@ -607,6 +607,12 @@ fn save_base64_image(base64_data: &str) -> Result<String, String> {
         "gif"
     } else if base64_data.starts_with("data:image/webp") {
         "webp"
+    } else if base64_data.starts_with("data:application/pdf") {
+        "pdf"
+    } else if base64_data.starts_with("data:application/vnd.openxmlformats-officedocument.wordprocessingml") {
+        "docx"
+    } else if base64_data.starts_with("data:application/msword") {
+        "doc"
     } else {
         "png"
     };

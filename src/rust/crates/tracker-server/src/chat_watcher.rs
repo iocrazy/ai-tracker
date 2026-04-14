@@ -27,6 +27,8 @@ struct WatchedSession {
 /// Watches active JSONL session files for new messages
 pub struct ChatWatcher {
     sessions: std::sync::Mutex<HashMap<String, WatchedSession>>,
+    /// Client-subscribed files (not auto-cleaned by sync_sessions)
+    subscribed: std::sync::Mutex<HashMap<String, WatchedSession>>,
     broadcast_tx: broadcast::Sender<ChatMessageEvent>,
 }
 
@@ -35,6 +37,7 @@ impl ChatWatcher {
         let (broadcast_tx, _) = broadcast::channel(64);
         Self {
             sessions: std::sync::Mutex::new(HashMap::new()),
+            subscribed: std::sync::Mutex::new(HashMap::new()),
             broadcast_tx,
         }
     }
@@ -83,14 +86,43 @@ impl ChatWatcher {
         }
     }
 
-    /// Poll all watched sessions for changes. Call this every ~500ms.
+    /// Client subscribes to a session file (e.g., when modal opens).
+    /// These files are watched regardless of task status.
+    pub fn subscribe_file(&self, session_file: String, path: PathBuf) {
+        let mut subscribed = self.subscribed.lock().unwrap();
+        if !subscribed.contains_key(&session_file) {
+            let last_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            debug!("ChatWatcher: client subscribed to {}", session_file);
+            subscribed.insert(session_file, WatchedSession { path, last_size });
+        }
+    }
+
+    /// Client unsubscribes from a session file (e.g., when modal closes).
+    pub fn unsubscribe_file(&self, session_file: &str) {
+        let mut subscribed = self.subscribed.lock().unwrap();
+        if subscribed.remove(session_file).is_some() {
+            debug!("ChatWatcher: client unsubscribed from {}", session_file);
+        }
+    }
+
+    /// Poll all watched sessions (auto-discovered + client-subscribed) for changes.
     pub fn poll(&self) {
+        // Poll auto-discovered active sessions
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            self.poll_sessions(&mut sessions);
+        }
+        // Poll client-subscribed sessions
+        {
+            let mut subscribed = self.subscribed.lock().unwrap();
+            self.poll_sessions(&mut subscribed);
+        }
+    }
+
+    fn poll_sessions(&self, sessions: &mut HashMap<String, WatchedSession>) {
         use std::io::{Read, Seek, SeekFrom};
 
-        let mut sessions = self.sessions.lock().unwrap();
-
         for (key, session) in sessions.iter_mut() {
-            // Check current file size
             let current_size = match session.path.metadata() {
                 Ok(m) => m.len(),
                 Err(_) => continue,
@@ -100,7 +132,6 @@ impl ChatWatcher {
                 continue;
             }
 
-            // Read new bytes from last_size to current_size
             let mut file = match std::fs::File::open(&session.path) {
                 Ok(f) => f,
                 Err(e) => {
@@ -129,10 +160,7 @@ impl ChatWatcher {
 
             let content = String::from_utf8_lossy(&buf);
 
-            // Skip first partial line if we started mid-stream
-            // (This shouldn't happen since we track exact offsets, but be safe)
             let lines_str = if session.last_size > current_size - (bytes_read as u64) && !content.starts_with('{') {
-                // Might have caught a partial first line
                 content.splitn(2, '\n').nth(1).unwrap_or("")
             } else {
                 &content
@@ -154,7 +182,6 @@ impl ChatWatcher {
                     session_file: key.clone(),
                     messages: new_messages,
                 };
-                // Broadcast to all WS subscribers (ignore error if no receivers)
                 let _ = self.broadcast_tx.send(event);
             }
         }

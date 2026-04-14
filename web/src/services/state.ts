@@ -301,6 +301,20 @@ export function getCurrentWs(): WebSocket | null {
   return _currentWs;
 }
 
+/** Subscribe to real-time updates for a specific JSONL session file */
+export function subscribeChatFile(sessionFile: string): void {
+  if (_currentWs && _currentWs.readyState === WebSocket.OPEN) {
+    _currentWs.send(JSON.stringify({ type: 'subscribe_chat', session_file: sessionFile }));
+  }
+}
+
+/** Unsubscribe from a specific JSONL session file */
+export function unsubscribeChatFile(sessionFile: string): void {
+  if (_currentWs && _currentWs.readyState === WebSocket.OPEN) {
+    _currentWs.send(JSON.stringify({ type: 'unsubscribe_chat', session_file: sessionFile }));
+  }
+}
+
 // Health check API (no auth required)
 export async function fetchHealth(): Promise<{ status: string; checks: Record<string, any>; response_ms: number } | null> {
   try {

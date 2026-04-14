@@ -3043,8 +3043,31 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                     Some(Ok(Message::Text(text))) => {
                         // Any message counts as activity
                         last_pong = tokio::time::Instant::now();
-                        if let Ok(req) = serde_json::from_str::<SendCommandRequest>(&text) {
-                            let _ = handle_command(&state, req).await;
+
+                        // Handle chat subscription requests
+                        if let Ok(sub) = serde_json::from_str::<serde_json::Value>(&text) {
+                            match sub.get("type").and_then(|t| t.as_str()) {
+                                Some("subscribe_chat") => {
+                                    if let Some(sf) = sub.get("session_file").and_then(|s| s.as_str()) {
+                                        let path = std::path::PathBuf::from(sf);
+                                        if path.exists() {
+                                            let key = sf.to_string();
+                                            state.chat_watcher.subscribe_file(key, path);
+                                        }
+                                    }
+                                }
+                                Some("unsubscribe_chat") => {
+                                    if let Some(sf) = sub.get("session_file").and_then(|s| s.as_str()) {
+                                        state.chat_watcher.unsubscribe_file(sf);
+                                    }
+                                }
+                                _ => {
+                                    // Try as command
+                                    if let Ok(req) = serde_json::from_str::<SendCommandRequest>(&text) {
+                                        let _ = handle_command(&state, req).await;
+                                    }
+                                }
+                            }
                         }
                     }
                     Some(Err(e)) => {

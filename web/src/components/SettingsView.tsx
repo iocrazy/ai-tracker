@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AppSettings } from '../types';
 import { Check, Download, Shield, Trash2, Activity, Terminal, Copy, Eye, EyeOff } from 'lucide-react';
-import { fetchAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, AlertRule, fetchBackups, createBackup, BackupEntry, fetchDiagnostics, adminRestart, adminClearLogs, DiagnosticComponent, DiagnosticsResult, fetchSetupStatus, SetupStatus, getAuthToken } from '../services/api';
+import { fetchAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, AlertRule, fetchBackups, createBackup, BackupEntry, fetchDiagnostics, adminRestart, adminClearLogs, DiagnosticComponent, DiagnosticsResult, fetchSetupStatus, SetupStatus, getAuthToken, fetchChannels, createChannel, deleteChannel, ApiChannel, fetchTmuxWindows } from '../services/api';
 
 interface SettingsViewProps {
     settings: AppSettings;
@@ -114,6 +114,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
        {/* Backups */}
        <BackupSection isModern={isModern} />
 
+       {/* API Channels */}
+       <ChannelManager isModern={isModern} />
+
        {/* Diagnostics */}
        <DiagnosticsSection isModern={isModern} />
 
@@ -126,6 +129,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onUpdate }
                 <p>AgentTracker Web Console v0.1.0</p>
                 <p>Built with React 19 + Tailwind CSS 4.0</p>
                 <p>© 2026 HEYGO</p>
+                <button
+                  onClick={async () => {
+                    try {
+                      // Unregister all service workers
+                      const registrations = await navigator.serviceWorker?.getRegistrations() || [];
+                      for (const reg of registrations) await reg.unregister();
+                      // Delete all caches
+                      const keys = await caches.keys();
+                      for (const key of keys) await caches.delete(key);
+                      // Hard reload
+                      window.location.reload();
+                    } catch (e) {
+                      console.error('Cache clear failed:', e);
+                      window.location.reload();
+                    }
+                  }}
+                  className="mt-2 px-4 py-2 border border-yellow-700/50 text-yellow-500 hover:bg-yellow-900/20 hover:border-yellow-500 text-xs font-mono transition-colors"
+                >
+                  🗑 清理缓存并刷新
+                </button>
             </div>
        </div>
     </div>
@@ -334,6 +357,127 @@ const AlertRulesSection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
 };
 
 // Diagnostics sub-component
+// ============================================================================
+// Channel Manager — API key → tmux session routing
+// ============================================================================
+
+const ChannelManager: React.FC<{ isModern: boolean }> = ({ isModern }) => {
+  const [channels, setChannels] = useState<ApiChannel[]>([]);
+  const [windows, setWindows] = useState<{ session_name: string; window_name: string }[]>([]);
+  const [newName, setNewName] = useState('');
+  const [newTarget, setNewTarget] = useState('');
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetchChannels().then(setChannels);
+    fetchTmuxWindows().then(wins =>
+      setWindows(wins.map(w => ({ session_name: w.session_name, window_name: w.window_name })))
+    );
+  }, []);
+
+  const handleCreate = async () => {
+    if (!newName.trim() || !newTarget) return;
+    const [session, window] = newTarget.split('::');
+    const res = await createChannel(newName.trim(), session, window);
+    if (res.success && res.channel) {
+      setChannels(prev => [...prev, res.channel!]);
+      setNewName('');
+      setNewTarget('');
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    const res = await deleteChannel(id);
+    if (res.success) {
+      setChannels(prev => prev.filter(c => c.id !== id));
+    }
+  };
+
+  const handleCopy = (key: string, id: number) => {
+    navigator.clipboard.writeText(key);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  return (
+    <div className={`border-2 border-green-600 p-4 sm:p-8 relative ${isModern ? 'rounded-lg' : ''}`}>
+      <h3 className={`absolute -top-4 left-4 px-2 sm:px-4 text-green-500 font-bold tracking-widest text-sm sm:text-lg uppercase ${isModern ? 'bg-[#0d1117]' : 'bg-[#050505]'}`}>
+        <Terminal className="w-4 h-4 inline mr-2" />API CHANNELS
+      </h3>
+      <div className="mt-2 space-y-3">
+        <p className="text-green-700 font-mono text-xs">
+          每个 Channel 生成独立 API Key，外部客户端用该 Key 自动路由到指定 tmux session。
+        </p>
+
+        {/* Existing channels */}
+        {channels.length > 0 && (
+          <div className="space-y-2">
+            {channels.map(ch => (
+              <div key={ch.id} className="border border-green-800/50 p-3 font-mono text-xs space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-green-400 font-bold">{ch.name}</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleCopy(ch.api_key, ch.id)}
+                      className="text-green-700 hover:text-green-400 transition-colors"
+                      title="复制 API Key"
+                    >
+                      {copiedId === ch.id ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                    <button
+                      onClick={() => handleDelete(ch.id)}
+                      className="text-red-800 hover:text-red-400 transition-colors"
+                      title="删除"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+                <div className="text-green-700">
+                  Key: <span className="text-green-500">{ch.api_key.slice(0, 12)}...{ch.api_key.slice(-4)}</span>
+                </div>
+                <div className="text-green-700">
+                  → {ch.session_name} / {ch.window_name}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Create new channel */}
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            type="text"
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+            placeholder="Channel 名称"
+            className="flex-1 bg-black border border-green-800/50 text-green-400 px-2 py-1.5 text-xs font-mono placeholder:text-green-900 focus:border-green-500 focus:outline-none"
+          />
+          <select
+            value={newTarget}
+            onChange={e => setNewTarget(e.target.value)}
+            className="flex-1 bg-black border border-green-800/50 text-green-400 px-2 py-1.5 text-xs font-mono focus:border-green-500 focus:outline-none"
+          >
+            <option value="">选择 Session / Window</option>
+            {windows.map(w => (
+              <option key={`${w.session_name}::${w.window_name}`} value={`${w.session_name}::${w.window_name}`}>
+                {w.session_name} / {w.window_name}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={handleCreate}
+            disabled={!newName.trim() || !newTarget}
+            className="px-3 py-1.5 border border-green-700/50 text-green-600 hover:text-green-400 hover:border-green-500 hover:bg-green-900/20 text-xs font-mono transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            + 新建
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const DiagnosticsSection: React.FC<{ isModern: boolean }> = ({ isModern }) => {
   const [result, setResult] = useState<DiagnosticsResult | null>(null);
   const [loading, setLoading] = useState(false);

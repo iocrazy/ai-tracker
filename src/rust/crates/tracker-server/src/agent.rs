@@ -84,6 +84,38 @@ pub struct ClaudeStatus {
     /// Whether the agent is at "Resume Session" picker (needs user to select a session)
     #[serde(default)]
     pub awaiting_resume: bool,
+    /// Interactive menu detected from TUI (AskUserQuestion picker)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_menu: Option<PendingMenu>,
+}
+
+/// An interactive menu parsed from Claude Code's TUI pane
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingMenu {
+    pub header: String,
+    /// Question text between header and first option
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    pub options: Vec<MenuOption>,
+    /// Right-side preview panel content (box-drawing bordered area)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// Whether this is a multi-select menu (checkboxes)
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// A single option in a TUI menu
+#[derive(Debug, Clone, Serialize)]
+pub struct MenuOption {
+    pub index: usize,
+    pub label: String,
+    pub description: String,
+    /// Currently highlighted by cursor (❯)
+    pub selected: bool,
+    /// Checkbox checked state (multi-select only)
+    #[serde(default)]
+    pub checked: bool,
 }
 
 /// tmux operations for agent management (async)
@@ -877,6 +909,37 @@ impl TmuxAgent {
                 }
                 // Extra delay after slash command for menu to appear
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            } else if keys.len() > 500 {
+                // Large payloads: use tmux paste buffer for reliability.
+                // 500 bytes threshold — Chinese text is 3 bytes/char, so ~170 chars.
+                use tokio::io::AsyncWriteExt;
+                let buf_name = format!("agent-tracker-{}", std::process::id());
+                let mut child = tokio::process::Command::new(TMUX_BIN.as_str())
+                    .args(["load-buffer", "-b", &buf_name, "-"])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn tmux load-buffer")?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(keys.as_bytes()).await
+                        .context("Failed to write to tmux load-buffer stdin")?;
+                }
+                let output = child.wait_with_output().await
+                    .context("Failed to wait for tmux load-buffer")?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    bail!("tmux load-buffer failed: {}", stderr);
+                }
+                let output = Command::new(TMUX_BIN.as_str())
+                    .args(["paste-buffer", "-b", &buf_name, "-d", "-t", &target])
+                    .output()
+                    .await
+                    .context("Failed to paste tmux buffer")?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    bail!("tmux paste-buffer failed: {}", stderr);
+                }
             } else {
                 let output = Command::new(TMUX_BIN.as_str())
                     .args(["send-keys", "-t", &target, "-l", keys])
@@ -893,9 +956,11 @@ impl TmuxAgent {
         }
 
         // Step 2: Send suffix key separately (if provided)
-        // Add small delay to ensure text is processed before sending key
+        // Delay: 500ms after paste-buffer (Claude TUI needs time to process large paste),
+        // 50ms after send-keys -l (instant for small text).
         if let Some(key) = suffix_key {
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let delay = if keys.len() > 500 { 500 } else { 50 };
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
 
             let output = Command::new(TMUX_BIN.as_str())
                 .args(["send-keys", "-t", &target, key])
@@ -910,6 +975,70 @@ impl TmuxAgent {
             tracing::info!("send_keys_with_suffix: suffix key '{}' sent successfully", key);
         }
 
+        Ok(())
+    }
+
+    /// Paste text into a pane via tmux paste-buffer (simulates a real paste, not keystrokes).
+    /// Claude Code's image-path auto-attachment only triggers on paste events, not typed input.
+    pub async fn paste_text(
+        session: &str,
+        window: &str,
+        pane: &str,
+        text: &str,
+        suffix_key: Option<&str>,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let actual_session = Self::find_session(session)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Session '{}' not found", session))?;
+        let target = if pane.is_empty() || pane == "0" {
+            format!("{}:{}", actual_session, window)
+        } else if pane.starts_with('%') {
+            pane.to_string()
+        } else {
+            format!("{}:{}.{}", actual_session, window, pane)
+        };
+
+        let buf_name = format!("agent-tracker-paste-{}", std::process::id());
+
+        let mut child = tokio::process::Command::new(TMUX_BIN.as_str())
+            .args(["load-buffer", "-b", &buf_name, "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn tmux load-buffer")?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes()).await
+                .context("Failed to write to tmux load-buffer stdin")?;
+        }
+        let output = child.wait_with_output().await
+            .context("Failed to wait for tmux load-buffer")?;
+        if !output.status.success() {
+            bail!("tmux load-buffer failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        let output = Command::new(TMUX_BIN.as_str())
+            .args(["paste-buffer", "-b", &buf_name, "-d", "-t", &target])
+            .output()
+            .await
+            .context("Failed to paste tmux buffer")?;
+        if !output.status.success() {
+            bail!("tmux paste-buffer failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        if let Some(key) = suffix_key {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            let output = Command::new(TMUX_BIN.as_str())
+                .args(["send-keys", "-t", &target, key])
+                .output()
+                .await
+                .context("Failed to send suffix key")?;
+            if !output.status.success() {
+                bail!("tmux send-keys (suffix) failed: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
         Ok(())
     }
 
@@ -976,9 +1105,16 @@ impl TmuxAgent {
 
         // If we found a Claude pane by process, try to parse its status
         if let Some(ref pane_id) = claude_pane_id {
+            // First pass: 10 lines for basic status
             if let Ok(content) = Self::capture_pane(session, window, pane_id, Some(10)).await {
                 let mut status = Self::parse_claude_status(&content);
                 status.pane = Some(pane_id.clone());
+                // If menu footer detected, re-capture with more lines to get full menu
+                if content.contains("Enter to select") && content.contains("to navigate") {
+                    if let Ok(full_content) = Self::capture_pane(session, window, pane_id, Some(60)).await {
+                        status.pending_menu = Self::parse_tui_menu(&full_content);
+                    }
+                }
                 return Ok(status);
             }
         }
@@ -1204,12 +1340,27 @@ impl TmuxAgent {
                 }
             }
 
-            // Parse tool execution line (e.g., "⏺ Bash(npm run build...)")
+            // Parse tool execution line (e.g., "⏺ Bash(npm run build...)" or "⏺ Read(...)")
+            // Only match when followed by a known tool pattern (capitalized word + parens or known tool names)
             if line.starts_with('⏺') {
-                status.agent_type = Some("claude".to_string());
-                // Extract just the tool part without the icon
                 let tool_part = line.trim_start_matches('⏺').trim();
-                status.current_tool = Some(tool_part.to_string());
+                // Match tool patterns: "ToolName(args)" or "Skill(name)" etc.
+                let is_tool = tool_part.starts_with("Bash")
+                    || tool_part.starts_with("Read")
+                    || tool_part.starts_with("Write")
+                    || tool_part.starts_with("Edit")
+                    || tool_part.starts_with("Grep")
+                    || tool_part.starts_with("Glob")
+                    || tool_part.starts_with("Skill")
+                    || tool_part.starts_with("Agent")
+                    || tool_part.starts_with("Task")
+                    || tool_part.starts_with("mcp_")
+                    || tool_part.starts_with("WebFetch")
+                    || tool_part.starts_with("WebSearch");
+                if is_tool {
+                    status.agent_type = Some("claude".to_string());
+                    status.current_tool = Some(tool_part.to_string());
+                }
             }
 
             // Parse Model line (e.g., "Model: Opus 4.5  [███░░░] 69.3% (116,482)")
@@ -1241,7 +1392,45 @@ impl TmuxAgent {
                 }
             }
 
-            // Parse Cost line (e.g., "Cost: $10.58  Session: 2hr 29m")
+            // Parse new-style status bar (Claude Code v2.1.108+)
+            // Format: "🤖 Opus 4.7 1M | 📁 project | 🌿 branch | ⚡️ 44.3% · 443.3k tokens"
+            if line.contains("🤖") && line.contains('|') {
+                status.agent_type = Some("claude".to_string());
+                let parts: Vec<&str> = line.split('|').collect();
+                // Part 0: "🤖 Opus 4.7 1M" → model
+                if let Some(model_part) = parts.first() {
+                    let model_str = model_part.trim().trim_start_matches('🤖').trim();
+                    if !model_str.is_empty() {
+                        status.model = Some(model_str.to_string());
+                    }
+                }
+                // Find the part with ⚡️ (context/tokens)
+                for part in &parts {
+                    let p = part.trim();
+                    if p.contains('⚡') || p.contains('%') {
+                        // Extract percentage (e.g., "44.3%")
+                        if let Some(pct_idx) = p.find('%') {
+                            // Scan backwards for the number
+                            let before = &p[..pct_idx];
+                            let num_start = before.rfind(|c: char| !c.is_ascii_digit() && c != '.').map(|i| i + 1).unwrap_or(0);
+                            if let Ok(pct) = before[num_start..].trim().parse::<f32>() {
+                                status.context_percent = Some(pct);
+                            }
+                        }
+                        // Extract token count (e.g., "443.3k tokens" or "59.0k")
+                        if let Some(k_idx) = p.find('k') {
+                            // Look for number before 'k'
+                            let before_k = &p[..k_idx];
+                            let num_start = before_k.rfind(|c: char| !c.is_ascii_digit() && c != '.').map(|i| i + 1).unwrap_or(0);
+                            if let Ok(k_val) = before_k[num_start..].trim().parse::<f64>() {
+                                status.tokens = Some((k_val * 1000.0) as u64);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Parse Cost line (e.g., "Cost: $10.58  Session: 2hr 29m") — legacy format
             if line.contains("Cost:") {
                 status.agent_type = Some("claude".to_string());
                 // Extract cost
@@ -1289,6 +1478,166 @@ impl TmuxAgent {
         }
 
         status
+    }
+
+    /// Parse an interactive TUI menu from pane content.
+    /// Detects the "Enter to select · ↑/↓ to navigate" picker and extracts options.
+    ///
+    /// Menu format:
+    /// ```
+    /// ☐ Header text
+    /// ❯ 1. Label (selected)
+    ///      Description...
+    ///   2. Label
+    ///      Description...
+    /// ───────────
+    ///   N. Chat about this
+    /// Enter to select · ↑/↓ to navigate · Esc to cancel
+    /// ```
+    fn parse_tui_menu(content: &str) -> Option<PendingMenu> {
+        // Strip box-drawing characters and everything after them on each line.
+        let clean_line = |line: &str| -> String {
+            if let Some(pos) = line.find(|c: char| "┌┐└┘│┃╔╗╚╝║".contains(c)) {
+                line[..pos].trim_end().to_string()
+            } else {
+                line.to_string()
+            }
+        };
+
+        let lines: Vec<String> = content.lines().map(clean_line).collect();
+
+        // Find the "Enter to select" footer line
+        let footer_idx = lines.iter().rposition(|l| {
+            let t = l.trim();
+            t.contains("Enter to select") && t.contains("to navigate")
+        })?;
+
+        // Find the header (☐/☑) scanning backward from footer to find menu start
+        let mut header = String::new();
+        let mut menu_start = 0;
+        for i in (0..footer_idx).rev() {
+            let trimmed = lines[i].trim();
+            if trimmed.starts_with('☐') || trimmed.starts_with('☑') {
+                header = trimmed.trim_start_matches(['☐', '☑', ' ']).trim().to_string();
+                menu_start = i + 1;
+                break;
+            }
+        }
+
+        // Forward parse: from menu_start to footer_idx
+        let mut options: Vec<MenuOption> = Vec::new();
+        let mut question_parts: Vec<String> = Vec::new();
+        let mut found_first_option = false;
+
+        let try_parse_option = |line: &str| -> Option<(usize, String, bool, bool)> {
+            let trimmed = line.trim();
+            let is_selected = trimmed.starts_with('❯');
+            let clean = trimmed.trim_start_matches('❯').trim();
+            let dot_pos = clean.find(". ")?;
+            let idx = clean[..dot_pos].trim().parse::<usize>().ok()?;
+            let after_dot = clean[dot_pos + 2..].trim();
+            // Detect checkbox
+            let (checked, label) = if after_dot.starts_with("[ ] ") {
+                (true, after_dot[4..].to_string()) // has checkbox = multi-select mode
+            } else if after_dot.starts_with("[✓] ") || after_dot.starts_with("[x] ") || after_dot.starts_with("[■] ") {
+                (true, after_dot[after_dot.find("] ").map(|p| p + 2).unwrap_or(0)..].to_string())
+            } else {
+                (false, after_dot.to_string())
+            };
+            Some((idx, label, is_selected, checked))
+        };
+
+        for i in menu_start..footer_idx {
+            let trimmed = lines[i].trim().to_string();
+            if trimmed.is_empty() || trimmed.chars().all(|c| c == '─' || c == '━') {
+                continue;
+            }
+            // Skip standalone non-numbered lines like "Submit"
+            if trimmed == "Submit" {
+                continue;
+            }
+
+            if let Some((idx, label, is_selected, checked)) = try_parse_option(&lines[i]) {
+                found_first_option = true;
+                options.push(MenuOption {
+                    index: idx,
+                    label,
+                    description: String::new(),
+                    selected: is_selected,
+                    checked,
+                });
+            } else if found_first_option && !options.is_empty() && !trimmed.is_empty() {
+                // Description line: append to the LAST option (the one above, since we go forward)
+                if let Some(last) = options.last_mut() {
+                    if !last.description.is_empty() {
+                        last.description.push(' ');
+                    }
+                    last.description.push_str(&trimmed);
+                }
+            } else if !found_first_option && !trimmed.is_empty() {
+                // Question text: lines between header and first option
+                question_parts.push(trimmed);
+            }
+        }
+
+        if options.is_empty() {
+            return None;
+        }
+
+        // Detect multi-select: any option has a checkbox pattern
+        let multi_select = options.iter().any(|o| o.checked) ||
+            content.contains("[ ]") || content.contains("[✓]") || content.contains("[■]");
+
+        // Extract right-side preview panel (box-drawing bordered area)
+        let preview = Self::parse_preview_panel(content);
+
+        let question = if question_parts.is_empty() { None } else { Some(question_parts.join(" ")) };
+
+        Some(PendingMenu { header, question, options, preview, multi_select })
+    }
+
+    /// Extract text from a box-drawing bordered panel in pane content.
+    /// Looks for ┌───┐ / │ text │ / └───┘ patterns.
+    fn parse_preview_panel(content: &str) -> Option<String> {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut in_box = false;
+        let mut preview_lines: Vec<String> = Vec::new();
+
+        for line in &lines {
+            if line.contains('┌') && line.contains('┐') {
+                in_box = true;
+                continue;
+            }
+            if in_box && line.contains('└') && line.contains('┘') {
+                in_box = false;
+                continue;
+            }
+            if in_box {
+                // Extract content between │ markers
+                if let Some(start) = line.find('│') {
+                    let rest = &line[start + '│'.len_utf8()..];
+                    if let Some(end) = rest.rfind('│') {
+                        let inner = rest[..end].trim_end().to_string();
+                        preview_lines.push(inner);
+                    }
+                }
+            }
+        }
+
+        if preview_lines.is_empty() {
+            return None;
+        }
+
+        // Trim trailing empty lines
+        while preview_lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            preview_lines.pop();
+        }
+        // Trim leading empty lines
+        while preview_lines.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            preview_lines.remove(0);
+        }
+
+        Some(preview_lines.join("\n"))
     }
 
     /// List all tmux sessions with their windows

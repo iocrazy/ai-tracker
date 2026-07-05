@@ -144,6 +144,20 @@ export function useTrackerState() {
     };
   }, [fetchAllClaudeStatus, computeStats]);
 
+  // Periodic claude status poll (3s) — ensures IDLE↔BUSY updates even if WS is down
+  const sessionsRef = useRef<AgentSession[]>([]);
+  sessionsRef.current = state.sessions;
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const current = sessionsRef.current;
+      if (current.length === 0) return;
+      const enriched = await fetchAllClaudeStatus(current);
+      setState(prev => ({ ...prev, sessions: enriched }));
+      setStats(computeStats(enriched));
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [fetchAllClaudeStatus, computeStats]);
+
   const reconnect = useCallback(() => {
     const ws = reconnectNow();
     if (ws) wsRef.current = ws;

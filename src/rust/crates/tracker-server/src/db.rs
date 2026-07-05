@@ -568,6 +568,15 @@ impl Database {
             (112, "UPDATE history SET completed_at = datetime('now'), completion_note = 'migration: closed orphan' WHERE completed_at IS NULL AND started_at < datetime('now', '-10 minutes')"),
             // Delete empty history entries: no messages, no tools, no completion_note, no summary content
             (113, "DELETE FROM history WHERE id NOT IN (SELECT DISTINCT history_id FROM conversation_messages) AND id NOT IN (SELECT DISTINCT history_id FROM tool_usage) AND (completion_note IS NULL OR completion_note = '') AND (summary IS NULL OR summary = '' OR summary LIKE 'Claude session %')"),
+            // API channels: map API keys to tmux session/window targets
+            (114, "CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                api_key TEXT NOT NULL UNIQUE,
+                session_name TEXT NOT NULL,
+                window_name TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )"),
         ];
 
         for (version, sql) in migrations {
@@ -3265,6 +3274,74 @@ impl Database {
         )?;
         Ok(hook_count + legacy_count)
     }
+
+    // ========================================================================
+    // Channel management (API key → tmux session/window routing)
+    // ========================================================================
+
+    pub fn list_channels(&self) -> Result<Vec<Channel>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, api_key, session_name, window_name, created_at FROM channels ORDER BY id"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Channel {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                api_key: row.get(2)?,
+                session_name: row.get(3)?,
+                window_name: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn create_channel(&self, name: &str, session_name: &str, window_name: &str) -> Result<Channel> {
+        let api_key = format!("sk-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+        self.conn.execute(
+            "INSERT INTO channels (name, api_key, session_name, window_name) VALUES (?1, ?2, ?3, ?4)",
+            params![name, api_key, session_name, window_name],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(Channel {
+            id,
+            name: name.to_string(),
+            api_key,
+            session_name: session_name.to_string(),
+            window_name: window_name.to_string(),
+            created_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        })
+    }
+
+    pub fn delete_channel(&self, id: i64) -> Result<bool> {
+        let count = self.conn.execute("DELETE FROM channels WHERE id = ?1", params![id])?;
+        Ok(count > 0)
+    }
+
+    pub fn find_channel_by_key(&self, api_key: &str) -> Option<Channel> {
+        self.conn.query_row(
+            "SELECT id, name, api_key, session_name, window_name, created_at FROM channels WHERE api_key = ?1",
+            params![api_key],
+            |row| Ok(Channel {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                api_key: row.get(2)?,
+                session_name: row.get(3)?,
+                window_name: row.get(4)?,
+                created_at: row.get(5)?,
+            }),
+        ).ok()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Channel {
+    pub id: i64,
+    pub name: String,
+    pub api_key: String,
+    pub session_name: String,
+    pub window_name: String,
+    pub created_at: String,
 }
 
 /// History entry for project-filtered queries

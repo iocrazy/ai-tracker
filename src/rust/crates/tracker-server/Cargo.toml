@@ -46,6 +46,7 @@ base64 = { workspace = true }
 dirs = { workspace = true }
 regex = { workspace = true }
 libc = { workspace = true }
+async-stream = "0.3"
 webauthn-rs = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 jsonwebtoken = { workspace = true }

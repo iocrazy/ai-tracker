@@ -13,6 +13,13 @@ export interface ClaudeStatus {
     pane: string | null;  // Detected pane where Claude runs
     awaiting_permission?: boolean;
     awaiting_resume?: boolean;  // Claude showing "Resume Session" picker
+    pending_menu?: {
+        header: string;
+        question?: string;
+        options: { index: number; label: string; description: string; selected: boolean; checked: boolean }[];
+        preview?: string;
+        multi_select: boolean;
+    };
 }
 
 export interface AgentWindow {

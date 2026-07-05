@@ -1163,14 +1163,23 @@ pub(crate) async fn get_grouped_detail(
         return empty();
     }
 
-    // Step 2: Try loading messages from global DB
+    // Step 2: Try loading messages from global DB (limit to last 500 to prevent UI freeze)
+    let msg_count_sql = format!(
+        "SELECT COUNT(*) FROM conversation_messages WHERE history_id IN ({}) AND TRIM(content) != ''",
+        placeholders
+    );
+    let total_messages: i64 = server_state.db.conn.query_row(
+        &msg_count_sql, id_refs.as_slice(), |row| row.get(0)
+    ).unwrap_or(0);
+
     let msg_sql = format!(
         "SELECT cm.role, cm.content, COALESCE(cm.created_at, ''), cm.history_id
          FROM conversation_messages cm
          JOIN history h ON cm.history_id = h.id
          WHERE cm.history_id IN ({})
          AND TRIM(cm.content) != ''
-         ORDER BY h.started_at ASC, cm.id ASC",
+         ORDER BY h.started_at DESC, cm.id DESC
+         LIMIT 500",
         placeholders
     );
     let mut messages: Vec<GroupedMessage> = vec![];
@@ -1187,6 +1196,16 @@ pub(crate) async fn get_grouped_detail(
                 messages.push(msg);
             }
         }
+    }
+    // Reverse to chronological order (we queried DESC + LIMIT to get the latest 500)
+    messages.reverse();
+    if total_messages > 500 {
+        messages.insert(0, GroupedMessage {
+            role: "system".to_string(),
+            content: format!("... 已省略前 {} 条消息，仅显示最近 500 条", total_messages - 500),
+            created_at: String::new(),
+            history_id: 0,
+        });
     }
 
     // Load tool usage from global DB

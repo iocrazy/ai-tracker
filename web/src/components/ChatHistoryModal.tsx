@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, MessageSquare, Send, Paperclip, XCircle } from 'lucide-react';
-import { tmuxSendKeys, tmuxSendRawKeys, sendImages, ToolInteraction, ToolCallInfo, ToolResultInfo, HookChatMessage } from '../services/api';
+import { tmuxSendKeys, tmuxSendRawKeys, sendImages, fetchClaudeStatus, ToolInteraction, ToolCallInfo, ToolResultInfo, HookChatMessage } from '../services/api';
 import { ClaudeStatus } from '../types';
 import { ChatTimeline, fromLiveChatMessages } from './ChatTimeline';
 
@@ -40,6 +40,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState<number | null>(null);
   // Use explicit prop if provided, fallback to subtitle heuristic for backwards compatibility
   const isLive = isLiveProp ?? !subtitle?.includes('ARCHIVE');
   const [sendStatus, setSendStatus] = useState<SendStatus>('idle');
@@ -48,6 +49,12 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [sentInteractions, setSentInteractions] = useState<Set<number>>(new Set());
+  // Pending menu preview: local override from hover navigation
+  const [menuPreview, setMenuPreview] = useState<string | null>(null);
+  const [menuSelectedIdx, setMenuSelectedIdx] = useState<number | null>(null);
+  const [menuExpandedOpt, setMenuExpandedOpt] = useState<number | null>(null);
+  const menuHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const menuNavigating = useRef(false);
   const prevWindowIdRef = useRef<string | undefined>(undefined);
 
   // Save draft on every input change
@@ -168,9 +175,11 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     });
   }, []);
 
-  const ACCEPTED_TYPES = ['image/', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+  const ACCEPTED_TYPES = ['image/', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/markdown'];
+  const ACCEPTED_EXTENSIONS = ['.md', '.markdown'];
   const isAcceptedFile = useCallback((f: File) =>
     ACCEPTED_TYPES.some(t => t.endsWith('/') ? f.type.startsWith(t) : f.type === t)
+    || (f.name && ACCEPTED_EXTENSIONS.some(ext => f.name.toLowerCase().endsWith(ext)))
   , []);
 
   const addImageFiles = useCallback((files: File[]) => {
@@ -243,6 +252,18 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
   }, [isOpen, handlePaste]);
+
+  // Prevent browser default file-open on drag/drop anywhere when modal is open
+  useEffect(() => {
+    if (!isOpen) return;
+    const blockDrag = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); };
+    document.addEventListener('dragover', blockDrag);
+    document.addEventListener('drop', blockDrag);
+    return () => {
+      document.removeEventListener('dragover', blockDrag);
+      document.removeEventListener('drop', blockDrag);
+    };
+  }, [isOpen]);
 
   const [sendError, setSendError] = useState('');
 
@@ -361,12 +382,14 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
 
       if (hasImages) {
         const base64List = await Promise.all(pendingImages.map(img => fileToBase64(img.file)));
+        setUploadPercent(0);
         const result = await withTimeout(sendImages(
           sessionName,
           windowId,
           targetPane,
           base64List,
-          msgText || undefined
+          msgText || undefined,
+          (pct) => setUploadPercent(pct)
         ), 30000);
         if (result.success) {
           clearAllImages();
@@ -377,7 +400,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
           restoreIfEmpty(msgText); // Restore input for retry (only if user hasn't typed new text)
         }
       } else {
-        const result = await withTimeout(tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter'), 10000);
+        const result = await withTimeout(tmuxSendKeys(sessionName, windowId, targetPane, msgText, 'Enter'), 30000);
         if (result.success) {
           setSendStatus('success');
         } else {
@@ -393,6 +416,7 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
       restoreIfEmpty(msgText); // Restore input for retry (only if user hasn't typed new text)
     } finally {
       setIsSending(false);
+      setUploadPercent(null);
     }
   };
 
@@ -481,7 +505,12 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto">
+    <div
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto"
+    >
       <div
         className="w-full max-w-3xl max-h-[90vh] flex flex-col retro-border bg-black shadow-[0_0_50px_rgba(34,197,94,0.3)] relative my-auto"
       >
@@ -551,11 +580,15 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
             {/* Drag overlay */}
             {isDragging && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 border-2 border-dashed border-green-400 pointer-events-none">
-                <span className="text-green-400 text-lg font-mono tracking-wider">DROP IMAGE HERE</span>
+                <span className="text-green-400 text-lg font-mono tracking-wider">DROP FILE HERE</span>
               </div>
             )}
             <ChatTimeline
-              items={fromLiveChatMessages(allMessages)}
+              items={fromLiveChatMessages(
+                claudeStatus?.pending_menu
+                  ? allMessages.map(m => m.interaction ? { ...m, interaction: undefined } : m)
+                  : allMessages
+              )}
               onInteractionSelect={isLive ? async (msgIdx, optIdx, multiSelect, totalOptions) => {
                 if (!sessionName || !windowId) return;
                 const targetPane = resolvedPaneRef.current;
@@ -628,6 +661,252 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
               } : undefined}
               sentInteractions={sentInteractions}
             />
+
+            {/* Inline TUI menu from pane capture.
+                Always show when present — matches live tmux display exactly.
+                JSONL interaction is hidden when pending_menu exists (see ChatTimeline filter below). */}
+            {claudeStatus?.pending_menu && (() => {
+              const menu = claudeStatus.pending_menu!;
+              const currentPreview = menuPreview ?? menu.preview ?? null;
+              const effectiveSelected = menuSelectedIdx ?? menu.options.findIndex(o => o.selected);
+
+              // Navigate cursor to an option (hover preview)
+              const navigateToOption = (optIndex: number) => {
+                if (!sessionName || !windowId || menuNavigating.current) return;
+                const currentSelected = menu.options.findIndex(o => o.selected);
+                const targetPos = menu.options.findIndex(o => o.index === optIndex);
+                if (currentSelected < 0 || targetPos < 0 || targetPos === currentSelected) return;
+                if (menuHoverTimer.current) clearTimeout(menuHoverTimer.current);
+                menuHoverTimer.current = setTimeout(async () => {
+                  menuNavigating.current = true;
+                  const pane = resolvedPaneRef.current;
+                  const delta = targetPos - currentSelected;
+                  const keys: string[] = [];
+                  const dir = delta > 0 ? 'Down' : 'Up';
+                  for (let k = 0; k < Math.abs(delta); k++) keys.push(dir);
+                  try {
+                    await tmuxSendRawKeys(sessionName!, windowId!, pane, keys);
+                    await new Promise(r => setTimeout(r, 200));
+                    const resp = await fetchClaudeStatus(sessionName!, windowName || '');
+                    if (resp.status?.pending_menu) {
+                      setMenuPreview(resp.status.pending_menu.preview ?? null);
+                      setMenuSelectedIdx(resp.status.pending_menu.options.findIndex((o: { selected: boolean }) => o.selected));
+                    }
+                  } catch (err) {
+                    console.error('Menu navigation failed:', err);
+                  } finally {
+                    menuNavigating.current = false;
+                  }
+                }, 300);
+              };
+
+              // Single-select: navigate + Enter
+              const selectOption = async (optIndex: number) => {
+                if (!sessionName || !windowId) return;
+                const opt = menu.options.find(o => o.index === optIndex);
+                if (!confirm(`确认选择「${opt?.label || optIndex}」？`)) return;
+                if (menuHoverTimer.current) clearTimeout(menuHoverTimer.current);
+                const pane = resolvedPaneRef.current;
+                const currentSelected = menu.options.findIndex(o => o.selected);
+                const targetPos = menu.options.findIndex(o => o.index === optIndex);
+                const keys: string[] = [];
+                if (currentSelected >= 0 && targetPos >= 0 && targetPos !== currentSelected) {
+                  const delta = targetPos - currentSelected;
+                  const dir = delta > 0 ? 'Down' : 'Up';
+                  for (let k = 0; k < Math.abs(delta); k++) keys.push(dir);
+                }
+                keys.push('Enter');
+                await tmuxSendRawKeys(sessionName, windowId, pane, keys);
+                setMenuPreview(null);
+                setMenuSelectedIdx(null);
+              };
+
+              // Multi-select: navigate + Space to toggle checkbox, then re-fetch state
+              const toggleOption = async (optIndex: number) => {
+                if (!sessionName || !windowId || menuNavigating.current) return;
+                menuNavigating.current = true;
+                const pane = resolvedPaneRef.current;
+                const currentSelected = menu.options.findIndex(o => o.selected);
+                const targetPos = menu.options.findIndex(o => o.index === optIndex);
+                const keys: string[] = [];
+                if (currentSelected >= 0 && targetPos >= 0 && targetPos !== currentSelected) {
+                  const delta = targetPos - currentSelected;
+                  const dir = delta > 0 ? 'Down' : 'Up';
+                  for (let k = 0; k < Math.abs(delta); k++) keys.push(dir);
+                }
+                keys.push('Space'); // Toggle checkbox
+                try {
+                  await tmuxSendRawKeys(sessionName, windowId, pane, keys);
+                  await new Promise(r => setTimeout(r, 200));
+                  // Re-fetch to get updated checkbox state
+                  const resp = await fetchClaudeStatus(sessionName, windowName || '');
+                  if (resp.status?.pending_menu) {
+                    setMenuPreview(resp.status.pending_menu.preview ?? null);
+                    setMenuSelectedIdx(resp.status.pending_menu.options.findIndex((o: { selected: boolean }) => o.selected));
+                  }
+                } catch (err) {
+                  console.error('Toggle failed:', err);
+                } finally {
+                  menuNavigating.current = false;
+                }
+              };
+
+              // Multi-select: submit (navigate to Submit line + Enter)
+              const submitMultiSelect = async () => {
+                if (!sessionName || !windowId) return;
+                const checkedLabels = menu.options.filter(o => o.checked).map(o => o.label).join(', ');
+                if (!confirm(`确认提交选择？\n已选: ${checkedLabels || '无'}`)) return;
+                const pane = resolvedPaneRef.current;
+                // Navigate from current position to Submit: go past all options + "Type something"
+                const currentSelected = menu.options.findIndex(o => o.selected);
+                const stepsToSubmit = menu.options.length - currentSelected; // options left + "Type something" = Submit
+                const keys: string[] = [];
+                for (let k = 0; k < stepsToSubmit; k++) keys.push('Down');
+                keys.push('Enter');
+                await tmuxSendRawKeys(sessionName, windowId, pane, keys);
+                setMenuPreview(null);
+                setMenuSelectedIdx(null);
+              };
+
+              return (
+                <div className="mt-3 border border-green-700/50 bg-green-900/10 p-3">
+                  {menu.header && (
+                    <div className="text-[10px] sm:text-xs text-green-600 font-mono mb-1 uppercase tracking-wider">{menu.header}</div>
+                  )}
+                  {menu.question && (
+                    <div className="text-xs sm:text-sm text-green-400 font-mono mb-2">{menu.question}</div>
+                  )}
+                  {menu.multi_select && (
+                    <div className="text-[10px] text-green-700 font-mono mb-1">[MULTI-SELECT] — 点击切换勾选，完成后点 Submit</div>
+                  )}
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    {/* Left: options */}
+                    <div className="flex flex-col gap-1.5 sm:min-w-[45%] sm:max-w-[55%]">
+                      {menu.options.map((opt, idx) => {
+                        const isExpanded = menuExpandedOpt === opt.index;
+                        const hasDesc = !!opt.description;
+                        const isTypeInput = opt.label === 'Type something' || opt.label === 'Type something.';
+                        const isChatAbout = opt.label === 'Chat about this';
+                        const isHighlighted = effectiveSelected >= 0 ? idx === effectiveSelected : opt.selected;
+
+                        // "Type something" → render as input box
+                        if (isTypeInput) {
+                          return (
+                            <div key={opt.index} className="flex gap-1.5">
+                              <input
+                                type="text"
+                                placeholder="输入自定义回复..."
+                                className="flex-1 bg-black border border-green-700/50 text-green-400 px-2 py-1.5 text-xs font-mono placeholder:text-green-900 focus:border-green-500 focus:outline-none"
+                                onKeyDown={async (e) => {
+                                  if (e.key === 'Enter') {
+                                    const text = (e.target as HTMLInputElement).value.trim();
+                                    if (!text || !sessionName || !windowId) return;
+                                    const pane = resolvedPaneRef.current;
+                                    // Navigate to "Type something", Enter to select it, then type text + Enter
+                                    const currentSelected = menu.options.findIndex(o => o.selected);
+                                    const targetPos = idx;
+                                    const keys: string[] = [];
+                                    if (currentSelected >= 0 && targetPos !== currentSelected) {
+                                      const delta = targetPos - currentSelected;
+                                      const dir = delta > 0 ? 'Down' : 'Up';
+                                      for (let k = 0; k < Math.abs(delta); k++) keys.push(dir);
+                                    }
+                                    keys.push('Enter');
+                                    await tmuxSendRawKeys(sessionName, windowId, pane, keys);
+                                    await new Promise(r => setTimeout(r, 500));
+                                    await tmuxSendKeys(sessionName, windowId, pane, text, 'Enter');
+                                  }
+                                }}
+                              />
+                              <button
+                                onClick={async () => {
+                                  const input = document.querySelector('input[placeholder="输入自定义回复..."]') as HTMLInputElement;
+                                  const text = input?.value.trim();
+                                  if (!text || !sessionName || !windowId) return;
+                                  const pane = resolvedPaneRef.current;
+                                  const currentSelected = menu.options.findIndex(o => o.selected);
+                                  const targetPos = idx;
+                                  const keys: string[] = [];
+                                  if (currentSelected >= 0 && targetPos !== currentSelected) {
+                                    const delta = targetPos - currentSelected;
+                                    const dir = delta > 0 ? 'Down' : 'Up';
+                                    for (let k = 0; k < Math.abs(delta); k++) keys.push(dir);
+                                  }
+                                  keys.push('Enter');
+                                  await tmuxSendRawKeys(sessionName, windowId, pane, keys);
+                                  await new Promise(r => setTimeout(r, 500));
+                                  await tmuxSendKeys(sessionName, windowId, pane, text, 'Enter');
+                                }}
+                                className="px-3 py-1.5 border border-green-700/50 text-green-600 hover:text-green-400 hover:border-green-500 hover:bg-green-900/20 text-xs font-mono transition-colors"
+                              >
+                                SEND
+                              </button>
+                            </div>
+                          );
+                        }
+
+                        return (
+                        <button
+                          key={opt.index}
+                          onMouseEnter={() => !menu.multi_select && navigateToOption(opt.index)}
+                          onClick={() => {
+                            if (menu.multi_select) {
+                              toggleOption(opt.index);
+                            } else if (hasDesc && !isExpanded) {
+                              setMenuExpandedOpt(opt.index);
+                              navigateToOption(opt.index);
+                            } else {
+                              selectOption(opt.index);
+                            }
+                          }}
+                          onDoubleClick={() => {
+                            if (!menu.multi_select) selectOption(opt.index);
+                          }}
+                          className={`text-left p-2 border font-mono text-xs sm:text-sm transition-colors ${
+                            isHighlighted
+                              ? 'border-green-500 bg-green-900/20 text-green-400'
+                              : isChatAbout
+                                ? 'border-dashed border-green-900/50 text-green-700 hover:text-green-500 hover:border-green-700 cursor-pointer'
+                                : 'border-green-700/50 text-green-400 hover:border-green-500 hover:bg-green-900/20 cursor-pointer'
+                          }`}
+                        >
+                          {menu.multi_select && (
+                            <span className={`mr-2 ${opt.checked ? 'text-green-400' : 'text-green-800'}`}>
+                              {opt.checked ? '[✓]' : '[ ]'}
+                            </span>
+                          )}
+                          {!menu.multi_select && <span className="text-green-600 mr-2">{opt.index}.</span>}
+                          <span className={isChatAbout ? '' : 'font-bold'}>{opt.label}</span>
+                          {hasDesc && !isExpanded && <span className="text-green-800 ml-2 text-[10px]">▸ 点击展开</span>}
+                          {hasDesc && isExpanded && (
+                            <span className="block text-[10px] sm:text-xs text-green-700 mt-1 ml-4">{opt.description}</span>
+                          )}
+                          {isExpanded && <span className="block text-green-500 text-[10px] mt-1 ml-4">▸ 再次点击确认选择</span>}
+                        </button>
+                        );
+                      })}
+                      {/* Submit button for multi-select */}
+                      {menu.multi_select && (
+                        <button
+                          onClick={submitMultiSelect}
+                          className="mt-1 p-2 border border-green-600/70 bg-green-900/30 text-green-400 font-mono text-xs sm:text-sm hover:bg-green-800/30 hover:border-green-500 transition-colors font-bold"
+                        >
+                          ✓ Submit
+                        </button>
+                      )}
+                    </div>
+                    {/* Right: preview panel */}
+                    {currentPreview && (
+                      <div className="flex-1 min-w-0 bg-black/40 border border-green-900/50 p-3 overflow-auto max-h-52">
+                        <pre className="text-[10px] sm:text-xs text-green-300/80 font-mono whitespace-pre-wrap break-words leading-relaxed">
+                          {currentPreview}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
         </div>
 
         {/* Input Area — only shown for live sessions */}
@@ -769,7 +1048,13 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
                 {/* Send status */}
                 <div className="flex items-center gap-2">
                     {sendStatus === 'sending' && (
-                        <span className="text-yellow-500 animate-pulse">⏳ SENDING...</span>
+                        <span className="text-yellow-500 animate-pulse">
+                            ⏳ {uploadPercent !== null && uploadPercent < 100
+                                ? `UPLOADING ${uploadPercent}%`
+                                : uploadPercent === 100
+                                    ? 'PROCESSING...'
+                                    : 'SENDING...'}
+                        </span>
                     )}
                     {sendStatus === 'success' && (
                         <span className="text-green-500">🟢 SENT</span>

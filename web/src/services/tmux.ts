@@ -1,6 +1,6 @@
 // Tmux operations API
 
-import { API_BASE, authFetch } from './auth';
+import { API_BASE, authFetch, getAuthToken } from './auth';
 
 // Tmux window info (from /api/tmux/windows)
 export interface TmuxWindowInfo {
@@ -69,20 +69,39 @@ export async function sendImages(
   windowId: string,
   pane: string,
   imagesBase64: string[],
-  message?: string
+  message?: string,
+  onProgress?: (percent: number) => void
 ): Promise<{ success: boolean; message: string; image_paths?: string[] }> {
-  const response = await authFetch(`${API_BASE}/tmux/send-image`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      session,
-      window_id: windowId,
-      pane,
-      images: imagesBase64,
-      message,
-    }),
+  const body = JSON.stringify({
+    session,
+    window_id: windowId,
+    pane,
+    images: imagesBase64,
+    message,
   });
-  return response.json();
+
+  // Use XHR to get upload progress events
+  const token = getAuthToken();
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE}/tmux/send-image`);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    if (onProgress && xhr.upload) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+    }
+    xhr.onload = () => {
+      try { resolve(JSON.parse(xhr.responseText)); }
+      catch (err) { reject(err); }
+    };
+    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.onabort = () => reject(new Error('Upload aborted'));
+    xhr.send(body);
+  });
 }
 
 /**
@@ -99,6 +118,11 @@ export async function tmuxSendRawKeys(
   delayMs: number = 50,
 ): Promise<void> {
   for (const key of keys) {
+    // Extra delay before Enter/Space to let TUI process navigation first
+    const isAction = key === 'Enter' || key === 'Space';
+    if (isAction && delayMs > 0) {
+      await new Promise(r => setTimeout(r, 300));
+    }
     const result = await tmuxSendKeys(session, window, pane, '', key);
     if (!result.success) {
       throw new Error(`Failed to send key "${key}": ${result.message}`);
@@ -309,6 +333,13 @@ export interface ClaudeStatus {
   cost: number | null;
   session_duration: string | null;
   pane: string | null;  // Detected pane where Claude runs
+  pending_menu?: {
+    header: string;
+    question?: string;
+    options: { index: number; label: string; description: string; selected: boolean; checked: boolean }[];
+    preview?: string;
+    multi_select: boolean;
+  };
 }
 
 export interface ClaudeStatusResponse {

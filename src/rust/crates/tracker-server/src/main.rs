@@ -22,6 +22,7 @@ mod routes_totp;
 mod routes_history;
 mod routes_projects;
 mod routes_tmux;
+mod routes_openai;
 mod routes_workspace;
 
 use std::collections::HashMap;
@@ -253,6 +254,8 @@ pub(crate) struct AppState {
     hook_broadcast_tx: broadcast::Sender<routes_hook::HookEvent>,
     /// Git dir resolution cache: cwd → Option<git_root>
     git_dir_cache: Mutex<HashMap<String, Option<String>>>,
+    /// Per-pane locks for OpenAI proxy (prevents concurrent requests to same pane)
+    pane_locks: routes_openai::PaneLocks,
 }
 
 impl AppState {
@@ -286,6 +289,7 @@ impl AppState {
             totp_rate_limiter: routes_totp::TotpRateLimiter::new(),
             hook_broadcast_tx: broadcast::channel(64).0,
             git_dir_cache: Mutex::new(HashMap::new()),
+            pane_locks: routes_openai::new_pane_locks(),
         })
     }
 
@@ -2068,7 +2072,7 @@ async fn auth_middleware(
     let path = req.uri().path().to_string();
 
     // Skip auth for non-API paths (static files) and /health
-    if !path.starts_with("/api/") && !path.starts_with("/ws") {
+    if !path.starts_with("/api/") && !path.starts_with("/ws") && !path.starts_with("/v1/") {
         return next.run(req).await;
     }
     if path == "/health" || path == "/api/health" || path == "/api/setup/status" {
@@ -2122,8 +2126,11 @@ async fn auth_middleware(
                 routes_auth::verify_jwt(t, &state.jwt_secret)
             }
             Some(t) => {
-                // Static bearer token
-                t == state.auth_token
+                // Static bearer token or channel API key
+                t == state.auth_token || {
+                    let server = state.state.lock().unwrap();
+                    server.db.find_channel_by_key(t).is_some()
+                }
             }
             None => false,
         }
@@ -3594,6 +3601,9 @@ async fn main() -> Result<()> {
         .route("/api/browser/open", post(routes_tmux::open_browser))
         .route("/api/browser/switch-tab", post(routes_tmux::switch_browser_tab))
         // tmux interaction
+        .route("/v1/chat/completions", post(routes_openai::chat_completions))
+        .route("/api/channels", get(routes_openai::list_channels).post(routes_openai::create_channel))
+        .route("/api/channels/:id", delete(routes_openai::delete_channel))
         .route("/api/tmux/send-keys", post(routes_tmux::tmux_send_keys))
         .route("/api/tmux/capture", get(routes_tmux::tmux_capture))
         .route("/api/tmux/claude-status", get(routes_tmux::get_claude_status))

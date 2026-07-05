@@ -472,3 +472,37 @@ export async function fetchBackups(): Promise<BackupEntry[]> {
   const data = await res.json();
   return data.backups || [];
 }
+
+// ============================================================================
+// Channel management (API key → tmux session routing)
+// ============================================================================
+
+export interface ApiChannel {
+  id: number;
+  name: string;
+  api_key: string;
+  session_name: string;
+  window_name: string;
+  created_at: string;
+}
+
+export async function fetchChannels(): Promise<ApiChannel[]> {
+  const res = await authFetch(`${API_BASE}/channels`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.channels || [];
+}
+
+export async function createChannel(name: string, session_name: string, window_name: string): Promise<{ success: boolean; channel?: ApiChannel }> {
+  const res = await authFetch(`${API_BASE}/channels`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, session_name, window_name }),
+  });
+  return res.json();
+}
+
+export async function deleteChannel(id: number): Promise<{ success: boolean }> {
+  const res = await authFetch(`${API_BASE}/channels/${id}`, { method: 'DELETE' });
+  return res.json();
+}

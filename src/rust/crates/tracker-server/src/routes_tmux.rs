@@ -613,6 +613,11 @@ fn save_base64_image(base64_data: &str) -> Result<String, String> {
         "docx"
     } else if base64_data.starts_with("data:application/msword") {
         "doc"
+    } else if base64_data.starts_with("data:text/markdown") || base64_data.starts_with("data:text/x-markdown") {
+        "md"
+    } else if base64_data.starts_with("data:text/plain") {
+        // Fallback for .md files some browsers report as text/plain
+        "md"
     } else {
         "png"
     };
@@ -633,6 +638,19 @@ fn save_base64_image(base64_data: &str) -> Result<String, String> {
 
 /// Save base64 image(s) to temp file and send path via tmux send-keys
 pub(crate) async fn tmux_send_image(Json(req): Json<SendImageRequest>) -> Json<SendImageResponse> {
+    let recv_at = std::time::Instant::now();
+    let total_b64_bytes: usize = req.images.iter().map(|s| s.len()).sum::<usize>()
+        + req.image_base64.len();
+    info!(
+        "tmux_send_image: received session={}, window={}, pane={}, images={}, body_bytes={}, msg_len={}",
+        req.session,
+        req.window_id,
+        req.pane,
+        if req.images.is_empty() { if req.image_base64.is_empty() { 0 } else { 1 } } else { req.images.len() },
+        total_b64_bytes,
+        req.message.as_deref().unwrap_or("").len()
+    );
+
     // Collect all images (support both single and multi)
     let mut all_base64: Vec<&str> = Vec::new();
     if !req.images.is_empty() {
@@ -652,11 +670,11 @@ pub(crate) async fn tmux_send_image(Json(req): Json<SendImageRequest>) -> Json<S
         });
     }
 
-    // Save all images and send each path
+    // Save all images to /tmp first
     let mut saved_paths: Vec<String> = Vec::new();
     for base64_data in &all_base64 {
-        let image_path = match save_base64_image(base64_data) {
-            Ok(path) => path,
+        match save_base64_image(base64_data) {
+            Ok(path) => saved_paths.push(path),
             Err(e) => {
                 return Json(SendImageResponse {
                     success: false,
@@ -665,39 +683,37 @@ pub(crate) async fn tmux_send_image(Json(req): Json<SendImageRequest>) -> Json<S
                     image_paths: if saved_paths.is_empty() { None } else { Some(saved_paths) },
                 });
             }
-        };
-
-        // Send image path + Enter (Claude Code attaches as [Image #N])
-        if let Err(e) = agent::TmuxAgent::send_keys_with_suffix(
-            &req.session,
-            &req.window_id,
-            &req.pane,
-            &image_path,
-            Some("Enter"),
-        )
-        .await
-        {
-            return Json(SendImageResponse {
-                success: false,
-                message: format!("Failed to send image path: {}", e),
-                image_path: Some(image_path),
-                image_paths: if saved_paths.is_empty() { None } else { Some(saved_paths) },
-            });
         }
-
-        saved_paths.push(image_path);
-
-        // Wait for Claude Code to process the image attachment
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    // Send message text + Enter to submit (or just Enter if no message)
+    // Build a single composite prompt: user text + image paths as Read hints.
+    // Claude Code v2.1.108 removed raw-path auto-attach, so we explicitly tell Claude
+    // to Read each image. One prompt = clean webui display + Claude reads images as tool input.
     let msg_text = req.message.as_deref().unwrap_or("").trim().to_string();
-    match agent::TmuxAgent::send_keys_with_suffix(
+    let mut composite = String::new();
+    if !msg_text.is_empty() {
+        composite.push_str(&msg_text);
+        composite.push_str("\n\n");
+    }
+    composite.push_str("图片（请使用 Read 工具查看）：\n");
+    for p in &saved_paths {
+        composite.push_str(p);
+        composite.push('\n');
+    }
+
+    info!(
+        "tmux_send_image: prepared composite prompt in {}ms ({} images, text_len={})",
+        recv_at.elapsed().as_millis(),
+        saved_paths.len(),
+        msg_text.len()
+    );
+
+    // Send via paste-buffer (reliable for multi-line prompts, no ARG_MAX issues)
+    match agent::TmuxAgent::paste_text(
         &req.session,
         &req.window_id,
         &req.pane,
-        &msg_text,
+        &composite,
         Some("Enter"),
     )
     .await

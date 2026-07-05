@@ -657,6 +657,12 @@ pub(crate) async fn resume_workspace(Json(req): Json<ResumeWorkspaceRequest>) ->
     // Small delay to let tmux create the window
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
+    // Record stable worktree identity so the resume list can detect this window
+    // as already-open regardless of window name or where panes later cd to.
+    let target = format!("{}:{}", session_name, window_name);
+    let _ = agent::TmuxAgent::set_window_option(&target, "agent_dir", &worktree_path.to_string_lossy()).await;
+    let _ = agent::TmuxAgent::set_window_option(&target, "agent_name", &req.branch).await;
+
     // Determine layout — use --resume flag for Claude to continue previous conversation
     let layout_type = req.layout.as_deref().unwrap_or("default");
     let base_agent = req.agent.clone().unwrap_or_else(|| "claude --dangerously-skip-permissions".to_string());

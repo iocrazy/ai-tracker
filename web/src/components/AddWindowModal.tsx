@@ -9,6 +9,7 @@ interface AddWindowModalProps {
   sessionName: string;
   gitDir?: string;
   openWindows?: string[];  // List of currently open window names
+  openWindowDirs?: string[];  // Working/worktree dirs of currently open windows (stable identity)
   onClose: () => void;
   onConfirm: (type: WindowType, branchName: string, baseBranch?: string, agent?: string) => void;
   onResume?: (branchName: string, layout: LayoutType) => void;
@@ -57,6 +58,7 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
   sessionName,
   gitDir,
   openWindows = [],
+  openWindowDirs = [],
   onClose,
   onConfirm,
   onResume,
@@ -83,6 +85,17 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
   // Convert branch name to window name (replace : and / with -)
   const branchToWindowName = (branch: string) => branch.replace(/[:/]/g, '-');
 
+  // Normalize a path for identity comparison (strip trailing slashes)
+  const normalizePath = (p?: string) => (p || '').replace(/\/+$/, '');
+
+  // Set of working dirs already open in a tmux window — the reliable "already open"
+  // signal. Window names don't track branches (main repo shows as `master`, worktree
+  // windows keep custom names), so name matching alone misses already-open items.
+  const openDirSet = useMemo(
+    () => new Set(openWindowDirs.map(normalizePath).filter(Boolean)),
+    [openWindowDirs]
+  );
+
   // Build unified resume list
   const resumeItems = useMemo((): ResumeItem[] => {
     const items: ResumeItem[] = [];
@@ -92,7 +105,9 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
     for (const b of branches) {
       if (!b.has_worktree) continue;
       const windowName = branchToWindowName(b.name);
+      // Exclude if already open — by window name OR (reliably) by worktree path
       if (openWindows.includes(windowName)) continue;
+      if (b.worktree_path && openDirSet.has(normalizePath(b.worktree_path))) continue;
 
       worktreeWindowNames.add(windowName);
       const dirName = b.worktree_path ? pathBasename(b.worktree_path) : windowName;
@@ -105,9 +120,10 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
       });
     }
 
-    // 2. Closed windows (from DB, excluding those already covered by worktrees)
+    // 2. Closed windows (from DB, excluding those already covered by worktrees or open)
     for (const w of closedWindows) {
       if (worktreeWindowNames.has(w.window_name)) continue;
+      if (w.working_dir && openDirSet.has(normalizePath(w.working_dir))) continue;
       items.push({
         type: 'window',
         id: `cw:${w.id}`,
@@ -121,7 +137,7 @@ export const AddWindowModal: React.FC<AddWindowModalProps> = ({
     }
 
     return items;
-  }, [branches, closedWindows, openWindows]);
+  }, [branches, closedWindows, openWindows, openDirSet]);
 
   // Fetch branches, closed windows, and config when modal opens
   useEffect(() => {

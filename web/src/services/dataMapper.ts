@@ -74,6 +74,8 @@ export function mapTmuxToSessions(
         avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(win.session_name + '-' + win.window_id)}`,
         summary,
         pane: String(win.pane_count),
+        workingDir: win.working_dir,
+        agentDir: win.agent_dir,
       };
     });
 

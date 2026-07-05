@@ -1777,7 +1777,7 @@ impl TmuxAgent {
                 "list-windows",
                 "-a",
                 "-F",
-                "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{window_index}|#{window_panes}|#{window_active}|#{pane_current_path}",
+                "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{window_index}|#{window_panes}|#{window_active}|#{pane_current_path}|#{@agent_dir}",
             ])
             .output()
             .await
@@ -1798,8 +1798,9 @@ impl TmuxAgent {
         let windows: Vec<TmuxWindowInfo> = stdout
             .lines()
             .filter_map(|line| {
+                // agent_dir (parts[8]) may be absent on older tmux/format; accept >= 8
                 let parts: Vec<&str> = line.split('|').collect();
-                if parts.len() != 8 {
+                if parts.len() < 8 {
                     return None;
                 }
                 let session_id = parts[0].to_string();
@@ -1809,6 +1810,7 @@ impl TmuxAgent {
                     let p = parts[7].trim();
                     if p.is_empty() { None } else { Some(p.to_string()) }
                 };
+                let agent_dir = parts.get(8).map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string());
 
                 Some(TmuxWindowInfo {
                     session_id,
@@ -1820,6 +1822,7 @@ impl TmuxAgent {
                     active: parts[6] == "1",
                     git_dir: None, // Will be filled later
                     working_dir,
+                    agent_dir,
                 })
             })
             .collect();
@@ -1985,7 +1988,7 @@ impl TmuxAgent {
                 "list-windows",
                 "-a",
                 "-F",
-                "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{window_index}|#{window_panes}|#{window_active}|#{pane_current_path}",
+                "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{window_index}|#{window_panes}|#{window_active}|#{pane_current_path}|#{@agent_dir}",
             ])
             .output();
 
@@ -2015,8 +2018,9 @@ impl TmuxAgent {
                 let windows: Vec<TmuxWindowInfo> = stdout
                     .lines()
                     .filter_map(|line| {
+                        // agent_dir (parts[8]) may be absent; accept >= 8 fields
                         let parts: Vec<&str> = line.split('|').collect();
-                        if parts.len() != 8 {
+                        if parts.len() < 8 {
                             tracing::warn!("Skipping invalid line: {}", line);
                             return None;
                         }
@@ -2027,6 +2031,7 @@ impl TmuxAgent {
                             let p = parts[7].trim();
                             if p.is_empty() { None } else { Some(p.to_string()) }
                         };
+                        let agent_dir = parts.get(8).map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string());
 
                         Some(TmuxWindowInfo {
                             session_id,
@@ -2038,6 +2043,7 @@ impl TmuxAgent {
                             active: parts[6] == "1",
                             git_dir: None,
                             working_dir,
+                            agent_dir,
                         })
                     })
                     .collect();
@@ -2526,6 +2532,11 @@ pub struct TmuxWindowInfo {
     /// Working directory of the first pane (from #{pane_current_path})
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Stable worktree/working path recorded at window creation (@agent_dir option).
+    /// Unlike working_dir (volatile active-pane cwd), this is fixed identity used
+    /// to detect whether a resumable worktree is already open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_dir: Option<String>,
 }
 
 /// Information about a tmux pane

@@ -31,6 +31,8 @@ export interface AgentWindow {
     avatar: string;
     claudeStatus?: ClaudeStatus;
     claudePane?: string;  // Pane number where Claude runs (default: "1")
+    workingDir?: string;  // Active pane's current path (volatile)
+    agentDir?: string;    // Stable worktree/working path recorded at creation
 }
 
 export interface AgentSession {

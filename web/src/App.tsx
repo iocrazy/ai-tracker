@@ -1100,16 +1100,20 @@ const App: React.FC = () => {
             />
 
             {/* Add Window Modal */}
-            {addWindowModal && (
-              <AddWindowModal
-                sessionName={addWindowModal.sessionName}
-                gitDir={addWindowModal.gitDir}
-                openWindows={sessions.find(s => s.id === addWindowModal.sessionId)?.windows.map(w => w.name) || []}
-                onClose={() => setAddWindowModal(null)}
-                onConfirm={handleConfirmAddWindow}
-                onResume={handleResumeWindow}
-              />
-            )}
+            {addWindowModal && (() => {
+              const modalWindows = sessions.find(s => s.id === addWindowModal.sessionId)?.windows || [];
+              return (
+                <AddWindowModal
+                  sessionName={addWindowModal.sessionName}
+                  gitDir={addWindowModal.gitDir}
+                  openWindows={modalWindows.map(w => w.name)}
+                  openWindowDirs={modalWindows.flatMap(w => [w.agentDir, w.workingDir].filter((d): d is string => !!d))}
+                  onClose={() => setAddWindowModal(null)}
+                  onConfirm={handleConfirmAddWindow}
+                  onResume={handleResumeWindow}
+                />
+              );
+            })()}
 
             {/* Close Window Modal */}
             {closeWindowModal && (

@@ -544,6 +544,13 @@ pub(crate) async fn resume_closed_window(
         });
     }
 
+    // Record stable working-dir identity so the resume list detects this window
+    // as already-open regardless of window name or later pane cd.
+    if !req.working_dir.is_empty() {
+        let target = format!("{}:{}", req.session, req.window_name);
+        let _ = agent::TmuxAgent::set_window_option(&target, "agent_dir", &req.working_dir).await;
+    }
+
     // Apply layout if requested and working_dir exists
     let layout_type = req.layout.as_deref().unwrap_or("simple");
     if layout_type != "simple" && !req.working_dir.is_empty() {

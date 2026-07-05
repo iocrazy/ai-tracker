@@ -12,6 +12,8 @@ export interface TmuxWindowInfo {
   pane_count: number;
   active: boolean;
   git_dir?: string;  // Git directory for the session
+  working_dir?: string;  // Active pane's current path (volatile)
+  agent_dir?: string;    // Stable worktree/working path recorded at creation (@agent_dir)
 }
 
 // Fetch all tmux windows with full details

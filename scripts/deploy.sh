@@ -177,9 +177,9 @@ install_tauri() {
     npm run tauri build 2>&1 | tail -2
     cd "$PROJECT_DIR"
 
-    # Kill existing app
-    pkill -f agent-tracker-menubar 2>/dev/null || true
-    sleep 2
+    # Kill existing app + orphaned sidecar before overwriting the bundle
+    kill_tracker_stack
+    sleep 1
 
     # Install new app
     rm -rf "$TAURI_APP"
@@ -206,13 +206,40 @@ install_tauri() {
     echo -e "${GREEN}  ✓ Tauri 安装完成${NC}"
 }
 
+# Kill the menubar app AND its sidecar, then wait until port 3099 is actually free.
+# The sidecar (tracker-server) is frequently orphaned (PPID 1) when the menubar
+# crashes or is force-killed; pkill on the menubar alone leaves it holding 3099,
+# and the app's start_sidecar then "reuses" the stale process — so a freshly
+# built binary silently never runs. Free the port for real before starting.
+kill_tracker_stack() {
+    pkill -f "agent-tracker-menubar" 2>/dev/null || true
+    pkill -f "MacOS/tracker-server" 2>/dev/null || true
+
+    # Wait up to 10s for port 3099 to be released
+    for _ in $(seq 1 20); do
+        if ! lsof -nP -iTCP:3099 -sTCP:LISTEN >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    # Still held — force-kill whatever owns the port (orphaned sidecar)
+    local pids
+    pids=$(lsof -nP -tiTCP:3099 -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo -e "${YELLOW}  ⚠️  3099 仍被占用 (PID: $pids)，强制结束${NC}"
+        kill -9 $pids 2>/dev/null || true
+        sleep 1
+    fi
+}
+
 # 重启 Tauri app
 restart_tauri() {
     echo -e "${YELLOW}[5/5] 重启 Tauri app...${NC}"
 
-    # Kill existing
-    pkill -f "agent-tracker-menubar" 2>/dev/null || true
-    sleep 1
+    # Kill existing app + orphaned sidecar, ensure 3099 is free so the new
+    # binary actually starts (instead of the app reusing a stale sidecar)
+    kill_tracker_stack
 
     # Reopen
     open -a "AgentTracker"

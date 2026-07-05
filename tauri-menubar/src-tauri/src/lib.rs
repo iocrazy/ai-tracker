@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -16,6 +16,8 @@ use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
 /// Global cloudflared PID for signal handler cleanup.
 static CLOUDFLARED_PID: AtomicU32 = AtomicU32::new(0);
+/// Stops the cloudflared supervisor loop on app shutdown.
+static CLOUDFLARED_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn signal_cleanup(_sig: libc::c_int) {
     let pid = SIDECAR_PID.swap(0, Ordering::Relaxed);
@@ -55,48 +57,88 @@ struct CloudflaredState {
     child: Mutex<Option<std::process::Child>>,
 }
 
-/// Start cloudflared tunnel if not already running.
+/// Append handle to the cloudflared log (output was /dev/null before, which
+/// made tunnel deaths undiagnosable).
+fn cloudflared_log_file() -> Option<std::fs::File> {
+    let home = std::env::var("HOME").ok()?;
+    let dir = std::path::PathBuf::from(home)
+        .join("Library/Application Support/com.agent-tracker.menubar/logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("cloudflared.log"))
+        .ok()
+}
+
+/// How often the supervisor checks that the tunnel is alive.
+const CLOUDFLARED_CHECK_SECS: u64 = 30;
+
+/// Supervise the cloudflared tunnel: spawn when missing, respawn if it dies.
 /// Reads tunnel ID from ~/.cloudflared/config.yml.
+///
+/// Replaces the previous one-shot spawn, which had two failure modes that left
+/// the tunnel down until the next app restart: the startup pgrep could match a
+/// dying instance from the previous app process (spawn skipped, tunnel gone),
+/// and a tunnel crash was never restarted.
 fn start_cloudflared(app: &tauri::AppHandle) {
-    // Check if cloudflared is already running
-    let output = std::process::Command::new("pgrep")
-        .args(["-f", "cloudflared tunnel run"])
-        .output();
-    if let Ok(out) = &output {
-        if out.status.success() {
-            eprintln!("cloudflared tunnel already running, skipping");
-            app.manage(CloudflaredState { child: Mutex::new(None) });
-            return;
-        }
-    }
+    app.manage(CloudflaredState { child: Mutex::new(None) });
 
     let cloudflared_path = "/opt/homebrew/bin/cloudflared";
     if !std::path::Path::new(cloudflared_path).exists() {
         eprintln!("cloudflared not found at {cloudflared_path}, skipping tunnel");
-        app.manage(CloudflaredState { child: Mutex::new(None) });
         return;
     }
 
-    match std::process::Command::new(cloudflared_path)
-        .args(["tunnel", "run"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => {
-            eprintln!("cloudflared tunnel started (pid {})", child.id());
-            CLOUDFLARED_PID.store(child.id(), Ordering::Relaxed);
-            app.manage(CloudflaredState { child: Mutex::new(Some(child)) });
+    let app_handle = app.clone();
+    std::thread::spawn(move || loop {
+        if CLOUDFLARED_SHUTDOWN.load(Ordering::Relaxed) {
+            break;
         }
-        Err(e) => {
-            eprintln!("Failed to start cloudflared: {e}");
-            app.manage(CloudflaredState { child: Mutex::new(None) });
+
+        // Covers both our own child and an externally managed instance
+        let running = std::process::Command::new("pgrep")
+            .args(["-f", "cloudflared tunnel run"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !running {
+            let (stdout, stderr): (std::process::Stdio, std::process::Stdio) =
+                match (cloudflared_log_file(), cloudflared_log_file()) {
+                    (Some(o), Some(e)) => (o.into(), e.into()),
+                    _ => (std::process::Stdio::null(), std::process::Stdio::null()),
+                };
+            match std::process::Command::new(cloudflared_path)
+                .args(["tunnel", "run"])
+                .stdout(stdout)
+                .stderr(stderr)
+                .spawn()
+            {
+                Ok(child) => {
+                    eprintln!("cloudflared tunnel started (pid {})", child.id());
+                    CLOUDFLARED_PID.store(child.id(), Ordering::Relaxed);
+                    if let Some(state) = app_handle.try_state::<CloudflaredState>() {
+                        if let Ok(mut guard) = state.child.lock() {
+                            // Reap the previous dead child before replacing it
+                            if let Some(mut old) = guard.take() {
+                                let _ = old.wait();
+                            }
+                            *guard = Some(child);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Failed to start cloudflared: {e}"),
+            }
         }
-    }
+
+        std::thread::sleep(std::time::Duration::from_secs(CLOUDFLARED_CHECK_SECS));
+    });
 }
 
 /// Kill the cloudflared tunnel process if we spawned one.
 fn stop_cloudflared(app: &tauri::AppHandle) {
+    CLOUDFLARED_SHUTDOWN.store(true, Ordering::Relaxed);
     CLOUDFLARED_PID.store(0, Ordering::Relaxed);
     if let Some(state) = app.try_state::<CloudflaredState>() {
         if let Ok(mut guard) = state.child.lock() {

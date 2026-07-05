@@ -59,6 +59,7 @@ esac
 if [ -n "$EP" ]; then
   curl -sf -X POST "$URL$EP" \
     "${AUTH[@]}" \
+    -H "X-Tmux-Pane: ${TMUX_PANE:-}" \
     -d "$INPUT" \
     --max-time 3 >/dev/null 2>&1 &
 fi

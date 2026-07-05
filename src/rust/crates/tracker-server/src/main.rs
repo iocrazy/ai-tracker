@@ -24,6 +24,7 @@ mod routes_projects;
 mod routes_tmux;
 mod routes_openai;
 mod routes_workspace;
+mod pane_registry;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -256,6 +257,8 @@ pub(crate) struct AppState {
     git_dir_cache: Mutex<HashMap<String, Option<String>>>,
     /// Per-pane locks for OpenAI proxy (prevents concurrent requests to same pane)
     pane_locks: routes_openai::PaneLocks,
+    /// Pane → Claude session bindings from hook X-Tmux-Pane attribution
+    pane_registry: pane_registry::PaneRegistry,
 }
 
 impl AppState {
@@ -290,6 +293,7 @@ impl AppState {
             hook_broadcast_tx: broadcast::channel(64).0,
             git_dir_cache: Mutex::new(HashMap::new()),
             pane_locks: routes_openai::new_pane_locks(),
+            pane_registry: pane_registry::PaneRegistry::new(),
         })
     }
 
@@ -3305,6 +3309,32 @@ async fn main() -> Result<()> {
             init_state.broadcast_if_tmux_changed(windows);
             info!("Pre-populated tmux windows cache");
         }
+    }
+
+    // Restore persisted pane → Claude session bindings (validated against live tmux),
+    // so transcript/message attribution is exact immediately after restart
+    {
+        let restore_state = app_state.clone();
+        tokio::spawn(async move {
+            let rows = {
+                let server = restore_state.state.lock().unwrap();
+                server.db.load_pane_bindings().unwrap_or_default()
+            };
+            if rows.is_empty() {
+                return;
+            }
+            let total = rows.len();
+            let (restored, dead) = restore_state.pane_registry.restore(rows).await;
+            if !dead.is_empty() {
+                let server = restore_state.state.lock().unwrap();
+                for pane_id in &dead {
+                    if let Err(e) = server.db.delete_pane_binding(pane_id) {
+                        tracing::warn!(pane = %pane_id, error = %e, "pane binding cleanup failed");
+                    }
+                }
+            }
+            info!(restored, dropped = dead.len(), total, "Restored pane bindings from database");
+        });
     }
 
     // Start background task for tmux monitoring (real-time updates)

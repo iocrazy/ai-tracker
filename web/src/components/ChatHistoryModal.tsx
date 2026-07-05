@@ -56,6 +56,8 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
   const menuHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const menuNavigating = useRef(false);
   const prevWindowIdRef = useRef<string | undefined>(undefined);
+  // Dynamically resolved Claude pane — updated on open + periodically
+  const resolvedPaneRef = useRef<string>(claudePane || DEFAULT_CLAUDE_PANE);
 
   // Save draft on every input change
   useEffect(() => {
@@ -70,9 +72,12 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
       setInputValue(draftsRef?.current?.get(windowId) || '');
       setSendStatus('idle');
       setSentInteractions(new Set());
+      // Reset pane target immediately: %pane IDs are global across tmux, so a
+      // stale ref from the previous window would send keys into the wrong pane
+      resolvedPaneRef.current = claudePane || DEFAULT_CLAUDE_PANE;
     }
     prevWindowIdRef.current = windowId;
-  }, [windowId, draftsRef]);
+  }, [windowId, draftsRef, claudePane]);
 
   // Clear interaction state on modal open; revoke image URLs on close
   useEffect(() => {
@@ -87,9 +92,6 @@ export const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ isOpen, onCl
       });
     }
   }, [isOpen]);
-
-  // Dynamically resolved Claude pane — updated on open + periodically
-  const resolvedPaneRef = useRef<string>(claudePane || DEFAULT_CLAUDE_PANE);
 
   // Resolve Claude pane from API
   const resolveClaudePane = useCallback(async (): Promise<string> => {

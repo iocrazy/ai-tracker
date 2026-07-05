@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, response::Json};
+use axum::{extract::State, http::HeaderMap, response::Json};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -101,11 +101,43 @@ pub(crate) enum HookEvent {
 // Validation & resolution
 // ============================================================================
 
+/// Parse a hook request body, logging deserialization failures.
+/// Claude Code hook payload fields drift across versions; a silent 422 hides
+/// that for months (PostToolUse ingest was broken unnoticed since 2026-04).
+fn parse_hook_body<T: serde::de::DeserializeOwned>(
+    endpoint: &str,
+    body: &axum::body::Bytes,
+) -> Result<T, Json<HookResponse>> {
+    serde_json::from_slice::<T>(body).map_err(|e| {
+        let sample: String = String::from_utf8_lossy(body).chars().take(300).collect();
+        warn!(endpoint, error = %e, body_sample = %sample, "hook: body deserialization failed");
+        Json(HookResponse::err(format!("invalid body: {}", e)))
+    })
+}
+
+/// Extract the tmux pane ID forwarded by agent-hook.sh ($TMUX_PANE)
+fn extract_tmux_pane(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-tmux-pane")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|p| p.starts_with('%'))
+        .map(str::to_string)
+}
+
 /// Resolve cwd to git_dir (cached), check workspace is registered.
 /// Returns None (with skipped response) if workspace is not tracked.
+///
+/// Attribution priority:
+/// 1. Exact: pane binding from the X-Tmux-Pane header (disambiguates multiple
+///    Claude instances in the same directory)
+/// 2. Fallback: first task whose window resolves to the same git_dir (legacy,
+///    ambiguous when several windows share a directory)
 async fn validate_and_resolve(
     state: &Arc<AppState>,
     ctx: &HookContext,
+    pane: Option<&str>,
+    transcript_path: Option<&str>,
 ) -> Result<ResolvedContext, HookResponse> {
     if ctx.session_id.is_empty() {
         return Err(HookResponse::err("missing session_id"));
@@ -130,8 +162,27 @@ async fn validate_and_resolve(
         return Err(HookResponse::skipped());
     }
 
-    // Resolve tmux context from tasks
-    let (session_name, window_id) = resolve_tmux_context(state, &git_dir);
+    // Exact attribution via pane binding; git_dir task-matching as fallback
+    let pane_binding = match pane {
+        Some(p) => state.pane_registry.update(p, &ctx.session_id, transcript_path).await,
+        None => None,
+    };
+    let (session_name, window_id) = match pane_binding {
+        Some((b, changed)) => {
+            if changed {
+                let row = crate::pane_registry::PaneRegistry::to_row(&b);
+                let state_for_db = state.clone();
+                tokio::task::spawn_blocking(move || {
+                    let server = state_for_db.state.lock().unwrap();
+                    if let Err(e) = server.db.upsert_pane_binding(&row) {
+                        warn!(pane = %row.pane_id, error = %e, "hook: pane binding persist failed");
+                    }
+                });
+            }
+            (b.session_name, b.window_id)
+        }
+        None => resolve_tmux_context(state, &git_dir),
+    };
 
     Ok(ResolvedContext {
         claude_session_id: ctx.session_id.clone(),
@@ -247,14 +298,29 @@ pub(crate) struct HookMessageRequest {
     /// Agent type (e.g. "subagent" for SubagentStop)
     #[serde(default)]
     agent_type: Option<String>,
+    /// Path to the Claude Code transcript JSONL (present in hook input)
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 pub(crate) async fn hook_message(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<HookMessageRequest>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Json<HookResponse> {
+    let req: HookMessageRequest = match parse_hook_body("message", &body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    // Subagent completion events fire inside the main session's pane —
+    // never let them (re)bind the pane (herdr integration lesson)
+    let pane = if req.event_type == "SubagentStop" {
+        None
+    } else {
+        extract_tmux_pane(&headers)
+    };
     let ctx = HookContext { session_id: req.session_id, cwd: req.cwd };
-    let resolved = match validate_and_resolve(&state, &ctx).await {
+    let resolved = match validate_and_resolve(&state, &ctx, pane.as_deref(), req.transcript_path.as_deref()).await {
         Ok(r) => r,
         Err(resp) => return Json(resp),
     };
@@ -296,6 +362,16 @@ pub(crate) async fn hook_message(
     };
     let _ = state.hook_broadcast_tx.send(event);
 
+    info!(
+        event = "hook.message",
+        role = %role,
+        session = %resolved.session_name,
+        window = %resolved.window_id,
+        pane = pane.as_deref().unwrap_or("-"),
+        outcome = "ok",
+        "hook message ingested"
+    );
+
     // Persist to DB asynchronously (don't block the response)
     let state_for_db = state.clone();
     let resolved_for_db = resolved;
@@ -335,16 +411,26 @@ pub(crate) struct HookToolRequest {
     tool_use_id: Option<String>,
     #[serde(default)]
     tool_input: Option<serde_json::Value>,
+    /// String in older Claude Code versions, structured object in newer ones
     #[serde(default)]
-    tool_response: Option<String>,
+    tool_response: Option<serde_json::Value>,
+    /// Path to the Claude Code transcript JSONL (present in hook input)
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 pub(crate) async fn hook_tool(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<HookToolRequest>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Json<HookResponse> {
+    let req: HookToolRequest = match parse_hook_body("tool", &body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let pane = extract_tmux_pane(&headers);
     let ctx = HookContext { session_id: req.session_id, cwd: req.cwd };
-    let resolved = match validate_and_resolve(&state, &ctx).await {
+    let resolved = match validate_and_resolve(&state, &ctx, pane.as_deref(), req.transcript_path.as_deref()).await {
         Ok(r) => r,
         Err(resp) => return Json(resp),
     };
@@ -353,7 +439,11 @@ pub(crate) async fn hook_tool(
     let tool_args = req.tool_input
         .map(|v| serde_json::to_string(&v).unwrap_or_default())
         .unwrap_or_default();
-    let result_summary = req.tool_response.map(|s| {
+    let result_summary = req.tool_response.map(|v| {
+        let s = match v {
+            serde_json::Value::String(s) => s,
+            other => serde_json::to_string(&other).unwrap_or_default(),
+        };
         let truncated: String = s.chars().take(500).collect();
         if truncated.len() < s.len() { format!("{}...", truncated) } else { s }
     }).unwrap_or_default();
@@ -368,6 +458,16 @@ pub(crate) async fn hook_tool(
         timestamp: now,
     };
     let _ = state.hook_broadcast_tx.send(event);
+
+    debug!(
+        event = "hook.tool",
+        tool = %req.tool_name,
+        session = %resolved.session_name,
+        window = %resolved.window_id,
+        pane = pane.as_deref().unwrap_or("-"),
+        outcome = "ok",
+        "hook tool ingested"
+    );
 
     // Persist to DB asynchronously
     let state_for_db = state.clone();
@@ -411,14 +511,23 @@ pub(crate) struct HookSessionRequest {
     /// Reason for session end (e.g., "user_exit", "error")
     #[serde(default)]
     reason: Option<String>,
+    /// Path to the Claude Code transcript JSONL (present in hook input)
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 pub(crate) async fn hook_session(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<HookSessionRequest>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Json<HookResponse> {
+    let req: HookSessionRequest = match parse_hook_body("session", &body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let pane = extract_tmux_pane(&headers);
     let ctx = HookContext { session_id: req.session_id, cwd: req.cwd };
-    let resolved = match validate_and_resolve(&state, &ctx).await {
+    let resolved = match validate_and_resolve(&state, &ctx, pane.as_deref(), req.transcript_path.as_deref()).await {
         Ok(r) => r,
         Err(resp) => return Json(resp),
     };

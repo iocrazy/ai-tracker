@@ -4,15 +4,17 @@
 //! (no `State<Arc<AppState>>`), using `get_db_path()` to open their own
 //! DB connections.
 
+use std::sync::Arc;
+
 use axum::{
-    extract::{Path as AxumPath, Query},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
-use crate::{agent, db, transcript};
+use crate::{agent, db, transcript, AppState};
 
 // ============================================================================
 // Structs — History
@@ -1715,9 +1717,55 @@ fn parse_claude_messages(session_file: &std::path::Path, _count: usize) -> Vec<C
     all_messages
 }
 
+/// Parse a transcript file and build the response (shared tail of get_claude_messages)
+async fn claude_messages_from_file(session_file: std::path::PathBuf, count: usize) -> Json<ClaudeMessagesResponse> {
+    // Parse the JSONL file from the tail for performance (files can be 100MB+)
+    // Use spawn_blocking to avoid blocking the tokio runtime
+    let session_file_clone = session_file.clone();
+    let messages = tokio::task::spawn_blocking(move || {
+        parse_claude_messages(&session_file_clone, count)
+    }).await.unwrap_or_default();
+
+    // Return the last `count` messages (mixed user + assistant)
+    let start = messages.len().saturating_sub(count);
+    let messages = messages[start..].to_vec();
+
+    Json(ClaudeMessagesResponse {
+        success: true,
+        messages,
+        session_file: session_file.to_string_lossy().to_string(),
+    })
+}
+
+/// Exact transcript lookup via the pane registry (hook X-Tmux-Pane attribution).
+/// Disambiguates multiple Claude instances running in the same directory.
+fn find_bound_transcript(state: &Arc<AppState>, params: &ClaudeMessagesParams) -> Option<std::path::PathBuf> {
+    let binding = params
+        .pane
+        .as_ref()
+        .and_then(|p| state.pane_registry.find_by_pane(p))
+        .or_else(|| {
+            let (session, window) = (params.session.as_ref()?, params.window.as_ref()?);
+            state.pane_registry.find_by_window(session, window)
+        })?;
+    let path = std::path::PathBuf::from(binding.transcript_path?);
+    path.exists().then_some(path)
+}
+
 /// Get recent user messages from Claude Code session
-pub(crate) async fn get_claude_messages(Query(params): Query<ClaudeMessagesParams>) -> Json<ClaudeMessagesResponse> {
+pub(crate) async fn get_claude_messages(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ClaudeMessagesParams>,
+) -> Json<ClaudeMessagesResponse> {
     let count = params.count.or(params.limit).unwrap_or(1);
+
+    // Exact resolution first: transcript path reported by the pane's own hooks.
+    // Falls through to the directory heuristic when no binding exists yet
+    // (e.g. server restarted and no hook has fired for that pane).
+    if let Some(path) = find_bound_transcript(&state, &params) {
+        debug!("Claude messages: using pane-bound transcript {:?}", path.file_name());
+        return claude_messages_from_file(path, count).await;
+    }
 
     // Determine project filter: either from explicit project param or from tmux pane's working directory
     // Two-tier: exact path filters first, parent path filters only as fallback
@@ -1915,20 +1963,5 @@ pub(crate) async fn get_claude_messages(Query(params): Query<ClaudeMessagesParam
         }
     };
 
-    // Parse the JSONL file from the tail for performance (files can be 100MB+)
-    // Use spawn_blocking to avoid blocking the tokio runtime
-    let session_file_clone = session_file.clone();
-    let messages = tokio::task::spawn_blocking(move || {
-        parse_claude_messages(&session_file_clone, count)
-    }).await.unwrap_or_default();
-
-    // Return the last `count` messages (mixed user + assistant)
-    let start = messages.len().saturating_sub(count);
-    let messages = messages[start..].to_vec();
-
-    Json(ClaudeMessagesResponse {
-        success: true,
-        messages,
-        session_file: session_file.to_string_lossy().to_string(),
-    })
+    claude_messages_from_file(session_file, count).await
 }

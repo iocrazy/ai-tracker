@@ -577,6 +577,16 @@ impl Database {
                 window_name TEXT NOT NULL,
                 created_at TEXT DEFAULT (datetime('now'))
             )"),
+            // Pane → Claude session bindings (persisted pane_registry, survives restarts)
+            (115, "CREATE TABLE IF NOT EXISTS pane_bindings (
+                pane_id TEXT PRIMARY KEY,
+                session_name TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                window_name TEXT NOT NULL DEFAULT '',
+                claude_session_id TEXT NOT NULL,
+                transcript_path TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )"),
         ];
 
         for (version, sql) in migrations {
@@ -3318,6 +3328,48 @@ impl Database {
         Ok(count > 0)
     }
 
+    // ========================================================================
+    // Pane bindings (persisted pane_registry)
+    // ========================================================================
+
+    pub fn upsert_pane_binding(&self, b: &PaneBindingRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO pane_bindings (pane_id, session_name, window_id, window_name, claude_session_id, transcript_path, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+             ON CONFLICT(pane_id) DO UPDATE SET
+                session_name = excluded.session_name,
+                window_id = excluded.window_id,
+                window_name = excluded.window_name,
+                claude_session_id = excluded.claude_session_id,
+                transcript_path = excluded.transcript_path,
+                updated_at = excluded.updated_at",
+            params![b.pane_id, b.session_name, b.window_id, b.window_name, b.claude_session_id, b.transcript_path],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_pane_bindings(&self) -> Result<Vec<PaneBindingRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pane_id, session_name, window_id, window_name, claude_session_id, transcript_path FROM pane_bindings"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PaneBindingRow {
+                pane_id: row.get(0)?,
+                session_name: row.get(1)?,
+                window_id: row.get(2)?,
+                window_name: row.get(3)?,
+                claude_session_id: row.get(4)?,
+                transcript_path: row.get(5)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn delete_pane_binding(&self, pane_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM pane_bindings WHERE pane_id = ?1", params![pane_id])?;
+        Ok(())
+    }
+
     pub fn find_channel_by_key(&self, api_key: &str) -> Option<Channel> {
         self.conn.query_row(
             "SELECT id, name, api_key, session_name, window_name, created_at FROM channels WHERE api_key = ?1",
@@ -3332,6 +3384,17 @@ impl Database {
             }),
         ).ok()
     }
+}
+
+/// Persisted form of a pane → Claude session binding
+#[derive(Debug, Clone)]
+pub struct PaneBindingRow {
+    pub pane_id: String,
+    pub session_name: String,
+    pub window_id: String,
+    pub window_name: String,
+    pub claude_session_id: String,
+    pub transcript_path: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -3541,4 +3604,41 @@ pub fn default_db_path() -> std::path::PathBuf {
     crate::paths::TrackerPaths::legacy_config_dir()
         .join("data")
         .join("tracker.db")
+}
+
+#[cfg(test)]
+mod pane_binding_tests {
+    use super::*;
+
+    fn temp_db() -> Database {
+        let path = std::env::temp_dir().join(format!("tracker-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Database::open(&path).expect("open temp db")
+    }
+
+    #[test]
+    fn pane_binding_roundtrip() {
+        let db = temp_db();
+        let row = PaneBindingRow {
+            pane_id: "%15".to_string(),
+            session_name: "3-ai-tracker".to_string(),
+            window_id: "@6".to_string(),
+            window_name: "main".to_string(),
+            claude_session_id: "abc-123".to_string(),
+            transcript_path: Some("/tmp/abc-123.jsonl".to_string()),
+        };
+        db.upsert_pane_binding(&row).unwrap();
+
+        // Upsert overwrites on same pane_id (new session in same pane)
+        let row2 = PaneBindingRow { claude_session_id: "def-456".to_string(), ..row.clone() };
+        db.upsert_pane_binding(&row2).unwrap();
+
+        let loaded = db.load_pane_bindings().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].claude_session_id, "def-456");
+        assert_eq!(loaded[0].transcript_path.as_deref(), Some("/tmp/abc-123.jsonl"));
+
+        db.delete_pane_binding("%15").unwrap();
+        assert!(db.load_pane_bindings().unwrap().is_empty());
+    }
 }

@@ -57,6 +57,9 @@ struct ResolvedContext {
     git_dir: String,
     session_name: String,
     window_id: String,
+    /// True when attribution came from the pane binding (exact); false for the
+    /// git_dir fallback. Only exact attribution may correct a stored history row.
+    exact: bool,
 }
 
 // ============================================================================
@@ -167,7 +170,7 @@ async fn validate_and_resolve(
         Some(p) => state.pane_registry.update(p, &ctx.session_id, transcript_path).await,
         None => None,
     };
-    let (session_name, window_id) = match pane_binding {
+    let (session_name, window_id, exact) = match pane_binding {
         Some((b, changed)) => {
             if changed {
                 let row = crate::pane_registry::PaneRegistry::to_row(&b);
@@ -179,9 +182,12 @@ async fn validate_and_resolve(
                     }
                 });
             }
-            (b.session_name, b.window_id)
+            (b.session_name, b.window_id, true)
         }
-        None => resolve_tmux_context(state, &git_dir),
+        None => {
+            let (s, w) = resolve_tmux_context(state, &git_dir);
+            (s, w, false)
+        }
     };
 
     Ok(ResolvedContext {
@@ -189,6 +195,7 @@ async fn validate_and_resolve(
         git_dir,
         session_name,
         window_id,
+        exact,
     })
 }
 
@@ -379,11 +386,12 @@ pub(crate) async fn hook_message(
     let content_for_db = content;
     tokio::task::spawn_blocking(move || {
         let server = state_for_db.state.lock().unwrap();
-        let history_id = server.db.find_or_create_hook_history(
+        let history_id = server.db.find_or_create_hook_history_with_attribution(
             &resolved_for_db.claude_session_id,
             &resolved_for_db.session_name,
             &resolved_for_db.window_id,
             &resolved_for_db.git_dir,
+            resolved_for_db.exact,
         );
         match history_id {
             Ok(id) => {
@@ -475,11 +483,12 @@ pub(crate) async fn hook_tool(
     let tool_name = req.tool_name;
     tokio::task::spawn_blocking(move || {
         let server = state_for_db.state.lock().unwrap();
-        let history_id = server.db.find_or_create_hook_history(
+        let history_id = server.db.find_or_create_hook_history_with_attribution(
             &resolved_for_db.claude_session_id,
             &resolved_for_db.session_name,
             &resolved_for_db.window_id,
             &resolved_for_db.git_dir,
+            resolved_for_db.exact,
         );
         match history_id {
             Ok(id) => {
@@ -537,11 +546,12 @@ pub(crate) async fn hook_session(
             // Create history entry
             let result = {
                 let server = state.state.lock().unwrap();
-                server.db.find_or_create_hook_history(
+                server.db.find_or_create_hook_history_with_attribution(
                     &resolved.claude_session_id,
                     &resolved.session_name,
                     &resolved.window_id,
                     &resolved.git_dir,
+                    resolved.exact,
                 )
             };
             if let Err(e) = result {

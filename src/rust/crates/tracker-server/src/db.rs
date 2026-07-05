@@ -3202,6 +3202,22 @@ impl Database {
         window_id: &str,
         git_dir: &str,
     ) -> Result<i64> {
+        self.find_or_create_hook_history_with_attribution(claude_session_id, session_name, window_id, git_dir, false)
+    }
+
+    /// Like find_or_create_hook_history, but when `exact_attribution` is true
+    /// (pane-binding resolution) an existing row's session/window is corrected
+    /// if it differs — rows created under the old git_dir guess (or the
+    /// "basename:hook" fallback) heal on the next exact event. Fallback
+    /// attribution never overwrites a stored value.
+    pub fn find_or_create_hook_history_with_attribution(
+        &self,
+        claude_session_id: &str,
+        session_name: &str,
+        window_id: &str,
+        git_dir: &str,
+        exact_attribution: bool,
+    ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         // Attempt insert (ignored if claude_session_id already exists via unique index)
         self.conn.execute(
@@ -3219,6 +3235,13 @@ impl Database {
             params![claude_session_id],
             |row| row.get(0),
         )?;
+        if exact_attribution {
+            self.conn.execute(
+                "UPDATE history SET session_id = ?1, session = ?1, window_id = ?2, window = ?2
+                 WHERE id = ?3 AND (session_id != ?1 OR window_id != ?2)",
+                params![session_name, window_id, id],
+            )?;
+        }
         Ok(id)
     }
 
@@ -3611,7 +3634,13 @@ mod pane_binding_tests {
     use super::*;
 
     fn temp_db() -> Database {
-        let path = std::env::temp_dir().join(format!("tracker-test-{}.db", std::process::id()));
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "tracker-test-{}-{}.db",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_file(&path);
         Database::open(&path).expect("open temp db")
     }
@@ -3640,5 +3669,36 @@ mod pane_binding_tests {
 
         db.delete_pane_binding("%15").unwrap();
         assert!(db.load_pane_bindings().unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_attribution_heals_stale_history_rows() {
+        let db = temp_db();
+        let csid = "heal-test-session";
+
+        // Row created under the old fallback attribution
+        let id = db
+            .find_or_create_hook_history(csid, "ai-tracker", "hook", "/repo")
+            .unwrap();
+
+        let attribution = |db: &Database| -> (String, String) {
+            db.conn.query_row(
+                "SELECT session_id, window_id FROM history WHERE claude_session_id = ?1",
+                params![csid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap()
+        };
+        assert_eq!(attribution(&db), ("ai-tracker".to_string(), "hook".to_string()));
+
+        // Exact attribution corrects the stored row (same id, no new row)
+        let id2 = db
+            .find_or_create_hook_history_with_attribution(csid, "3-ai-tracker", "@6", "/repo", true)
+            .unwrap();
+        assert_eq!(id, id2);
+        assert_eq!(attribution(&db), ("3-ai-tracker".to_string(), "@6".to_string()));
+
+        // A later fallback event must NOT regress the exact attribution
+        db.find_or_create_hook_history(csid, "ai-tracker", "hook", "/repo").unwrap();
+        assert_eq!(attribution(&db), ("3-ai-tracker".to_string(), "@6".to_string()));
     }
 }
